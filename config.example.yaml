@@ -1,0 +1,107 @@
+# oh-my-api 示例配置
+# 用法：复制为 config.yaml 后，替换下面的占位值（尤其是 API Key）
+
+server:
+  # API 服务监听地址
+  listen: ":18000"
+
+  # 可选：Prometheus 指标端口，留空表示关闭
+  metrics_listen: "127.0.0.1:9090"
+
+  # 日志级别：debug / info / warn / error
+  log_level: "info"
+
+  # 可选：全局请求超时（例如 120s）
+  # timeout: "120s"
+
+  # 可选：流式请求超时（例如 10m）
+  # stream_timeout: "10m"
+
+  # Provider 健康检查配置（供调度器在请求失败后判定可用性）
+  health_check:
+    failure_threshold: 3
+    cooldown: "30s"
+
+database:
+  # 可选。SQLite 文件路径（用于统计）
+  path: "./data/oh-my-api.db"
+
+inbound:
+  auth:
+    # 网关入口密钥（支持 Authorization: Bearer / x-api-key / ?api_key=）
+    keys:
+      - name: "default"
+        key: "sk-gateway-replace-this"
+
+providers:
+  # 所有 provider 的默认超时
+  timeout: "640s"
+
+  # Provider 名称会用于 model_groups 中的 "provider/model" 前缀
+  openai:
+    endpoint: "https://api.openai.com/v1"
+    api_key: "sk-proj-replace-this"
+    protocol: "openai"
+    rate_limit:
+      qpm: 60
+
+  anthropic:
+    endpoint: "https://api.anthropic.com"
+    api_key: "sk-ant-replace-this"
+    protocol: "anthropic"
+    rate_limit:
+      qpm: 50
+
+  # 兼容 OpenAI 协议的第三方示例
+  openrouter:
+    endpoint: "https://openrouter.ai/api/v1"
+    api_key: "sk-or-replace-this"
+    protocol: "openai"
+    rate_limit:
+      qpm: 200
+    # 可选：对某些上游模型单独限流
+    # upstream_model:
+    #   - model: "openai/gpt-4o"
+    #     qpm: 10
+
+  # 可选：同一 provider 为不同协议提供不同 endpoint
+  # coding-plan:
+  #   endpoints:
+  #     - url: "https://api.example.com/anthropic"
+  #       protocol: "anthropic"
+  #     - url: "https://api.example.com/openai"
+  #       protocol: "openai"
+  #   api_key: "sk-replace-this"
+
+model_groups:
+  # 最简配置：单模型直连（不写 mode 时，单模型默认 concurrent）
+  - name: "o3-mini"
+    model: "openai/o3-mini"
+
+  # 并发竞速：多个 provider 同时请求，谁先返回用谁
+  - name: "gpt-4o"
+    mode: "concurrent"
+    models:
+      - "openai/gpt-4o"
+      - "openrouter/openai/gpt-4o"
+
+  # 负载均衡：按权重分流
+  - name: "gpt-4o-balanced"
+    mode: "load-balance"
+    strategy: "weighted" # weighted / round-robin
+    models:
+      - model: "openai/gpt-4o"
+        weight: 3
+      - model: "openrouter/openai/gpt-4o"
+        weight: 1
+
+  # 故障转移：按顺序尝试，前者失败后才切换
+  - name: "claude-fallback"
+    mode: "failover"
+    models:
+      - "anthropic/claude-sonnet-4-20250514"
+      - "openrouter/anthropic/claude-sonnet-4-20250514"
+
+# 可选：别名重定向（左边是用户请求的模型名，右边是 model_group 名）
+# redirect:
+#   claude-4-6-20261201: claude-fallback

@@ -1,0 +1,51 @@
+# 编译产物
+bin/
+/oh-my-api
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试产物
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# 数据目录
+data/
+
+# Go 工具缓存
+go.work
+go.work.sum
+
+# 配置文件（包含敏感信息）
+config.yaml
+config.docker.yaml
+
+# IDE 和编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.log
+*.tmp
+tmp/
+
+# Claude Code
+.claude/
+
+# Git worktrees
+.worktrees/
+
+# Personal deployment artifacts (not for OSS)
+deploy.sh
+docker-dev/
