@@ -1,5 +1,7 @@
 # oh-my-api
 
+English: [README.en.md](./README.en.md)
+
 一个用 Go + Gin 实现的个人 AI API 网关，目标是体验优先。
 
 它支持三种入方向协议，并按配置将请求路由到不同 Provider，支持并发竞速、负载均衡、故障转移三种调度模式。

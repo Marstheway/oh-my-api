@@ -1,5 +1,7 @@
 # oh-my-api
 
+中文说明: [README.md](./README.md)
+
 A personal AI API gateway built with Go + Gin, focused on developer experience.
 
 It supports three inbound protocols and routes requests to different providers based on config, with concurrent race, load balance, and failover scheduling modes.
