@@ -79,7 +79,21 @@ oh-my-api --config config.yaml stats --since "2026-04-01" --until "2026-04-25"
 - GitHub 仓库：`https://github.com/Marstheway/oh-my-api`
 - CI：推送和 PR 会自动执行 `go test ./...`
 - Release：推送 tag（例如 `v0.1.0`）后，GitHub Actions 会自动构建并上传多平台二进制
-- 容器：根目录提供 [Dockerfile](./Dockerfile)，可直接用于镜像构建
+- 容器：推送 tag 后，GitHub Actions 会自动发布镜像到 GHCR：`ghcr.io/marstheway/oh-my-api`
+
+### 容器使用
+
+镜像地址：`https://github.com/Marstheway/oh-my-api/pkgs/container/oh-my-api`
+
+```bash
+# 拉取 latest
+docker pull ghcr.io/marstheway/oh-my-api:latest
+
+# 运行容器（挂载配置文件）
+docker run --rm -p 18000:18000 -p 9090:9090 \
+  -v $(pwd)/config.yaml:/app/config.docker.yaml:ro \
+  ghcr.io/marstheway/oh-my-api:latest
+```
 
 ## 接口兼容说明
 
@@ -112,7 +126,7 @@ go test -v ./internal/codec/
 ## 部署
 
 - 可直接使用根目录 [Dockerfile](./Dockerfile) 构建镜像
-- 发布到 GitHub 时，建议通过 Release 附带各平台二进制
+- 可直接使用 GHCR 镜像：`ghcr.io/marstheway/oh-my-api:latest`
 
 ## 配置参考
 

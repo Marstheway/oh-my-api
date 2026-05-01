@@ -42,6 +42,7 @@ jobs:
           images: ${{ steps.vars.outputs.image }}
           tags: |
             type=ref,event=tag
+            type=raw,value=latest,enable={{is_tag}}
             type=sha,prefix=sha-
 
       - name: Build and push
