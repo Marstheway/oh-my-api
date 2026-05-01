@@ -15,6 +15,14 @@
 - Prometheus 指标导出
 - SQLite 调用统计
 
+## 核心价值
+
+- 入口协议和provider协议解耦，自动在 openai.chat/openai.responses/anthropic 之间互相转换；
+- 调度模式场景：
+  - concurrent: 多家免费模型竞速，提升响应速度；
+  - load-balance: 聚合手头多家渠道的配额；
+  - failover: 适配不稳定的供应商；
+
 ## 快速开始
 
 ### 1. 准备配置
