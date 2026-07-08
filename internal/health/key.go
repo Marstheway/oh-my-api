@@ -12,4 +12,3 @@ func MakeHealthKey(provider, outboundProtocol string) string {
 	}
 	return provider + "|" + outboundProtocol
 }
-

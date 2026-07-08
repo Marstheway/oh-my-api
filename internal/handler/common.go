@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Marstheway/oh-my-api/internal/codec"
 	errs "github.com/Marstheway/oh-my-api/internal/errors"
 	"github.com/Marstheway/oh-my-api/internal/scheduler"
+	"github.com/gin-gonic/gin"
 )
 
 func handleUpstreamError(c *gin.Context, inbound errs.Protocol, err error) {
@@ -22,6 +22,11 @@ func handleUpstreamError(c *gin.Context, inbound errs.Protocol, err error) {
 	if errors.Is(err, scheduler.ErrAllRateLimited) {
 		errs.WriteError(c, inbound, http.StatusTooManyRequests,
 			errs.ErrRateLimitTimeout, "all providers rate limited, please retry later")
+		return
+	}
+	if errors.Is(err, scheduler.ErrNoProviderAvailable) {
+		errs.WriteError(c, inbound, http.StatusServiceUnavailable,
+			errs.ErrUpstreamError, "no provider available")
 		return
 	}
 	if errors.Is(err, scheduler.ErrAllProvidersFailed) {
@@ -97,21 +102,4 @@ func handleCodecError(c *gin.Context, inbound errs.Protocol, phase string, err e
 	}
 	errs.WriteError(c, inbound, http.StatusBadGateway,
 		errs.ErrConversionError, "protocol conversion failed: "+err.Error())
-}
-
-func shouldFallbackFromResponsesError(err error) bool {
-	return err != nil
-}
-
-func shouldFallbackFromResponsesStatus(statusCode int) bool {
-	switch statusCode {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
-		return false
-	case http.StatusBadRequest:
-		return false
-	case http.StatusNotFound, http.StatusMethodNotAllowed:
-		return true
-	default:
-		return statusCode >= 500
-	}
 }

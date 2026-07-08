@@ -187,12 +187,13 @@ func TestConvertClaudeStreamEventToOpenAI_FullFlow(t *testing.T) {
 }
 
 func TestConvertClaudeStreamEventToOpenAI_InputJsonDelta(t *testing.T) {
+	partialJSON := `{"city":`
 	event := &dto.ClaudeStreamEvent{
 		Type:  "content_block_delta",
 		Index: 1,
 		Delta: &dto.ClaudeDelta{
 			Type:        "input_json_delta",
-			PartialJSON: `{"city":`,
+			PartialJSON: &partialJSON,
 		},
 	}
 	got := ConvertClaudeStreamEventToOpenAI("chatcmpl-123", "claude-3", event)

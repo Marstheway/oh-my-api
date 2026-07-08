@@ -1,0 +1,10 @@
+{{ define "draft-bar" }}
+<!-- Draft Bar -->
+<div class="draft-bar" id="draftBar">
+  <div class="draft-bar-left">
+    <span class="draft-dot"></span>
+    <span id="draftBarLabel">No pending changes</span>
+  </div>
+  <button class="btn btn-success btn-sm" id="applyBtn" disabled onclick="applyDraft()">Apply Changes</button>
+</div>
+{{ end }}

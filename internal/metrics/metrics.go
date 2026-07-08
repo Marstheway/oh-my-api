@@ -26,6 +26,15 @@ var (
 		[]string{"provider", "upstream_model", "key_name", "status"},
 	)
 
+	requestFirstTokenSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "request_first_token_seconds",
+			Help:    "首 token 延迟（仅流式请求）",
+			Buckets: []float64{0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1, 2, 5, 10},
+		},
+		[]string{"provider", "upstream_model", "key_name", "status"},
+	)
+
 	tokenInputTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "token_input_total",
@@ -59,6 +68,24 @@ var (
 		[]string{"provider", "outbound_protocol"},
 	)
 
+	// Attempt 级指标
+	providerAttemptTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "provider_attempt_total",
+			Help: "Provider 尝试总数",
+		},
+		[]string{"scheduler", "provider", "upstream_model", "model_group", "outbound_protocol", "result", "failure_reason", "status_code"},
+	)
+
+	providerAttemptDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "provider_attempt_duration_seconds",
+			Help:    "Provider 尝试延迟",
+			Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60},
+		},
+		[]string{"scheduler", "provider", "upstream_model", "model_group", "outbound_protocol", "result", "failure_reason", "status_code"},
+	)
+
 	// 限流指标
 	ratelimitTriggeredTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -75,19 +102,73 @@ var (
 			Help: "当前并发请求数",
 		},
 	)
+
+	// Smart route 指标
+	smartRouteDecisionTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "smart_route_decision_total",
+			Help: "Smart route 决策计数",
+		},
+		[]string{"decision_path"}, // rule_reason, rule_scout, need_judge, judge_reason, judge_scout, judge_fallback_to_reason
+	)
+
+	registered = false
 )
 
 // Init 初始化所有指标，返回 http.Handler 用于 /metrics 端点
 func Init() http.Handler {
-	prometheus.MustRegister(
-		requestTotal,
-		requestDuration,
-		tokenInputTotal,
-		tokenOutputTotal,
-		providerRequestFailures,
-		providerHealthStatus,
-		ratelimitTriggeredTotal,
-		concurrentRequests,
-	)
+	if !registered {
+		prometheus.MustRegister(
+			requestTotal,
+			requestDuration,
+			requestFirstTokenSeconds,
+			tokenInputTotal,
+			tokenOutputTotal,
+			providerRequestFailures,
+			providerHealthStatus,
+			providerAttemptTotal,
+			providerAttemptDuration,
+			ratelimitTriggeredTotal,
+			concurrentRequests,
+			smartRouteDecisionTotal,
+		)
+		registered = true
+	}
 	return promhttp.Handler()
+}
+
+// ResetForTest 重置所有指标用于测试
+func ResetForTest() {
+	requestTotal.Reset()
+	requestDuration.Reset()
+	requestFirstTokenSeconds.Reset()
+	tokenInputTotal.Reset()
+	tokenOutputTotal.Reset()
+	providerRequestFailures.Reset()
+	providerHealthStatus.Reset()
+	providerAttemptTotal.Reset()
+	providerAttemptDuration.Reset()
+	ratelimitTriggeredTotal.Reset()
+	concurrentRequests.Set(0)
+	smartRouteDecisionTotal.Reset()
+}
+
+// GetProviderAttemptTotal 返回 providerAttemptTotal 指标用于测试
+func GetProviderAttemptTotal() *prometheus.CounterVec {
+	return providerAttemptTotal
+}
+
+// GetRequestTotal 返回 requestTotal 指标用于测试
+func GetRequestTotal() *prometheus.CounterVec {
+	return requestTotal
+}
+
+// RecordSmartRouteDecision 记录 smart route 决策
+func RecordSmartRouteDecision(decisionPath string) {
+	smartRouteDecisionTotal.WithLabelValues(decisionPath).Inc()
+}
+
+// GetSmartRouteDecisionTotal 返回 smartRouteDecisionTotal 指标用于测试
+func GetSmartRouteDecisionTotal() *prometheus.CounterVec {
+	return smartRouteDecisionTotal
 }

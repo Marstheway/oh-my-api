@@ -2,7 +2,7 @@
 # 用法：复制为 config.yaml 后，替换下面的占位值（尤其是 API Key）
 
 server:
-  # API 服务监听地址
+  # API 服务监听地址（可省略，默认 :18000）
   listen: ":18000"
 
   # 可选：Prometheus 指标端口，留空表示关闭
@@ -11,16 +11,31 @@ server:
   # 日志级别：debug / info / warn / error
   log_level: "info"
 
-  # 可选：全局请求超时（例如 120s）
+  # 可选：全局请求超时（默认 120s），覆盖从发起到连接关闭的整个请求生命周期
   # timeout: "120s"
 
-  # 可选：流式请求超时（例如 10m）
-  # stream_timeout: "10m"
+  # 可选：TCP + TLS 连接建立超时（默认 10s）
+  # 仅控制网络连接建立阶段（DNS 解析、TCP 握手、TLS 握手），不包含等待响应的耗时
+  # connect_timeout: "10s"
+
+  # 可选：流式响应首 token 超时（默认 30s）
+  # 从 HTTP 响应头返回后开始计时，超时未收到首个 SSE 事件则判定 provider 失败
+  # 对 failover / concurrent / load-balance 调度模式均生效
+  # prefill_timeout: "30s"
+
+  # 可选：流式传输空闲超时（默认 60s）
+  # 流式响应中，若上游连续 N 秒不发送任何数据，视为连接僵死并断开
+  # 不影响非流式响应（非流式响应的上限由 timeout 兜底）
+  # stream_idle_timeout: "60s"
 
   # Provider 健康检查配置（供调度器在请求失败后判定可用性）
   health_check:
     failure_threshold: 3
     cooldown: "30s"
+
+  # 可选：管理接口配置（若设置则启用 /admin 路由组）
+  # admin:
+  #   password: "your-admin-password"
 
 database:
   # 可选。SQLite 文件路径（用于统计）
@@ -34,21 +49,26 @@ inbound:
         key: "sk-gateway-replace-this"
 
 providers:
-  # 所有 provider 的默认超时
-  timeout: "640s"
+  # protocols / endpoints[].protocol / upstream_model[].allowed_protocols 的写法规则：
+  # - 必须使用标准写法："openai.chat"、"anthropic.messages"、"openai.responses"、"ollama.chat"、"ollama.embed"
+  # - 多协议使用数组形式，例如：protocols: ["openai.chat", "anthropic.messages"]
+  # - 注意："openai.response" 和 "anthropic.message" 这种单数写法无效
+  # - 如果配置了 endpoints，则实际可到达的协议集合以 endpoints[].protocol 为准；protocols 只在未配置 endpoints 时作为回退
+  # - upstream_model[].allowed_protocols 必须是该 provider 实际可到达协议的子集，否则启动校验会失败
+  # - default_protocols：上游模型默认协议，未显式设置 allowed_protocols 的模型自动继承；不设 default_protocols 时模型行为不受限
 
   # Provider 名称会用于 model_groups 中的 "provider/model" 前缀
   openai:
     endpoint: "https://api.openai.com/v1"
     api_key: "sk-proj-replace-this"
-    protocol: "openai"
+    protocols: ["openai.chat"]
     rate_limit:
       qpm: 60
 
   anthropic:
     endpoint: "https://api.anthropic.com"
     api_key: "sk-ant-replace-this"
-    protocol: "anthropic"
+    protocols: ["anthropic.messages"]
     rate_limit:
       qpm: 50
 
@@ -56,52 +76,186 @@ providers:
   openrouter:
     endpoint: "https://openrouter.ai/api/v1"
     api_key: "sk-or-replace-this"
-    protocol: "openai"
+    protocols: ["openai.chat", "anthropic.messages"]
     rate_limit:
       qpm: 200
-    # 可选：对某些上游模型单独限流
+    # 可选：上游模型默认协议，未显式设 allowed_protocols 的模型继承此值
+    # default_protocols: ["openai.chat"]
+    # 可选：对某些上游模型单独限流和指定协议
     # upstream_model:
     #   - model: "openai/gpt-4o"
     #     qpm: 10
+    #   # 当 provider 配了 endpoints 时，allowed_protocols 必须能在 endpoints[].protocol 中找到
+    #   - model: "glm-5.2"
+    #     allowed_protocols: ["openai.chat"]       # 继承 default_protocols 时可省略此行
+    #   - model: "minimax-m3"
+    #     allowed_protocols: ["anthropic.messages"]     # 覆写 default_protocols，强制走 anthropic
 
-  # 可选：同一 provider 为不同协议提供不同 endpoint
+  # 可选：配置 provider 每天重复的禁用时间段（HH:MM-HH:MM 格式），支持跨午夜区间
+  # 时间段使用半开区间 [start, end)，例如 09:00-12:00 在 09:00 命中、12:00 不命中
+  # 在禁用时段内，该 provider 会被跳过，调度器自动切换到其他可用 provider
+  # 若所有候选均被禁用，返回 503 no provider available
+  # example-provider:
+  #   endpoint: "https://api.example.com"
+  #   api_key: "sk-xxx"
+  #   protocols: ["openai.chat"]
+  #   disabled_time_ranges:
+  #     - "09:00-12:00"
+  #     - "14:00-18:00"
+  #     - "23:00-02:00"  # 跨午夜区间
+
+  # OpenAI Responses 专用上游示例
+  responses-proxy:
+    endpoint: "https://api.openai.com/v1"
+    api_key: "sk-proj-replace-this"
+    protocols: ["openai.responses"]
+    rate_limit:
+      qpm: 60
+
+  # 可选：同一 provider 为不同协议提供不同 endpoint。
+  # 如果 provider 声明了多协议，会优先直通与入方向相同的协议，否则按最低转换成本选择。
+  # 一旦配置 endpoints，请确保每个需要实际使用的协议都在 endpoints[].protocol 中声明。
+  # 例如下面这个 provider 实际可到达的协议就是 anthropic.messages / openai.chat / openai.responses。
   # coding-plan:
+  #   endpoint: "https://api.example.com/fallback"
   #   endpoints:
   #     - url: "https://api.example.com/anthropic"
-  #       protocol: "anthropic"
+  #       protocol: "anthropic.messages"
   #     - url: "https://api.example.com/openai"
-  #       protocol: "openai"
+  #       protocol: "openai.chat"
+  #     - url: "https://api.example.com/responses"
+  #       protocol: "openai.responses"
   #   api_key: "sk-replace-this"
+
+  # Ollama chat 示例：可被 /v1/chat/completions、/v1/messages、/v1/responses 统一路由
+  # 纯 ollama.chat provider 允许空 api_key，endpoint 会自动补到 /api/chat
+  ollama-chat:
+    endpoint: "http://127.0.0.1:11434"
+    api_key: ""
+    protocols: ["ollama.chat"]
+    rate_limit:
+      qpm: 120
+
+  # Ollama embedding 示例：仅用于 /v1/embeddings，不能与 chat 协议混用
+  ollama-embed:
+    endpoint: "http://127.0.0.1:11434"
+    api_key: ""
+    protocols: ["ollama.embed"]
+    rate_limit:
+      qpm: 120
 
 model_groups:
   # 最简配置：单模型直连（不写 mode 时，单模型默认 concurrent）
   - name: "o3-mini"
     model: "openai/o3-mini"
 
+  # 配置 context_length：优先于 catalog 文件中的值，省略时从 catalog 自动合并
+  - name: "o3-mini-with-metadata"
+    model: "openai/o3-mini"
+    model_metadata:
+      context_length: 200000
+
+  # OpenAI Responses provider 示例：客户端依然请求这个 model_group 名
+  - name: "gpt-4o-responses"
+    model: "responses-proxy/gpt-4o"
+
   # 并发竞速：多个 provider 同时请求，谁先返回用谁
-  - name: "gpt-4o"
+  - name: "gpt-4o-concurrent"
     mode: "concurrent"
     models:
       - "openai/gpt-4o"
       - "openrouter/openai/gpt-4o"
 
+  # 隐藏内部实现，仅通过 redirect 暴露别名（不可外部直调，仅被 redirect 引用）
+  - name: "claude-fast"
+    mode: "concurrent"
+    exposure: internal
+    models:
+      - "anthropic/claude-sonnet-4-20250514"
+      - "openrouter/anthropic/claude-sonnet-4-20250514"
+
   # 负载均衡：按权重分流
   - name: "gpt-4o-balanced"
     mode: "load-balance"
-    strategy: "weighted" # weighted / round-robin
     models:
       - model: "openai/gpt-4o"
         weight: 3
       - model: "openrouter/openai/gpt-4o"
         weight: 1
 
-  # 故障转移：按顺序尝试，前者失败后才切换
-  - name: "claude-fallback"
+  # 故障转移：按列表顺序尝试，前者失败后才切换
+  - name: "claude-failover"
     mode: "failover"
     models:
       - "anthropic/claude-sonnet-4-20250514"
       - "openrouter/anthropic/claude-sonnet-4-20250514"
 
-# 可选：别名重定向（左边是用户请求的模型名，右边是 model_group 名）
-# redirect:
-#   claude-4-6-20261201: claude-fallback
+  # 自适应调度：按 TTFT 历史择优选择，只支持 provider/model 叶子条目
+  - name: "gpt-4o-adaptive"
+    mode: "adaptive"
+    models:
+      - model: "openai/gpt-4o"
+        weight: 1
+      - model: "openrouter/openai/gpt-4o"
+        weight: 1
+
+  # 嵌套引用示例：顶层 failover 依次尝试两个子组
+  # models 中不含 '/' 的条目视为对其他 model_group 或 redirect 的引用（内部名）
+  # 注意：子组 models 引用的格式与直接引用 provider/model 语法相同
+  - name: "claude-concurrent"
+    mode: "concurrent"
+    exposure: internal
+    models:
+      - "anthropic/claude-sonnet-4-20250514"
+      - "openrouter/anthropic/claude-sonnet-4-20250514"
+
+  - name: "gpt-concurrent"
+    mode: "concurrent"
+    exposure: internal
+    models:
+      - "openai/gpt-4o"
+      - "openrouter/openai/gpt-4o"
+
+  # 顶层 failover 引用两个子组：先整体尝试 claude-concurrent，失败后再整体尝试 gpt-concurrent
+  - name: "smart-auto"
+    mode: "failover"
+    models:
+      - "claude-concurrent"
+      - "gpt-concurrent"
+
+  # 本地 Ollama chat 模型示例
+  - name: "llama3"
+    model: "ollama-chat/llama3"
+
+  # Embedding 模型示例：供 /v1/embeddings 使用
+  # 注意：embeddings 仅支持纯叶子 group（不含子 group 引用）
+  # 对包含子 group 引用的 group，/v1/embeddings 会返回 422 错误
+  - name: "nomic-embed-text"
+    model: "ollama-embed/nomic-embed-text"
+
+# 可选：别名重定向（支持两种格式）
+# 推荐使用新格式（slice），支持 exposure 配置
+# exposure 取值：public（列表展示且可直调，默认）/ hidden（不展示但可直调）/ internal（不展示且不可直调，仅内部引用）
+redirect:
+  # 新格式示例：
+  - source: claude-4-6-20261201
+    target: smart-auto
+    # exposure: public  # 默认值，可省略
+
+  - source: gpt-4o
+    target: gpt-4o-balanced
+    exposure: hidden  # 不在模型列表展示，但允许直接调用
+
+  - source: fast
+    target: gpt-4o-fast
+    # exposure 默认 public
+
+  # 旧格式（map）仍然支持，但无法配置 exposure（默认 public）：
+  # my-embed: nomic-embed-text
+
+# 可选：smart route 配置（仅在显式启用的 alias 上生效）
+# smart_route:
+#   cheap: cheap-judge        # 判别器模型，仅用于 judge，不承载最终请求
+#   scout: scout-collector    # 探路模型，用于收集第一轮对话信息
+#   enabled_models:           # 显式启用 smart route 的入口模型名列表，可写 alias 或 model group
+#     - claude-4-6-20261201

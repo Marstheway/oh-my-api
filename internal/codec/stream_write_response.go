@@ -25,13 +25,13 @@ func writeResponsesEvent(c *gin.Context, event dto.ResponsesStreamEvent) error {
 	return nil
 }
 
-func writeAnthropicStreamAsResponsesStream(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func writeAnthropicStreamAsResponsesStream(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 
-	mapper1 := newClaudeToChatStreamMapper("", "", 0)
-	mapper2 := newChatToResponsesStreamMapper("", "")
+	mapper1 := newClaudeToChatStreamMapper("", requestedModel, 0)
+	mapper2 := newChatToResponsesStreamMapper("", requestedModel)
 
 	err := scanSSEData(resp.Body, func(data string) error {
 		var event dto.ClaudeStreamEvent
@@ -71,7 +71,6 @@ func writeAnthropicStreamAsResponsesStream(c *gin.Context, resp *http.Response, 
 		if sc, ok := counter.(*token.StreamCounter); ok {
 			sc.ComputeOutputTokens()
 		}
-		counter.SetLatency()
 	}
 	return err
 }

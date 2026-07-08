@@ -1,22 +1,19 @@
 package handler
 
 import (
-	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/Marstheway/oh-my-api/internal/adaptor"
 	"github.com/Marstheway/oh-my-api/internal/codec"
-	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	errs "github.com/Marstheway/oh-my-api/internal/errors"
 	"github.com/Marstheway/oh-my-api/internal/metrics"
-	"github.com/Marstheway/oh-my-api/internal/scheduler"
 	"github.com/Marstheway/oh-my-api/internal/token"
+	"github.com/gin-gonic/gin"
 )
 
 // Responses handles POST /v1/responses requests (OpenAI Responses API format).
@@ -42,121 +39,68 @@ func Responses(c *gin.Context) {
 		return
 	}
 
-	c.Set("model", req.Model)
+	originalModel := req.Model
+	c.Set("model", originalModel)
 
-	inputTokens := token.CountRequestTokens(req)
+	// Smart route：解码请求后、resolver.Resolve 之前
+	effectiveModel := originalModel
+	if resolver.SmartRouteEnabled() {
+		sri := resolver.GetSmartRouteIndex()
+		obs := ObserveTurnOpenAIResponse(req)
+		srResult := SmartRoute(c.Request.Context(), originalModel, obs, sri)
+		effectiveModel = srResult.EffectiveModel
 
-	result, resolveErr := resolver.Resolve(req.Model)
+		// 记录 smart route 日志
+		slog.Info("smart route",
+			"enabled", true,
+			"original_model", originalModel,
+			"decision", srResult.Decision,
+			"decision_path", srResult.DecisionPath,
+			"effective_model", effectiveModel,
+			"fallback_reason", srResult.FallbackReason,
+		)
+	}
+
+	result, resolveErr := resolver.Resolve(effectiveModel)
 	if resolveErr != nil {
 		errs.WriteError(c, errs.ProtocolOpenAI, http.StatusNotFound,
-			errs.ErrModelNotFound, fmt.Sprintf("model not found: %s", req.Model))
+			errs.ErrModelNotFound, fmt.Sprintf("model not found: %s", effectiveModel))
 		return
 	}
 
-	dests := make([]string, len(result.Tasks))
-	for i, t := range result.Tasks {
-		dests[i] = t.ProviderName + "/" + t.UpstreamModel
-	}
+	dests := collectPlanDests(result.Plan)
 	slog.Info("request",
 		"key", c.GetString("key_name"),
-		"protocol", "openai.response",
+		"protocol", "openai.responses",
 		"model", req.Model,
 		"scheduler", result.Mode,
-		"dest", strings.Join(dests, ","),
+		"dest", strings.Join(dests, " | "),
 	)
 
 	metrics.IncConcurrent()
-
 	start := time.Now()
 
-	tasks := make([]scheduler.Task, len(result.Tasks))
-	for i, t := range result.Tasks {
-		preferredOutbound, learned := responsesFallbackCache.GetPreferred(t.ProviderName, "openai.response")
-		if !learned {
-			preferredOutbound = t.Provider.GetOutboundProtocol("openai.response")
-		}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
 
-		task, buildErr := buildTaskForOutboundFormat(c, inboundCodec, req, t, preferredOutbound)
-		if buildErr != nil {
-			handleCodecError(c, errs.ProtocolOpenAI, "encode_request", buildErr)
-			return
-		}
-		tasks[i] = task
+	rootNode, matErr := materializePlan(ctx, result.Plan, codec.FormatOpenAIResponse, inboundCodec, req, result.ModelGroup)
+	if matErr != nil {
+		metrics.DecConcurrent()
+		handleCodecError(c, errs.ProtocolOpenAI, "encode_request", matErr)
+		return
 	}
 
-	resp, schedErr := sched.Execute(c.Request.Context(), result.Mode, result.Timeout, tasks)
+	resp, schedErr := sched.ExecuteNode(ctx, rootNode)
 	metrics.DecConcurrent()
 	if schedErr != nil {
-		if len(tasks) == 1 && shouldFallbackFromResponsesError(schedErr) {
-			fallbackTask, buildErr := buildTaskForOutboundFormat(c, inboundCodec, req, result.Tasks[0], "openai")
-			if buildErr != nil {
-				handleCodecError(c, errs.ProtocolOpenAI, "encode_request", buildErr)
-				return
-			}
-
-			fallbackResp, fallbackErr := sched.Execute(c.Request.Context(), result.Mode, result.Timeout, []scheduler.Task{fallbackTask})
-			if fallbackErr == nil && fallbackResp != nil && fallbackResp.Response != nil && fallbackResp.Response.StatusCode < 400 {
-				responsesFallbackCache.MarkPreferred(fallbackTask.ProviderName, "openai.response", "openai")
-				resp = fallbackResp
-				schedErr = nil
-			} else {
-				slog.Warn("responses fallback failed",
-					"provider", fallbackTask.ProviderName,
-					"fallback_error", fallbackErr,
-				)
-			}
-		}
-	}
-	if schedErr != nil {
-		recordRequestMetrics(c, "openai.response", "openai.response", result.ModelGroup, "", "", "error", time.Since(start))
+		recordRequestMetrics(c, "openai.responses", "openai.responses", result.ModelGroup, "", "", "error", time.Since(start), 0)
 		handleUpstreamError(c, errs.ProtocolOpenAI, schedErr)
 		return
 	}
 	defer resp.Response.Body.Close()
 
 	if resp.Response.StatusCode >= 400 {
-		if shouldFallbackFromResponsesStatus(resp.Response.StatusCode) && resp.Winner != "" {
-			var winnerTask *scheduler.Task
-			for i := range tasks {
-				if tasks[i].ProviderName == resp.Winner {
-					winnerTask = &tasks[i]
-					break
-				}
-			}
-
-			if winnerTask != nil {
-				fallbackTask, buildErr := buildTaskForOutboundFormat(c, inboundCodec, req, scheduler.Task{
-					ProviderName:  winnerTask.ProviderName,
-					Provider:      winnerTask.Provider,
-					UpstreamModel: winnerTask.UpstreamModel,
-					Weight:        winnerTask.Weight,
-					Priority:      winnerTask.Priority,
-				}, "openai")
-				if buildErr == nil {
-					fallbackResp, fallbackErr := sched.Execute(c.Request.Context(), result.Mode, result.Timeout, []scheduler.Task{fallbackTask})
-					if fallbackErr == nil && fallbackResp != nil && fallbackResp.Response != nil && fallbackResp.Response.StatusCode < 400 {
-						responsesFallbackCache.MarkPreferred(fallbackTask.ProviderName, "openai.response", "openai")
-						resp = fallbackResp
-					} else if fallbackResp != nil && fallbackResp.Response != nil {
-						slog.Warn("responses fallback after HTTP error failed",
-							"provider", fallbackTask.ProviderName,
-							"fallback_status", fallbackResp.Response.StatusCode,
-							"fallback_error", fallbackErr,
-						)
-						defer fallbackResp.Response.Body.Close()
-					} else if fallbackErr != nil {
-						slog.Warn("responses fallback after HTTP error failed",
-							"provider", fallbackTask.ProviderName,
-							"fallback_error", fallbackErr,
-						)
-					}
-				}
-			}
-		}
-	}
-
-	if resp.Response.StatusCode >= 400 {
-		recordRequestMetrics(c, "openai.response", "openai.response", result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", time.Since(start))
+		recordRequestMetrics(c, "openai.responses", "openai.responses", result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", time.Since(start), 0)
 		handleUpstreamResponseError(c, errs.ProtocolOpenAI, resp.Winner, resp.Response)
 		return
 	}
@@ -164,82 +108,40 @@ func Responses(c *gin.Context) {
 	c.Set("provider", resp.Winner)
 
 	latency := time.Since(start)
+	outboundFormat, reason, cost := findWinnerOutbound(result.Plan, resp.Winner, resp.UpstreamModel, codec.FormatOpenAIResponse)
+
 	slog.Info("response",
 		"status", resp.Response.StatusCode,
-		"protocol", "openai.response",
+		"protocol", "openai.responses",
+		"stream", req.Stream,
 		"latency", fmt.Sprintf("%.2fs", latency.Seconds()),
 		"model", resp.Winner+"/"+resp.UpstreamModel,
+		"inbound_format", string(codec.FormatOpenAIResponse),
+		"outbound_selected", string(outboundFormat),
+		"selection_reason", reason,
+		"conversion_cost", cost,
+		"candidate_count", func() int {
+			if result.Plan == nil {
+				return 0
+			}
+			return len(result.Plan.Leaves) + len(result.Plan.Children)
+		}(),
 	)
 
-	// 找到 winner provider 对应的 outbound format
-	winnerOutbound := "openai.response"
-	var winnerProvider config.ProviderConfig
-	for _, t := range result.Tasks {
-		if t.ProviderName == resp.Winner {
-			winnerProvider = t.Provider
-			for _, preparedTask := range tasks {
-				if preparedTask.ProviderName == resp.Winner {
-					winnerOutbound = preparedTask.OutboundProtocol
-					break
-				}
-			}
-			break
-		}
-	}
-	outboundStr := winnerOutbound
-	if outboundStr == "" {
-		outboundStr = winnerProvider.GetOutboundProtocol("openai.response")
-	}
-	outboundFormat, _ := codec.SelectFormatForInbound(outboundStr, codec.FormatOpenAIResponse)
+	counter := token.NewStreamCounterFor(resp.UpstreamModel, token.CountRequestTokensFor(resp.UpstreamModel, req))
 
-	counter := token.NewStreamCounter(inputTokens)
-	counter.SetStartTime(start)
+	rmc := codec.ResponseModelContext{
+		RequestedModel:      req.Model,
+		ModelGroup:          result.ModelGroup,
+		WinnerProvider:      resp.Winner,
+		WinnerUpstreamModel: resp.UpstreamModel,
+	}
 
-	if writeErr := inboundCodec.WriteResponse(c, outboundFormat, resp.Response, req.Stream, counter); writeErr != nil {
+	if writeErr := inboundCodec.WriteResponse(c, outboundFormat, resp.Response, req.Stream, counter, rmc); writeErr != nil {
 		handleCodecError(c, errs.ProtocolOpenAI, "write_response", writeErr)
 		return
 	}
 
-	recordRequestMetrics(c, "openai.response", "openai.response", result.ModelGroup, resp.Winner, resp.UpstreamModel, "success", latency)
-	recordStats(c, resp.Winner, resp.UpstreamModel, counter.GetInputTokens(), counter.GetOutputTokens(), counter.GetLatency())
-}
-
-func buildTaskForOutboundFormat(c *gin.Context, inboundCodec codec.Codec, req *dto.ResponsesRequest, t scheduler.Task, outboundStr string) (scheduler.Task, error) {
-	outboundFormat, err := codec.SelectFormatForInbound(outboundStr, codec.FormatOpenAIResponse)
-	if err != nil {
-		outboundFormat, err = codec.SelectFormatForInbound(t.Provider.Protocol, codec.FormatOpenAIResponse)
-		if err != nil {
-			return scheduler.Task{}, err
-		}
-	}
-
-	bodyBytes, encErr := inboundCodec.EncodeRequest(outboundFormat, req, t.UpstreamModel)
-	if encErr != nil {
-		return scheduler.Task{}, encErr
-	}
-
-	var ada adaptor.Adaptor
-	var adaProtocol adaptor.Protocol
-	switch outboundFormat {
-	case codec.FormatAnthropicMessages:
-		ada = adaptor.GetAdaptor("anthropic")
-		adaProtocol = adaptor.ProtocolAnthropic
-	case codec.FormatOpenAIResponse:
-		ada = adaptor.GetAdaptor("openai")
-		adaProtocol = adaptor.ProtocolOpenAIResponse
-	default:
-		ada = adaptor.GetAdaptor("openai")
-		adaProtocol = adaptor.ProtocolOpenAI
-	}
-
-	upstreamReq := ada.BuildRequest(c.Request.Context(), &t.Provider, t.UpstreamModel, bytes.NewReader(bodyBytes), adaProtocol)
-	return scheduler.Task{
-		ProviderName:      t.ProviderName,
-		Provider:          t.Provider,
-		UpstreamModel:     t.UpstreamModel,
-		OutboundProtocol:  string(outboundFormat),
-		Weight:            t.Weight,
-		Priority:          t.Priority,
-		Request:           upstreamReq,
-	}, nil
+	recordRequestMetrics(c, "openai.responses", "openai.responses", result.ModelGroup, resp.Winner, resp.UpstreamModel, "success", latency, resp.StreamTTFT)
+	recordStats(c, resp.Winner, resp.UpstreamModel, counter.GetInputTokens(), counter.GetOutputTokens(), latency)
 }

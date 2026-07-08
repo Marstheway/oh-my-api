@@ -7,22 +7,23 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/router"
+	"github.com/Marstheway/oh-my-api/internal/runtimeconfig"
+	"github.com/Marstheway/oh-my-api/internal/stats"
+	"github.com/gin-gonic/gin"
 )
 
-func Run(cfg *config.Config, metricsHandler http.Handler) error {
+func Run(cfg *config.Config, metricsHandler http.Handler, runtimeManager *runtimeconfig.Manager) error {
 	gin.SetMode(gin.ReleaseMode)
-	if cfg.Server.LogLevel == "debug" {
-		gin.SetMode(gin.DebugMode)
-	}
 
 	r := gin.New()
-	router.Setup(r, cfg)
+	router.Setup(r, runtimeManager)
+	router.SetupAdmin(r, cfg, runtimeManager, stats.GetQuerier())
 
 	srv := &http.Server{
 		Addr:    cfg.Server.Listen,
@@ -48,10 +49,10 @@ func Run(cfg *config.Config, metricsHandler http.Handler) error {
 
 	go func() {
 		for name, p := range cfg.Providers.Items {
-			slog.Info("provider", "name", name, "protocol", p.Protocol)
+			slog.Info("provider", "name", name, "protocol", providerProtocols(p))
 		}
 		for _, mg := range cfg.ModelGroups {
-			slog.Info("model_group", "name", mg.Name, "models", mg.Models)
+			slog.Info("model_group", "name", mg.Name, "mode", mg.Mode, "models", mg.Models)
 		}
 		slog.Info("server starting", "listen", cfg.Server.Listen)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -80,4 +81,32 @@ func Run(cfg *config.Config, metricsHandler http.Handler) error {
 	}
 
 	return nil
+}
+
+func providerProtocols(p config.ProviderConfig) string {
+	if len(p.Protocols) > 0 {
+		return strings.Join(p.Protocols, ", ")
+	}
+
+	seen := make(map[string]struct{})
+	protocols := make([]string, 0)
+	for _, ep := range p.Endpoints {
+		for _, proto := range ep.Protocols {
+			protocol := strings.TrimSpace(proto)
+			if protocol == "" {
+				continue
+			}
+			if _, ok := seen[protocol]; ok {
+				continue
+			}
+			seen[protocol] = struct{}{}
+			protocols = append(protocols, protocol)
+		}
+	}
+
+	if len(protocols) == 0 {
+		return "unknown"
+	}
+
+	return strings.Join(protocols, "/")
 }

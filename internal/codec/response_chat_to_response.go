@@ -29,6 +29,14 @@ func convertOpenAIChatResponseToResponses(resp *dto.ChatCompletionResponse) (*dt
 	var output []dto.ResponsesOutput
 	if choice.Message != nil {
 		msg := choice.Message
+		if msg.ReasoningContent != "" {
+			output = append(output, dto.ResponsesOutput{
+				Type: "reasoning",
+				Summary: mustRawJSON([]map[string]any{
+					{"type": "summary_text", "text": msg.ReasoningContent},
+				}),
+			})
+		}
 		if msg.Content != "" {
 			output = append(output, dto.ResponsesOutput{
 				Type:   "message",
@@ -69,7 +77,7 @@ func convertOpenAIChatResponseToResponses(resp *dto.ChatCompletionResponse) (*dt
 }
 
 // writeOpenAIChatResponseAsResponses 读取 Chat 格式的响应体，转换后以 Responses API 格式写回客户端。
-func writeOpenAIChatResponseAsResponses(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func writeOpenAIChatResponseAsResponses(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -93,15 +101,16 @@ func writeOpenAIChatResponseAsResponses(c *gin.Context, resp *http.Response, cou
 		return err
 	}
 
-	c.JSON(http.StatusOK, responsesResp)
-	if counter != nil {
-		counter.SetLatency()
+	if rmc.RequestedModel != "" {
+		responsesResp.Model = rmc.RequestedModel
 	}
+
+	c.JSON(http.StatusOK, responsesResp)
 	return nil
 }
 
 // writeOpenAIChatStreamAsResponses 读取 Chat 格式的 SSE 流，转换后以 Responses API SSE 格式写回客户端。
-func writeOpenAIChatStreamAsResponses(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func writeOpenAIChatStreamAsResponses(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
@@ -111,7 +120,7 @@ func writeOpenAIChatStreamAsResponses(c *gin.Context, resp *http.Response, count
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 
-	mapper := newChatToResponsesStreamMapper("", "")
+	mapper := newChatToResponsesStreamMapper("", requestedModel)
 	err := scanSSEData(resp.Body, func(data string) error {
 		var chunk dto.ChatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
@@ -143,7 +152,6 @@ func writeOpenAIChatStreamAsResponses(c *gin.Context, resp *http.Response, count
 		if sc, ok := counter.(*token.StreamCounter); ok {
 			sc.ComputeOutputTokens()
 		}
-		counter.SetLatency()
 	}
 
 	return err

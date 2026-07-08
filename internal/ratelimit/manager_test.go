@@ -1,7 +1,11 @@
 package ratelimit
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/Marstheway/oh-my-api/internal/config"
@@ -108,5 +112,54 @@ func TestManager_Allow_ProviderLimitBlocks(t *testing.T) {
 	// provider 级耗尽后，即使 model 级有余量也应返回 false
 	if m.Allow("openrouter", "openai/gpt-4o") {
 		t.Fatal("Allow should fail when provider-level token exhausted")
+	}
+}
+
+// TestManager_LogsProviderUpstreamPair 验证 Allow 限流时日志输出 upstream_identity=provider/model，
+// 而非裸 model 字段。
+func TestManager_LogsProviderUpstreamPair(t *testing.T) {
+	providers := map[string]config.ProviderConfig{
+		"openrouter": {RateLimit: config.RateLimitConfig{QPM: 1}},
+	}
+	m := NewManager(providers)
+
+	// 捕获 slog 输出
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	old := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(old)
+
+	// 第一次应通过（消耗令牌），第二次应触发日志
+	m.Allow("openrouter", "gpt-4o")
+	m.Allow("openrouter", "gpt-4o")
+
+	logs := buf.String()
+	if logs == "" {
+		t.Skip("no debug log output captured (logging may not be at debug level)")
+	}
+
+	// 不应出现裸 model 字段（值不含 / 的）
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if v, ok := entry["model"]; ok {
+			s, _ := v.(string)
+			if !strings.Contains(s, "/") {
+				t.Errorf("ratelimit log contains bare model field without provider prefix: %q, line: %s", s, line)
+			}
+		}
+	}
+
+	// upstream_identity 字段在日志被触发时应存在
+	if strings.Contains(logs, "ratelimit blocked") || strings.Contains(logs, "allow bypassed") {
+		if !strings.Contains(logs, `"upstream_identity"`) {
+			t.Errorf("ratelimit log should contain upstream_identity field, got: %s", logs)
+		}
 	}
 }

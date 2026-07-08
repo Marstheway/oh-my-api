@@ -42,14 +42,51 @@ func ConvertClaudeToOpenAI(req *dto.ClaudeRequest, upstreamModel string) *dto.Ch
 	}
 
 	// tools 转换
-	if len(req.Tools) > 0 {
-		for _, t := range req.Tools {
+	switch tools := req.Tools.(type) {
+	case []any:
+		for _, t := range tools {
+			switch tool := t.(type) {
+			case dto.ClaudeTool:
+				out.Tools = append(out.Tools, dto.Tool{
+					Type: "function",
+					Function: dto.ToolFunction{
+						Name:        tool.Name,
+						Description: tool.Description,
+						Parameters:  tool.InputSchema,
+					},
+				})
+			case *dto.ClaudeTool:
+				out.Tools = append(out.Tools, dto.Tool{
+					Type: "function",
+					Function: dto.ToolFunction{
+						Name:        tool.Name,
+						Description: tool.Description,
+						Parameters:  tool.InputSchema,
+					},
+				})
+			case map[string]any:
+				name, _ := tool["name"].(string)
+				desc, _ := tool["description"].(string)
+				if name != "" && tool["type"] != "web_search_20250305" {
+					out.Tools = append(out.Tools, dto.Tool{
+						Type: "function",
+						Function: dto.ToolFunction{
+							Name:        name,
+							Description: desc,
+							Parameters:  tool["input_schema"],
+						},
+					})
+				}
+			}
+		}
+	case []dto.ClaudeTool:
+		for _, tool := range tools {
 			out.Tools = append(out.Tools, dto.Tool{
 				Type: "function",
 				Function: dto.ToolFunction{
-					Name:        t.Name,
-					Description: t.Description,
-					Parameters:  t.InputSchema,
+					Name:        tool.Name,
+					Description: tool.Description,
+					Parameters:  tool.InputSchema,
 				},
 			})
 		}
@@ -158,13 +195,15 @@ func ConvertOpenAIToClaudeV2(req *dto.ChatCompletionRequest, upstreamModel strin
 	}
 
 	if len(req.Tools) > 0 {
+		claudeTools := make([]any, 0, len(req.Tools))
 		for _, t := range req.Tools {
-			out.Tools = append(out.Tools, dto.ClaudeTool{
+			claudeTools = append(claudeTools, dto.ClaudeTool{
 				Name:        t.Function.Name,
 				Description: t.Function.Description,
 				InputSchema: t.Function.Parameters,
 			})
 		}
+		out.Tools = claudeTools
 	}
 	if req.ToolChoice != nil {
 		out.ToolChoice = convertOpenAIToolChoiceToClaude(req.ToolChoice)

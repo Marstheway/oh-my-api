@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 1m
+  evaluation_interval: 1m
+
+scrape_configs:
+  - job_name: "oh-my-api"
+    static_configs:
+      - targets: ["oh-my-api:9090"]

@@ -46,6 +46,5 @@ tmp/
 # Git worktrees
 .worktrees/
 
-# Personal deployment artifacts (not for OSS)
-deploy.sh
-docker-dev/
+# Codex CLI
+.codex/

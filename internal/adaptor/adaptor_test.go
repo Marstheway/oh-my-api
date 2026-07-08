@@ -10,19 +10,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
+	"github.com/gin-gonic/gin"
 )
 
 func TestConvertOpenAIToClaude(t *testing.T) {
 	tests := []struct {
-		name     string
-		request  *dto.ChatCompletionRequest
-		model    string
-		wantModel string
-		wantSystem string
+		name         string
+		request      *dto.ChatCompletionRequest
+		model        string
+		wantModel    string
+		wantSystem   string
 		wantMsgCount int
 	}{
 		{
@@ -35,9 +35,9 @@ func TestConvertOpenAIToClaude(t *testing.T) {
 				},
 				MaxTokens: 100,
 			},
-			model: "claude-3-opus",
-			wantModel: "claude-3-opus",
-			wantSystem: "You are helpful.",
+			model:        "claude-3-opus",
+			wantModel:    "claude-3-opus",
+			wantSystem:   "You are helpful.",
 			wantMsgCount: 1,
 		},
 		{
@@ -48,8 +48,8 @@ func TestConvertOpenAIToClaude(t *testing.T) {
 					{Role: "user", Content: "Hello"},
 				},
 			},
-			model: "claude-3-opus",
-			wantModel: "claude-3-opus",
+			model:        "claude-3-opus",
+			wantModel:    "claude-3-opus",
 			wantMsgCount: 1,
 		},
 		{
@@ -70,8 +70,8 @@ func TestConvertOpenAIToClaude(t *testing.T) {
 					},
 				},
 			},
-			model: "claude-3-opus",
-			wantModel: "claude-3-opus",
+			model:        "claude-3-opus",
+			wantModel:    "claude-3-opus",
 			wantMsgCount: 1,
 		},
 	}
@@ -103,7 +103,7 @@ func TestConvertOpenAIToClaude(t *testing.T) {
 
 func TestConvertTools(t *testing.T) {
 	req := &dto.ChatCompletionRequest{
-		Model:   "gpt-4",
+		Model:    "gpt-4",
 		Messages: []dto.Message{{Role: "user", Content: "hi"}},
 		Tools: []dto.Tool{
 			{
@@ -119,12 +119,16 @@ func TestConvertTools(t *testing.T) {
 
 	result := ConvertOpenAIToClaudeV2(req, "claude-3-opus")
 
-	if len(result.Tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(result.Tools))
+	tools, ok := result.Tools.([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %v", result.Tools)
 	}
-
-	if result.Tools[0].Name != "get_weather" {
-		t.Errorf("tool name = %q, want %q", result.Tools[0].Name, "get_weather")
+	t0, ok := tools[0].(dto.ClaudeTool)
+	if !ok {
+		t.Fatalf("tool is not ClaudeTool, got %T", tools[0])
+	}
+	if t0.Name != "get_weather" {
+		t.Errorf("tool name = %q, want %q", t0.Name, "get_weather")
 	}
 }
 
@@ -316,10 +320,10 @@ func TestAnthropicAdaptor_ConvertResponse(t *testing.T) {
 }
 
 func TestGetAdaptor(t *testing.T) {
-	if _, ok := GetAdaptor("openai").(*OpenAIAdaptor); !ok {
+	if _, ok := GetAdaptor(string(ProtocolOpenAI)).(*OpenAIAdaptor); !ok {
 		t.Error("expected *OpenAIAdaptor for openai protocol")
 	}
-	if _, ok := GetAdaptor("anthropic").(*AnthropicAdaptor); !ok {
+	if _, ok := GetAdaptor(string(ProtocolAnthropic)).(*AnthropicAdaptor); !ok {
 		t.Error("expected *AnthropicAdaptor for anthropic protocol")
 	}
 	if _, ok := GetAdaptor("unknown").(*OpenAIAdaptor); !ok {
@@ -709,6 +713,80 @@ func TestOpenAIAdaptor_StreamFromAnthropicInbound(t *testing.T) {
 
 	if !strings.Contains(w.Body.String(), "Hello from OpenAI") {
 		t.Error("should forward the original OpenAI stream content")
+	}
+}
+
+func TestBuildURL_OllamaChat_NoSuffix(t *testing.T) {
+	got := BuildURL("http://localhost:11434", ProtocolOllamaChat)
+	want := "http://localhost:11434/api/chat"
+	if got != want {
+		t.Fatalf("BuildURL() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildURL_OllamaChat_AlreadyHasSuffix(t *testing.T) {
+	got := BuildURL("http://localhost:11434/api/chat", ProtocolOllamaChat)
+	want := "http://localhost:11434/api/chat"
+	if got != want {
+		t.Fatalf("BuildURL() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildURL_OllamaChat_DoesNotReuseOpenAIStylePath(t *testing.T) {
+	got := BuildURL("http://localhost:11434/v1/chat/completions", ProtocolOllamaChat)
+	want := "http://localhost:11434/v1/chat/completions/api/chat"
+	if got != want {
+		t.Fatalf("BuildURL() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildURL_OllamaChat_TrailingSlash(t *testing.T) {
+	got := BuildURL("http://localhost:11434/", ProtocolOllamaChat)
+	want := "http://localhost:11434/api/chat"
+	if got != want {
+		t.Fatalf("BuildURL() = %q, want %q", got, want)
+	}
+}
+
+func TestGetAdaptor_Ollama(t *testing.T) {
+	a := GetAdaptor("ollama.chat")
+	if _, ok := a.(*OllamaAdaptor); !ok {
+		t.Errorf("expected *OllamaAdaptor for ollama.chat, got %T", a)
+	}
+}
+
+func TestOllamaChatAdaptor_BuildRequest_NoKey(t *testing.T) {
+	a := &OllamaAdaptor{}
+	provider := &config.ProviderConfig{
+		Endpoint: "http://localhost:11434",
+		APIKey:   "",
+	}
+
+	req := a.BuildRequest(context.Background(), provider, "llama3", strings.NewReader(`{}`), ProtocolOllamaChat)
+	if req == nil {
+		t.Fatal("expected non-nil request")
+	}
+	if req.URL.String() != "http://localhost:11434/api/chat" {
+		t.Errorf("url = %q, want %q", req.URL.String(), "http://localhost:11434/api/chat")
+	}
+	if req.Header.Get("Content-Type") != "application/json" {
+		t.Errorf("Content-Type not set correctly")
+	}
+	if req.Header.Get("Authorization") != "" {
+		t.Errorf("Authorization should not be set when api_key is empty, got %q", req.Header.Get("Authorization"))
+	}
+}
+
+func TestOllamaChatAdaptor_BuildRequest_WithKey(t *testing.T) {
+	a := &OllamaAdaptor{}
+	provider := &config.ProviderConfig{
+		Endpoint: "http://localhost:11434",
+		APIKey:   "sk-ollama",
+	}
+
+	req := a.BuildRequest(context.Background(), provider, "llama3", strings.NewReader(`{}`), ProtocolOllamaChat)
+	if req.Header.Get("Authorization") != "Bearer sk-ollama" {
+		t.Errorf("Authorization = %q, want %q", req.Header.Get("Authorization"), "Bearer sk-ollama")
 	}
 }
 

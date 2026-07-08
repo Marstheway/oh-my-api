@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Marstheway/oh-my-api/internal/health"
 	"github.com/Marstheway/oh-my-api/internal/provider"
@@ -13,16 +14,20 @@ import (
 )
 
 type LoadBalanceStrategy struct {
-	client    *provider.Client
-	ratelimit *ratelimit.Manager
-	health    *health.Checker
+	client            *provider.Client
+	ratelimit         *ratelimit.Manager
+	health            *health.Checker
+	prefillTimeout    time.Duration
+	streamIdleTimeout time.Duration
 }
 
-func NewLoadBalanceStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker) *LoadBalanceStrategy {
+func NewLoadBalanceStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker, prefillTimeout time.Duration, streamIdleTimeout time.Duration) *LoadBalanceStrategy {
 	return &LoadBalanceStrategy{
-		client:    client,
-		ratelimit: rl,
-		health:    h,
+		client:            client,
+		ratelimit:         rl,
+		health:            h,
+		prefillTimeout:    prefillTimeout,
+		streamIdleTimeout: streamIdleTimeout,
 	}
 }
 
@@ -31,89 +36,105 @@ func (s *LoadBalanceStrategy) Execute(ctx context.Context, tasks []Task) (*Resul
 		return nil, ErrNoTasks
 	}
 
-	// 过滤不健康的 provider
-	healthyTasks := s.filterHealthy(tasks)
+	now := time.Now().Local()
+
+	if allProvidersDisabledOrUnhealthy(tasks, s.health, now) {
+		return nil, ErrNoProviderAvailable
+	}
+
+	healthyTasks := s.filterHealthy(tasks, now)
 	if len(healthyTasks) == 0 {
-		return nil, ErrNoHealthyProvider
+		return nil, ErrNoProviderAvailable
 	}
 
 	selector := NewWeightedSelector(healthyTasks)
-	var lastErr error
-	var lastResp *http.Response
-	var lastTask *Task
+	fallback := newSequentialFallback()
 
 	for !selector.IsEmpty() {
 		task := selector.Select()
 		if task == nil {
 			break
 		}
+		selectedTask := *task
 
 		slog.Debug("load-balance selected candidate",
-			"provider", task.ProviderName,
-			"model", task.UpstreamModel,
-			"weight", task.Weight,
+			"provider", selectedTask.ProviderName,
+			"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+			"weight", selectedTask.Weight,
 			"remaining_candidates", selector.Len(),
 		)
 
-		resp, err := s.executeTask(ctx, task)
-		if err == nil && resp.StatusCode < 400 {
+		result, err := s.executeTask(ctx, &selectedTask)
+		if err == nil && result != nil && result.FailureKind == FailureKindSuccess {
 			slog.Debug("load-balance request succeeded",
-				"provider", task.ProviderName,
-				"model", task.UpstreamModel,
-				"status", resp.StatusCode,
+				"provider", selectedTask.ProviderName,
+				"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+				"status", result.Response.StatusCode,
 			)
-			return s.parseResponse(resp, task.ProviderName, task.UpstreamModel, task.Provider.Protocol)
+			fallback.DiscardSoftResult()
+			return result, nil
 		}
 
-		// 失败，移除该 provider 并尝试下一个
-		failureReason := ""
-		if resp != nil && resp.StatusCode >= 400 {
-			failureReason = summarizeUpstreamError(resp, 120)
+		selector.RemoveTask(task)
+		s.removeUnhealthySiblingTasks(selector, &selectedTask)
+
+		if IsRateLimitError(err) {
+			fallback.RecordRateLimit()
+			continue
+		}
+
+		if err != nil {
+			slog.Debug("load-balance request failed, removing candidate",
+				"provider", selectedTask.ProviderName,
+				"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+				"error", err,
+			)
+			fallback.RecordHardError(err)
+			continue
+		}
+		if result == nil {
+			continue
+		}
+
+		if result.FailureKind == FailureKindSoft {
+			slog.Debug("content_filter_soft_failure",
+				"provider", selectedTask.ProviderName,
+				"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+				"reason", result.FailureReason,
+			)
+			fallback.RecordSoftResult(result)
+			continue
+		}
+
+		failureReason := result.FailureReason
+		if failureReason == "" && result.Response != nil && result.Response.StatusCode >= http.StatusBadRequest {
+			failureReason = summarizeUpstreamError(result.Response, 120)
 		}
 
 		slog.Debug("load-balance request failed, removing candidate",
-			"provider", task.ProviderName,
-			"model", task.UpstreamModel,
-			"error", err,
+			"provider", selectedTask.ProviderName,
+			"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
 			"status", func() int {
-				if resp != nil {
-					return resp.StatusCode
+				if result.Response != nil {
+					return result.Response.StatusCode
 				}
 				return 0
 			}(),
 			"reason", failureReason,
 		)
-		selector.Remove(task.ProviderName)
-		lastErr = err
-		lastResp = resp
-		lastTask = task
-
-		// 检查是否还有健康 provider
-		healthyTasks = s.filterHealthy(tasks)
-		if len(healthyTasks) == 0 {
-			break
-		}
+		fallback.RecordHardResult(result)
 	}
 
-	// 返回最后一个错误响应
-	if lastResp != nil && lastTask != nil {
-		return s.parseResponse(lastResp, lastTask.ProviderName, lastTask.UpstreamModel, lastTask.Provider.Protocol)
-	}
-
-	if lastErr != nil && IsRateLimitError(lastErr) {
-		return nil, ErrAllRateLimited
-	}
-
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, ErrNoHealthyProvider
+	return fallback.Final()
 }
 
-func (s *LoadBalanceStrategy) filterHealthy(tasks []Task) []Task {
+func (s *LoadBalanceStrategy) filterHealthy(tasks []Task, now time.Time) []Task {
 	var healthy []Task
 	for _, t := range tasks {
 		// 注意：这里不能调用 Allow()，否则会为未选中的 provider 也消耗令牌
+		if isProviderDisabledAt(t, now) {
+			continue
+		}
 		healthKey := health.MakeHealthKey(t.ProviderName, t.OutboundProtocol)
 		if s.health.IsHealthy(healthKey) {
 			healthy = append(healthy, t)
@@ -130,34 +151,69 @@ func (s *LoadBalanceStrategy) filterHealthy(tasks []Task) []Task {
 	return healthy
 }
 
-func (s *LoadBalanceStrategy) executeTask(ctx context.Context, task *Task) (*http.Response, error) {
+func (s *LoadBalanceStrategy) removeUnhealthySiblingTasks(selector *WeightedSelector, task *Task) {
+	if selector == nil || task == nil {
+		return
+	}
+
+	healthKey := health.MakeHealthKey(task.ProviderName, task.OutboundProtocol)
+	if s.health.IsHealthy(healthKey) {
+		return
+	}
+
+	selector.RemoveByHealthKey(healthKey)
+}
+
+func (s *LoadBalanceStrategy) executeTask(ctx context.Context, task *Task) (*Result, error) {
+	start := time.Now()
 	// 真正选中后才消耗令牌；限流时直接尝试下一个，避免单个 provider 阻塞整次请求
 	if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel) {
 		slog.Warn("provider rate limited, trying next",
 			"provider", task.ProviderName,
-			"model", task.UpstreamModel,
+			"upstream_identity", task.ProviderName+"/"+task.UpstreamModel,
 		)
 		return nil, &RateLimitError{Provider: task.ProviderName, Err: ErrAllRateLimited}
 	}
 
 	resp, err := s.client.Do(task.ProviderName, task.Request)
-
-	// 上报健康状态
 	if err != nil {
+		recordAttemptMetric("loadbalance", *task, nil, err, time.Since(start))
 		s.health.ReportFailure(health.MakeHealthKey(task.ProviderName, task.OutboundProtocol))
 		return nil, err
 	}
-	if resp.StatusCode >= 500 {
-		s.health.ReportFailure(health.MakeHealthKey(task.ProviderName, task.OutboundProtocol))
-	} else if resp.StatusCode < 400 {
-		s.health.ReportSuccess(health.MakeHealthKey(task.ProviderName, task.OutboundProtocol))
+
+	healthKey := health.MakeHealthKey(task.ProviderName, task.OutboundProtocol)
+	result, err := s.parseResponse(resp, task.ProviderName, task.UpstreamModel, responseProtocol(*task), s.prefillTimeout, s.streamIdleTimeout)
+	if err != nil {
+		recordAttemptMetric("loadbalance", *task, nil, err, time.Since(start))
+		s.health.ReportFailure(healthKey)
+		return nil, err
 	}
 
-	return resp, err
+	// 统一应用 TokenHub 错误码分类（仅对硬失败重分级）
+	applyTokenHubClassification(result, resp, task.Request)
+
+	recordAttemptMetric("loadbalance", *task, result, nil, time.Since(start))
+
+	applyHealthAction(s.health, healthKey, result)
+	if result.HealthActionInfo.Action != HealthActionNone {
+		return result, nil
+	}
+
+	switch result.FailureKind {
+	case FailureKindSuccess:
+		s.health.ReportSuccess(healthKey)
+	case FailureKindHard:
+		if result.Response != nil && result.Response.StatusCode >= http.StatusInternalServerError {
+			s.health.ReportFailure(healthKey)
+		}
+	}
+
+	return result, nil
 }
 
-func (s *LoadBalanceStrategy) parseResponse(resp *http.Response, providerName, upstreamModel, protocol string) (*Result, error) {
-	return parseResponse(resp, providerName, upstreamModel, protocol)
+func (s *LoadBalanceStrategy) parseResponse(resp *http.Response, providerName, upstreamModel, protocol string, prefillTimeout time.Duration, streamIdleTimeout time.Duration) (*Result, error) {
+	return parseResponse(resp, providerName, upstreamModel, protocol, prefillTimeout, streamIdleTimeout)
 }
 
 func summarizeUpstreamError(resp *http.Response, maxRunes int) string {

@@ -14,18 +14,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func passThroughAnthropicResponse(c *gin.Context, resp *http.Response, isStream bool, counter TokenCounter) error {
-	for k, v := range resp.Header {
-		c.Writer.Header()[k] = v
-	}
-	c.Writer.WriteHeader(resp.StatusCode)
-
+func passThroughAnthropicResponse(c *gin.Context, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
 	if isStream {
-		err := passThroughAnthropicStream(c, resp, counter)
-		if counter != nil {
-			counter.SetLatency()
-		}
-		return err
+		copyResponseHeaders(c.Writer.Header(), resp.Header)
+		c.Writer.WriteHeader(resp.StatusCode)
+		return passThroughAnthropicStream(c, resp, counter, rmc.RequestedModel)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -33,25 +26,34 @@ func passThroughAnthropicResponse(c *gin.Context, resp *http.Response, isStream 
 		return err
 	}
 
+	var claudeResp dto.ClaudeResponse
+	if err := json.Unmarshal(body, &claudeResp); err != nil {
+		return err
+	}
+
 	if counter != nil {
 		if sc, ok := counter.(*token.StreamCounter); ok {
-			var claudeResp dto.ClaudeResponse
-			if err := json.Unmarshal(body, &claudeResp); err == nil {
-				text := token.ExtractTextFromClaudeResponse(&claudeResp)
-				sc.AddOutputText(text)
-				sc.ComputeOutputTokens()
-			}
+			text := token.ExtractTextFromClaudeResponse(&claudeResp)
+			sc.AddOutputText(text)
+			sc.ComputeOutputTokens()
 		}
 	}
 
-	c.Data(resp.StatusCode, "application/json", body)
-	if counter != nil {
-		counter.SetLatency()
+	outBody, err := rewriteTopLevelModel(body, rmc.RequestedModel)
+	if err != nil {
+		return err
 	}
+
+	copyResponseHeaders(c.Writer.Header(), resp.Header)
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	c.Data(resp.StatusCode, contentType, outBody)
 	return nil
 }
 
-func passThroughAnthropicStream(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func passThroughAnthropicStream(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
@@ -67,22 +69,33 @@ func passThroughAnthropicStream(c *gin.Context, resp *http.Response, counter Tok
 			break
 		}
 
-		_, _ = c.Writer.WriteString(line)
-		flusher.Flush()
-
-		line = strings.TrimSuffix(line, "\n")
-		if strings.HasPrefix(line, "data: ") && counter != nil {
-			data := strings.TrimPrefix(line, "data: ")
+		trimmed := strings.TrimSuffix(line, "\n")
+		if strings.HasPrefix(trimmed, "data: ") {
+			data := strings.TrimPrefix(trimmed, "data: ")
 			if data != "" && data != "[DONE]" {
-				if sc, ok := counter.(*token.StreamCounter); ok {
-					var event dto.ClaudeStreamEvent
-					if err := json.Unmarshal([]byte(data), &event); err == nil {
-						text := token.ExtractTextFromClaudeStreamEvent(&event)
-						sc.AddOutputText(text)
+				var event dto.ClaudeStreamEvent
+				if jsonErr := json.Unmarshal([]byte(data), &event); jsonErr == nil {
+					if counter != nil {
+						if sc, ok2 := counter.(*token.StreamCounter); ok2 {
+							sc.AddOutputText(token.ExtractTextFromClaudeStreamEvent(&event))
+						}
+					}
+					if requestedModel != "" && event.Type == "message_start" && event.Message != nil {
+						if rewrittenData, rewriteErr := rewriteNestedModel([]byte(data), "message", requestedModel); rewriteErr == nil {
+							_, _ = fmt.Fprintf(c.Writer, "data: %s\n", rewrittenData)
+							flusher.Flush()
+							if err == io.EOF {
+								break
+							}
+							continue
+						}
 					}
 				}
 			}
 		}
+
+		_, _ = c.Writer.WriteString(line)
+		flusher.Flush()
 
 		if err == io.EOF {
 			break
@@ -96,7 +109,7 @@ func passThroughAnthropicStream(c *gin.Context, resp *http.Response, counter Tok
 	return nil
 }
 
-func writeClaudeResponseAsOpenAI(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func writeClaudeResponseAsOpenAI(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -116,14 +129,14 @@ func writeClaudeResponseAsOpenAI(c *gin.Context, resp *http.Response, counter To
 	}
 
 	openAIResp := convertClaudeResponseToOpenAI(&claudeResp)
-	c.JSON(http.StatusOK, openAIResp)
-	if counter != nil {
-		counter.SetLatency()
+	if rmc.RequestedModel != "" {
+		openAIResp.Model = rmc.RequestedModel
 	}
+	c.JSON(http.StatusOK, openAIResp)
 	return nil
 }
 
-func writeClaudeStreamAsOpenAI(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func writeClaudeStreamAsOpenAI(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
@@ -134,7 +147,7 @@ func writeClaudeStreamAsOpenAI(c *gin.Context, resp *http.Response, counter Toke
 	}
 
 	responseID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
-	model := ""
+	model := requestedModel
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
@@ -181,7 +194,7 @@ func writeClaudeStreamAsOpenAI(c *gin.Context, resp *http.Response, counter Toke
 			if event.Message.ID != "" {
 				responseID = event.Message.ID
 			}
-			if event.Message.Model != "" {
+			if requestedModel == "" && event.Message.Model != "" {
 				model = event.Message.Model
 			}
 		}
@@ -217,7 +230,6 @@ func writeClaudeStreamAsOpenAI(c *gin.Context, resp *http.Response, counter Toke
 		if sc, ok := counter.(*token.StreamCounter); ok {
 			sc.ComputeOutputTokens()
 		}
-		counter.SetLatency()
 	}
 
 	return nil
@@ -248,6 +260,27 @@ func convertClaudeResponseToOpenAI(resp *dto.ClaudeResponse) *dto.ChatCompletion
 					Arguments: string(args),
 				},
 			})
+		case "image":
+			// Image blocks in Claude response are skipped because OpenAI Chat format
+			// doesn't support multimodal content in the assistant's response message.
+			// The image data from upstream cannot be represented in the OpenAI Chat response format.
+		case "document":
+			// Document blocks in Claude response are skipped because OpenAI Chat format
+			// doesn't support file attachments in the assistant's response message.
+			// The document data from upstream cannot be represented in the OpenAI Chat response format.
+		}
+	}
+
+	usage := dto.Usage{
+		PromptTokens:     resp.Usage.InputTokens,
+		CompletionTokens: resp.Usage.OutputTokens,
+		TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+	}
+
+	// Map CacheReadInputTokens to PromptTokensDetails.CachedTokens
+	if resp.Usage.CacheReadInputTokens > 0 {
+		usage.PromptTokensDetails = &dto.UsageDetails{
+			CachedTokens: resp.Usage.CacheReadInputTokens,
 		}
 	}
 
@@ -261,11 +294,7 @@ func convertClaudeResponseToOpenAI(resp *dto.ClaudeResponse) *dto.ChatCompletion
 			Message:      msg,
 			FinishReason: &finishReason,
 		}},
-		Usage: dto.Usage{
-			PromptTokens:     resp.Usage.InputTokens,
-			CompletionTokens: resp.Usage.OutputTokens,
-			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		},
+		Usage: usage,
 	}
 }
 
@@ -284,9 +313,7 @@ func convertClaudeStreamEventToOpenAI(responseID, model string, event *dto.Claud
 			if event.Message.ID != "" {
 				chunk.ID = event.Message.ID
 			}
-			if event.Message.Model != "" {
-				chunk.Model = event.Message.Model
-			}
+			// model is already set from the constructor argument; don't overwrite with upstream value
 		}
 		chunk.Choices[0].Delta.Role = "assistant"
 		return chunk
@@ -317,9 +344,11 @@ func convertClaudeStreamEventToOpenAI(responseID, model string, event *dto.Claud
 			return chunk
 		case "input_json_delta":
 			chunk.Choices[0].Index = event.Index
-			chunk.Choices[0].Delta.ToolCalls = []dto.ToolCall{{
-				Function: dto.ToolCallFunc{Arguments: event.Delta.PartialJSON},
-			}}
+			if event.Delta.PartialJSON != nil {
+				chunk.Choices[0].Delta.ToolCalls = []dto.ToolCall{{
+					Function: dto.ToolCallFunc{Arguments: *event.Delta.PartialJSON},
+				}}
+			}
 			return chunk
 		case "thinking_delta":
 			chunk.Choices[0].Delta.ReasoningContent = event.Delta.Thinking

@@ -14,6 +14,35 @@ type ResponsesRequest struct {
 	TopP            *float64        `json:"top_p,omitempty"`
 	Tools           []ResponsesTool `json:"tools,omitempty"`
 	ToolChoice      any             `json:"tool_choice,omitempty"`
+	// 新增字段
+	Include              json.RawMessage     `json:"include,omitempty"`
+	Conversation         json.RawMessage     `json:"conversation,omitempty"`
+	ContextManagement    json.RawMessage     `json:"context_management,omitempty"`
+	TopLogProbs          *int                `json:"top_logprobs,omitempty"`
+	Metadata             json.RawMessage     `json:"metadata,omitempty"`
+	ParallelToolCalls    json.RawMessage     `json:"parallel_tool_calls,omitempty"`
+	PreviousResponseID   string              `json:"previous_response_id,omitempty"`
+	Reasoning            *ResponsesReasoning `json:"reasoning,omitempty"`
+	ServiceTier          string              `json:"service_tier,omitempty"`
+	Store                json.RawMessage     `json:"store,omitempty"`
+	PromptCacheKey       json.RawMessage     `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention json.RawMessage     `json:"prompt_cache_retention,omitempty"`
+	SafetyIdentifier     json.RawMessage     `json:"safety_identifier,omitempty"`
+	StreamOptions        *StreamOptions      `json:"stream_options,omitempty"`
+	Text                 json.RawMessage     `json:"text,omitempty"`
+	Truncation           json.RawMessage     `json:"truncation,omitempty"`
+	User                 json.RawMessage     `json:"user,omitempty"`
+	MaxToolCalls         *int                `json:"max_tool_calls,omitempty"`
+	Prompt               json.RawMessage     `json:"prompt,omitempty"`
+	// Provider 特有字段
+	EnableThinking json.RawMessage `json:"enable_thinking,omitempty"` // Qwen
+	Preset         json.RawMessage `json:"preset,omitempty"`          // Perplexity
+}
+
+// ResponsesReasoning 是推理配置。
+type ResponsesReasoning struct {
+	Effort  string `json:"effort,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // ResponsesTool 是 Responses API 的工具定义。
@@ -26,22 +55,35 @@ type ResponsesTool struct {
 
 // ResponsesResponse 是 /v1/responses 接口的非流式响应体。
 type ResponsesResponse struct {
-	ID                string             `json:"id"`
-	Object            string             `json:"object"`
-	CreatedAt         int64              `json:"created_at"`
-	Model             string             `json:"model"`
-	Status            string             `json:"status"`
-	Output            []ResponsesOutput  `json:"output"`
-	Usage             ResponsesUsage     `json:"usage"`
-	IncompleteDetails *IncompleteDetails `json:"incomplete_details,omitempty"`
-	Error             *ResponsesError    `json:"error,omitempty"`
+	ID                 string             `json:"id"`
+	Object             string             `json:"object"`
+	CreatedAt          int64              `json:"created_at"`
+	Model              string             `json:"model"`
+	Status             string             `json:"status"`
+	Output             []ResponsesOutput  `json:"output"`
+	Usage              ResponsesUsage     `json:"usage"`
+	IncompleteDetails  *IncompleteDetails `json:"incomplete_details,omitempty"`
+	Error              *ResponsesError    `json:"error,omitempty"`
+	PreviousResponseID string             `json:"previous_response_id,omitempty"`
 }
 
 // ResponsesUsage 记录 token 用量。
 type ResponsesUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens             int                       `json:"input_tokens"`
+	OutputTokens            int                       `json:"output_tokens"`
+	TotalTokens             int                       `json:"total_tokens"`
+	ReasoningTokens         int                       `json:"reasoning_tokens,omitempty"`
+	CachedTokens            int                       `json:"cached_tokens,omitempty"`
+	InputTokensDetails      *ResponsesUsageDetails    `json:"input_tokens_details,omitempty"`
+	CompletionTokensDetails *ResponsesUsageDetails    `json:"completion_tokens_details,omitempty"`
+}
+
+// ResponsesUsageDetails 记录 Responses usage 细节字段。
+type ResponsesUsageDetails struct {
+	CachedTokens    int `json:"cached_tokens,omitempty"`
+	ImageTokens     int `json:"image_tokens,omitempty"`
+	AudioTokens     int `json:"audio_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // ResponsesOutput 是响应中的一个输出 item。
@@ -56,6 +98,8 @@ type ResponsesOutput struct {
 	CallID    string `json:"call_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
+	// 新增字段
+	Summary json.RawMessage `json:"summary,omitempty"`
 }
 
 // ResponsesOutputContent 是输出 message 的 content part。
@@ -72,7 +116,7 @@ type ResponsesInputItem struct {
 	Content   json.RawMessage `json:"content,omitempty"`
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
-	Output    string          `json:"output,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
 }
 

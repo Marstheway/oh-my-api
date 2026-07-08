@@ -1,0 +1,824 @@
+{{ define "title" }}Providers{{ end }}
+
+{{ define "styles" }}
+  /* ═══ Provider Grid ═══ */
+  .provider-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap: 1px;
+    background: var(--border-default);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+
+  .provider-card {
+    background: var(--bg-surface);
+    padding: 20px;
+    display: flex; flex-direction: column;
+    gap: 10px;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    position: relative;
+  }
+
+  .provider-card:hover { background: var(--bg-hover); }
+  .provider-card:hover .card-actions { opacity: 1; }
+
+  .card-header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 12px;
+  }
+
+  .card-title {
+    font-family: var(--font-mono); font-size: 15px; font-weight: 500;
+    color: var(--text-primary);
+    word-break: break-word;
+  }
+
+  .card-actions {
+    display: flex; gap: 2px; opacity: 0;
+    transition: opacity var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .card-info-row {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .card-info-row .label { color: var(--text-secondary); min-width: 60px; }
+
+  .card-meta {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin-top: 4px;
+    min-height: 26px;
+    align-content: flex-start;
+  }
+
+  /* ═══ Rate Limit Bar ═══ */
+  .rate-limit-bar {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 4px;
+  }
+
+  .rate-bar {
+    flex: 1; height: 4px;
+    background: var(--bg-input);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .rate-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 400ms ease;
+  }
+
+  .rate-label {
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--text-muted);
+    min-width: 50px; text-align: right;
+  }
+
+  /* ═══ Protocol Badges ═══ */
+  .protocol-badge-openai { background: rgba(16,163,127,0.12); color: #34d399; border: 1px solid rgba(16,163,127,0.25); }
+  .protocol-badge-anthropic { background: rgba(217,119,6,0.12); color: #fbbf24; border: 1px solid rgba(217,119,6,0.25); }
+  .protocol-badge-responses { background: rgba(16,163,127,0.12); color: #34d399; border: 1px solid rgba(16,163,127,0.25); }
+  .protocol-badge-ollama { background: rgba(236,72,153,0.12); color: #f472b6; border: 1px solid rgba(236,72,153,0.25); }
+
+
+
+  /* ═══ Table Editor ═══ */
+  .table-editor {
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+  }
+
+  .table-editor-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-default);
+    background: var(--bg-elevated);
+  }
+
+  .table-editor-header span {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    flex: 1;
+  }
+
+  .table-editor-header .w-40 { flex: 0 0 140px; min-width: 0; }
+  .table-editor-header .w-32 { flex: 0 0 110px; min-width: 0; }
+  .table-editor-header .w-48 { flex: 0 0 160px; min-width: 0; }
+  .table-editor-header .w-auto { flex: 0 0 auto; min-width: 0; width: 28px; }
+
+  .table-editor-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border-default);
+  }
+
+  .table-editor-row:last-child { border-bottom: none; }
+
+  .table-editor-row .form-input { flex: 1; padding: 5px 8px; }
+  .table-editor-row .form-input.w-40 { flex: 0 0 140px; min-width: 0; }
+  .table-editor-row .form-input.w-32 { flex: 0 0 110px; min-width: 0; }
+  .table-editor-row .form-input.w-48 { flex: 0 0 160px; min-width: 0; }
+  .table-editor-row .dropdown.w-40 { flex: 0 0 140px; min-width: 0; }
+  .table-editor-row .dropdown.w-32 { flex: 0 0 110px; min-width: 0; }
+  .table-editor-row .dropdown.w-48 { flex: 0 0 160px; min-width: 0; }
+  .table-editor-row .btn-icon.w-auto { flex: 0 0 auto; width: 28px; height: 24px; }
+
+  /* ═══ Endpoint Protocols ═══ */
+  .endpoint-protocols {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    min-width: 200px;
+    padding: 4px 6px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    cursor: text;
+  }
+
+  .endpoint-protocols:focus-within {
+    border-color: var(--accent);
+  }
+
+  .endpoint-protocols .tag {
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-default);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .endpoint-protocols .tag-remove {
+    margin-left: 4px;
+    cursor: pointer;
+    opacity: 0.6;
+  }
+
+  .endpoint-protocols .tag-remove:hover {
+    opacity: 1;
+  }
+
+  .endpoint-protocols input {
+    border: none;
+    background: transparent;
+    outline: none;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-primary);
+    min-width: 80px;
+    flex: 1;
+  }
+
+  .table-editor-add {
+    padding: 6px 10px;
+    background: var(--bg-surface);
+  }
+
+  /* ═══ Collapsible Panel ═══ */
+  .collapse-toggle {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 0; cursor: pointer;
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
+    transition: color var(--transition-fast);
+    border: none; background: none;
+    width: 100%;
+  }
+
+  .collapse-toggle:hover { color: var(--text-primary); }
+
+  .collapse-icon {
+    width: 12px; height: 12px;
+    transition: transform var(--transition-fast);
+  }
+
+  .collapse-toggle.collapsed .collapse-icon { transform: rotate(-90deg); }
+
+  .collapse-content {
+    display: flex; flex-direction: column; gap: 12px;
+    overflow: hidden; max-height: 2000px;
+    transition: max-height var(--transition-normal);
+  }
+
+  .collapse-toggle.collapsed + .collapse-content {
+    max-height: 0;
+  }
+
+  /* ═══ Form Section ═══ */
+  .form-section {
+    border-top: 1px solid var(--border-default);
+    padding-top: 16px;
+    margin-top: 4px;
+  }
+
+  .form-section-title {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 500;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;
+    margin-bottom: 12px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+
+  /* ═══ Modal Width Override ═══ */
+  .modal { max-width: 720px; }
+
+  /* ═══ Responsive ═══ */
+  @media (max-width: 768px) {
+    .provider-grid { grid-template-columns: 1fr; }
+    .form-row { flex-direction: column; }
+  }
+{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <div class="page-title">Providers</div>
+    <div class="page-subtitle">Upstream API connections and protocol configuration</div>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-primary" onclick="openProviderModal()">
+      <i data-lucide="plus" style="width:13px;height:13px"></i>
+      New Provider
+    </button>
+  </div>
+</div>
+
+{{ template "draft-bar" }}
+
+<!-- Providers Grid -->
+<div class="provider-grid" id="providerGrid"></div>
+
+<!-- Empty State -->
+<div class="empty-state" id="emptyState" style="display:none">
+  <div class="empty-icon">&#x2630;</div>
+  <div class="empty-title">No providers configured</div>
+  <button class="btn btn-primary btn-sm" onclick="openProviderModal()">Create First Provider</button>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script>
+// ══════ State ══════
+
+let providers = [];
+let originalProviders = [];
+let editProviderName = null;
+
+// Draft bar 配置（shared.js 使用）
+window.draftBarConfig = {
+  hasChanges: () => JSON.stringify(originalProviders) !== JSON.stringify(providers),
+  onApplySuccess: () => {
+    originalProviders = JSON.parse(JSON.stringify(providers));
+  }
+};
+
+// ══════ Load Data ══════
+
+async function loadProviders() {
+  try {
+    const data = await apiFetch('/admin/runtime-config/draft/providers');
+    providers = data || [];
+    // 首次加载时保存原始状态
+    if (originalProviders.length === 0 || providers.length === 0) {
+      originalProviders = JSON.parse(JSON.stringify(providers));
+    }
+    renderProviders();
+    updateDraftBar();
+  } catch (err) {
+    showToast('Failed to load providers', 'error');
+  }
+}
+
+// ══════ Render ══════
+
+function renderProviders() {
+  const grid = document.getElementById('providerGrid');
+  const empty = document.getElementById('emptyState');
+
+  // 防御性处理：providers 为 null/undefined 时视为空数组
+  const list = (providers || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+
+  if (list.length === 0) {
+    grid.style.display = 'none';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  grid.style.display = 'grid';
+  empty.style.display = 'none';
+
+  grid.innerHTML = list.map(p => {
+    // Endpoint info
+    let endpointInfo = '';
+    if (p.endpoints && p.endpoints.length > 1) {
+      endpointInfo = `${p.endpoints.length} endpoints`;
+    } else if (p.endpoints && p.endpoints.length === 1) {
+      endpointInfo = escapeHtml(p.endpoints[0].url || '');
+    }
+
+    // Protocol badges
+    const protocolBadges = (p.protocols || []).map(proto => {
+      const badgeClass = getProtocolBadgeClass(proto);
+      const label = getProtocolLabel(proto);
+      return `<span class="badge ${badgeClass}">${escapeHtml(label)}</span>`;
+    }).join('');
+
+    // Advanced config badges
+    const advancedBadges = [];
+    if (p.upstream_models && p.upstream_models.length > 0) {
+      advancedBadges.push(`<span class="badge badge-neutral">${p.upstream_models.length} upstream models</span>`);
+    }
+    if (p.disabled_time_ranges && p.disabled_time_ranges.length > 0) {
+      advancedBadges.push('<span class="badge badge-danger">time restrictions</span>');
+    }
+    if (p.rate_limit && p.rate_limit.qpm > 0) {
+      advancedBadges.push(`<span class="badge badge-neutral">${p.rate_limit.qpm} qpm</span>`);
+    }
+
+    return `
+      <div class="provider-card" onclick="openProviderModal('${escapeAttr(p.name)}')">
+        <div class="card-header">
+          <div class="card-title">${escapeHtml(p.name)}</div>
+          <div class="card-actions" onclick="event.stopPropagation()">
+            <button class="btn-icon" onclick="openProviderModal('${escapeAttr(p.name)}')" title="Edit">
+              <i data-lucide="pencil" style="width:11px;height:11px"></i>
+            </button>
+            <button class="btn-icon" onclick="deleteProvider('${escapeAttr(p.name)}')" title="Delete" style="color:var(--danger);opacity:0.6">
+              <i data-lucide="trash-2" style="width:11px;height:11px"></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="card-info-row">
+          <span class="label">Endpoint:</span>
+          <span>${endpointInfo}</span>
+        </div>
+
+        <div class="card-meta">
+          ${protocolBadges}
+          ${advancedBadges.join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function getProtocolBadgeClass(protocol) {
+  if (protocol.includes('openai.chat')) return 'protocol-badge-openai';
+  if (protocol.includes('anthropic.messages')) return 'protocol-badge-anthropic';
+  if (protocol.includes('openai.responses')) return 'protocol-badge-responses';
+  if (protocol.includes('ollama')) return 'protocol-badge-ollama';
+  return 'badge-neutral';
+}
+
+function getProtocolLabel(protocol) {
+  if (protocol.includes('openai.chat')) return 'openai.chat';
+  if (protocol.includes('anthropic.messages')) return 'anthropic.messages';
+  if (protocol.includes('openai.responses')) return 'openai.responses';
+  if (protocol.includes('ollama.chat')) return 'ollama.chat';
+  if (protocol.includes('ollama.embed')) return 'ollama.embed';
+  return protocol;
+}
+
+// ══════ Modal ══════
+
+function openProviderModal(name) {
+  editProviderName = name || null;
+  const prov = name ? providers.find(p => p.name === name) : null;
+
+  // Merge endpoints array (backend always returns endpoints array now)
+  let endpoints = [];
+  if (prov && prov.endpoints && prov.endpoints.length > 0) {
+    endpoints = prov.endpoints;
+  }
+
+  // Default: at least one endpoint row
+  if (endpoints.length === 0) {
+    endpoints = [{ url: '', protocol: '' }];
+  }
+
+  const body = `
+    <!-- Basic Config -->
+    <div class="form-group">
+      <label class="form-label">Provider Name <span class="required">*</span></label>
+      <input class="form-input" id="pvName" type="text" value="${escapeAttr(prov ? prov.name : '')}" placeholder="e.g. openai">
+      <span class="form-error" id="pvNameErr"></span>
+    </div>
+
+    <div class="form-row">
+      <div class="form-group" style="flex: 1;">
+        <label class="form-label">API Key</label>
+        <input class="form-input" id="pvApiKey" type="text" value="${escapeAttr(prov ? prov.api_key : '')}" placeholder="sk-...">
+        <span class="form-hint">Leave empty for no-auth providers (e.g. Ollama)</span>
+      </div>
+      <div class="form-group" style="flex: 0 0 120px;">
+        <label class="form-label">Rate Limit (QPM)</label>
+        <input class="form-input" id="pvQpm" type="number" value="${prov && prov.rate_limit ? prov.rate_limit.qpm : ''}" min="1" placeholder="No limit">
+        <span class="form-hint">Requests per minute.</span>
+      </div>
+    </div>
+
+    <!-- Endpoints Configuration -->
+    <div class="form-group">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <label class="form-label" style="margin:0">Endpoints <span class="required">*</span></label>
+        <button class="btn btn-ghost btn-sm" onclick="addEndpointRow()">+ Add</button>
+      </div>
+      <div class="table-editor" id="endpointsEditor">
+        <div class="table-editor-header">
+          <span>Endpoint URL</span>
+          <span class="w-48">Protocols</span>
+          <span class="w-auto"></span>
+        </div>
+        ${endpoints.map((ep, i) => `
+          <div class="table-editor-row" data-index="${i}">
+            <input class="form-input" type="text" value="${escapeAttr(ep.url)}" placeholder="https://api.example.com/v1" data-field="url">
+            <div class="endpoint-protocols" data-index="${i}">
+              ${(ep.protocols || []).map(p => `<span class="tag">${escapeHtml(p)}<span class="tag-remove" onclick="this.parentElement.remove()">&times;</span></span>`).join('')}
+              <input class="tag-input" placeholder="Add..." onkeydown="handleEndpointProtocolKey(event, ${i})">
+            </div>
+            <button class="btn-icon w-auto" onclick="removeEndpointRow(this)" title="Remove" ${endpoints.length <= 1 ? 'disabled style="opacity:0.3;pointer-events:none"' : ''}>
+              <i data-lucide="minus" style="width:11px;height:11px"></i>
+            </button>
+          </div>
+        `).join('')}
+      </div>
+      <span class="form-hint">At least one endpoint required. For multi-protocol providers, configure separate endpoints for each protocol.</span>
+    </div>
+
+    <div class="form-section">
+      <button class="collapse-toggle ${prov && (prov.default_protocols && prov.default_protocols.length > 0) || (prov.upstream_models && prov.upstream_models.length > 0) ? '' : 'collapsed'}" onclick="this.classList.toggle('collapsed')">
+        <svg class="collapse-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Upstream Models</span>
+      </button>
+      <div class="collapse-content">
+        <div class="form-group">
+          <label class="form-label">Default Protocol</label>
+          <select class="form-select" id="defaultProtocolsSelect" data-dropdown>
+            <option value="" ${!prov?.default_protocols?.[0] ? 'selected' : ''}>none</option>
+            <option value="openai.chat" ${prov?.default_protocols?.[0] === 'openai.chat' ? 'selected' : ''}>openai.chat</option>
+            <option value="anthropic.messages" ${prov?.default_protocols?.[0] === 'anthropic.messages' ? 'selected' : ''}>anthropic.messages</option>
+            <option value="openai.responses" ${prov?.default_protocols?.[0] === 'openai.responses' ? 'selected' : ''}>openai.responses</option>
+            <option value="ollama.chat" ${prov?.default_protocols?.[0] === 'ollama.chat' ? 'selected' : ''}>ollama.chat</option>
+            <option value="ollama.embed" ${prov?.default_protocols?.[0] === 'ollama.embed' ? 'selected' : ''}>ollama.embed</option>
+          </select>
+          <span class="form-hint">Upstream models inherit this protocol unless overridden below</span>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Upstream Model Overrides</label>
+          <div class="table-editor" id="upstreamModelsEditor">
+            <div class="table-editor-header">
+              <span>Model Name</span>
+              <span class="w-32">QPM</span>
+              <span class="w-48">Protocol</span>
+              <span class="w-auto"></span>
+            </div>
+            ${(prov && prov.upstream_models ? prov.upstream_models : []).map((um, i) => `
+              <div class="table-editor-row" data-index="${i}">
+                <input class="form-input" type="text" value="${escapeAttr(um.model)}" placeholder="model name" data-field="model">
+                <input class="form-input w-32" type="number" value="${um.qpm || ''}" min="1" placeholder="inherit" data-field="qpm">
+                <select class="form-select w-48" data-field="allowed_protocols" data-dropdown>
+                  <option value="" ${!um.allowed_protocols?.[0] ? 'selected' : ''}>inherit</option>
+                  <option value="openai.chat" ${um.allowed_protocols?.[0] === 'openai.chat' ? 'selected' : ''}>openai.chat</option>
+                  <option value="anthropic.messages" ${um.allowed_protocols?.[0] === 'anthropic.messages' ? 'selected' : ''}>anthropic.messages</option>
+                  <option value="openai.responses" ${um.allowed_protocols?.[0] === 'openai.responses' ? 'selected' : ''}>openai.responses</option>
+                  <option value="ollama.chat" ${um.allowed_protocols?.[0] === 'ollama.chat' ? 'selected' : ''}>ollama.chat</option>
+                  <option value="ollama.embed" ${um.allowed_protocols?.[0] === 'ollama.embed' ? 'selected' : ''}>ollama.embed</option>
+                </select>
+                <button class="btn-icon w-auto" onclick="removeUpstreamModelRow(this)" title="Remove">
+                  <i data-lucide="minus" style="width:11px;height:11px"></i>
+                </button>
+              </div>
+            `).join('')}
+            <div class="table-editor-add">
+              <button class="btn btn-ghost btn-sm" onclick="addUpstreamModelRow()">+ Add Upstream Model</button>
+            </div>
+          </div>
+          <span class="form-hint">Override rate limit and protocol for specific upstream models. Empty means inherit default protocol.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section">
+      <button class="collapse-toggle ${prov && prov.disabled_time_ranges && prov.disabled_time_ranges.length > 0 ? '' : 'collapsed'}" onclick="this.classList.toggle('collapsed')">
+        <svg class="collapse-icon" width="12" height="12" viewBox="0 0 12 12" fill="none">
+          <path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Schedule</span>
+      </button>
+      <div class="collapse-content">
+        <div class="form-group">
+          <label class="form-label">Disabled Time Ranges</label>
+          <div class="tags-input-area" id="timeRangesArea" onclick="document.getElementById('timeRangesInput').focus()">
+            ${(prov && prov.disabled_time_ranges ? prov.disabled_time_ranges : []).map(range => `
+              <span class="tag">${escapeHtml(range)}<span class="tag-remove" onclick="this.parentElement.remove()">&times;</span></span>
+            `).join('')}
+            <input class="tag-input" id="timeRangesInput" placeholder="HH:MM-HH:MM">
+          </div>
+          <span class="form-hint">Provider will be disabled during these time ranges. Format: HH:MM-HH:MM, supports cross-midnight (e.g. 23:00-02:00)</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    <button class="btn btn-primary" onclick="saveProvider()">${name ? 'Save Changes' : 'Create Provider'}</button>
+  `;
+
+  showModal(name ? 'Edit Provider' : 'Create Provider', body, footer);
+
+  // Setup tag input handlers
+  setupTagInput('timeRangesInput', 'timeRangesArea', validateTimeRange);
+}
+
+// ══════ Tag Input Helpers ══════
+
+function setupTagInput(inputId, areaId, validator = null) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const value = input.value.trim();
+      if (!value) return;
+
+      if (validator && !validator(value)) {
+        showToast('Invalid format', 'error');
+        return;
+      }
+
+      const area = document.getElementById(areaId);
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.innerHTML = `${escapeHtml(value)}<span class="tag-remove" onclick="this.parentElement.remove()">&times;</span>`;
+      area.insertBefore(tag, input);
+      input.value = '';
+    }
+  });
+}
+
+function validateTimeRange(range) {
+  const match = range.match(/^(\d{2}):(\d{2})-(\d{2}):(\d{2})$/);
+  if (!match) return false;
+  const [, h1, m1, h2, m2] = match;
+  return parseInt(h1) < 24 && parseInt(m1) < 60 && parseInt(h2) < 24 && parseInt(m2) < 60;
+}
+
+function getTagValues(areaId) {
+  return Array.from(document.querySelectorAll(`#${areaId} .tag`))
+    .map(t => t.textContent.replace(/\×$/, '').trim())
+    .filter(Boolean);
+}
+
+// ══════ Endpoints Table ══════
+
+function addEndpointRow() {
+  const editor = document.getElementById('endpointsEditor');
+  const row = document.createElement('div');
+  row.className = 'table-editor-row';
+  const rowIndex = editor.querySelectorAll('.table-editor-row').length;
+  row.innerHTML = `
+    <input class="form-input" type="text" placeholder="https://api.example.com/v1" data-field="url">
+    <div class="endpoint-protocols" onclick="this.querySelector('input').focus()">
+      <input type="text" placeholder="Add protocol..." onkeydown="handleEndpointProtocolKey(event, ${rowIndex})">
+    </div>
+    <button class="btn-icon w-auto" onclick="removeEndpointRow(this)" title="Remove">
+      <i data-lucide="minus" style="width:11px;height:11px"></i>
+    </button>
+  `;
+  editor.appendChild(row);
+  lucide.createIcons();
+  row.querySelector('[data-field="url"]').focus();
+  updateEndpointRemoveButtons();
+}
+
+function removeEndpointRow(btn) {
+  btn.closest('.table-editor-row').remove();
+  updateEndpointRemoveButtons();
+}
+
+function updateEndpointRemoveButtons() {
+  const rows = document.querySelectorAll('#endpointsEditor .table-editor-row');
+  rows.forEach(row => {
+    const btn = row.querySelector('.btn-icon');
+    if (rows.length <= 1) {
+      btn.disabled = true;
+      btn.style.opacity = '0.3';
+      btn.style.pointerEvents = 'none';
+    } else {
+      btn.disabled = false;
+      btn.style.opacity = '1';
+      btn.style.pointerEvents = 'auto';
+    }
+  });
+}
+
+function handleEndpointProtocolKey(e, rowIndex) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const input = e.target;
+    const value = input.value.trim();
+    if (!value) return;
+
+    // Validate protocol
+    const validProtocols = ['openai.chat', 'anthropic.messages', 'openai.responses', 'ollama.chat', 'ollama.embed'];
+    if (!validProtocols.includes(value)) {
+      showToast('Invalid protocol. Use: openai.chat, anthropic.messages, openai.responses, ollama.chat, ollama.embed', 'error');
+      return;
+    }
+
+    const container = input.parentElement;
+    // Check if already added
+    const existingTags = container.querySelectorAll('.tag');
+    for (const tag of existingTags) {
+      if (tag.textContent.replace(/×$/, '').trim() === value) {
+        showToast('Protocol already added', 'error');
+        return;
+      }
+    }
+
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.innerHTML = `${escapeHtml(value)}<span class="tag-remove" onclick="this.parentElement.remove()">×</span>`;
+    container.insertBefore(tag, input);
+    input.value = '';
+  }
+}
+
+function getEndpointProtocols(rowIndex) {
+  const rows = document.querySelectorAll('#endpointsEditor .table-editor-row');
+  if (rowIndex >= rows.length) return [];
+  const container = rows[rowIndex].querySelector('.endpoint-protocols');
+  return Array.from(container.querySelectorAll('.tag'))
+    .map(t => t.textContent.replace(/×$/, '').trim())
+    .filter(Boolean);
+}
+
+function getEndpointsValues() {
+  const rows = document.querySelectorAll('#endpointsEditor .table-editor-row');
+  return Array.from(rows).map((r, i) => {
+    const url = r.querySelector('[data-field="url"]').value.trim();
+    const protocols = getEndpointProtocols(i);
+    return { url, protocols };
+  }).filter(ep => ep.url);
+}
+
+// ══════ Upstream Models Table ══════
+
+function addUpstreamModelRow() {
+  const editor = document.getElementById('upstreamModelsEditor');
+  const row = document.createElement('div');
+  row.className = 'table-editor-row';
+  row.innerHTML = `
+    <input class="form-input" type="text" placeholder="model name" data-field="model">
+    <input class="form-input w-32" type="number" min="1" placeholder="inherit" data-field="qpm">
+    <select class="form-select w-48" data-field="allowed_protocols" data-dropdown>
+      <option value="">inherit</option>
+      <option value="openai.chat">openai.chat</option>
+      <option value="anthropic.messages">anthropic.messages</option>
+      <option value="openai.responses">openai.responses</option>
+      <option value="ollama.chat">ollama.chat</option>
+      <option value="ollama.embed">ollama.embed</option>
+    </select>
+    <button class="btn-icon w-auto" onclick="removeUpstreamModelRow(this)" title="Remove">
+      <i data-lucide="minus" style="width:11px;height:11px"></i>
+    </button>
+  `;
+  editor.insertBefore(row, editor.querySelector('.table-editor-add'));
+  initDropdowns();
+  lucide.createIcons();
+  row.querySelector('[data-field="model"]').focus();
+}
+
+function removeUpstreamModelRow(btn) {
+  btn.closest('.table-editor-row').remove();
+}
+
+function getUpstreamModelsValues() {
+  const rows = document.querySelectorAll('#upstreamModelsEditor .table-editor-row');
+  return Array.from(rows).map(r => {
+    const model = r.querySelector('[data-field="model"]').value.trim();
+    const qpm = parseInt(r.querySelector('[data-field="qpm"]').value) || 0;
+    const apValue = r.querySelector('[data-field="allowed_protocols"]').value.trim();
+    const allowed_protocols = apValue ? [apValue] : [];
+
+    return {
+      model,
+      qpm: qpm > 0 ? qpm : undefined,
+      allowed_protocols: allowed_protocols.length > 0 ? allowed_protocols : undefined
+    };
+  }).filter(um => um.model);
+}
+
+// ══════ Save Provider ══════
+
+async function saveProvider() {
+  const name = document.getElementById('pvName').value.trim();
+  const apiKey = document.getElementById('pvApiKey').value.trim();
+  const qpm = parseInt(document.getElementById('pvQpm').value) || 0;
+
+  const endpoints = getEndpointsValues();
+  const dpValue = document.getElementById('defaultProtocolsSelect').value.trim();
+  const default_protocols = dpValue ? [dpValue] : [];
+  const upstream_models = getUpstreamModelsValues();
+  const disabled_time_ranges = getTagValues('timeRangesArea');
+
+  document.getElementById('pvNameErr').textContent = '';
+  if (!name) { document.getElementById('pvNameErr').textContent = 'Provider name is required.'; return; }
+  if (endpoints.length === 0) { showToast('At least one endpoint is required.', 'error'); return; }
+
+  // Validate each endpoint has at least one protocol
+  for (const ep of endpoints) {
+    if (!ep.protocols || ep.protocols.length === 0) {
+      showToast('Each endpoint must have at least one protocol.', 'error');
+      return;
+    }
+  }
+
+  // Extract protocols from endpoints
+  const protocolsSet = new Set();
+  endpoints.forEach(ep => {
+    (ep.protocols || []).forEach(p => protocolsSet.add(p));
+  });
+  const protocols = [...protocolsSet];
+
+  const body = {
+    name,
+    api_key: apiKey,
+    protocols,
+    rate_limit: qpm > 0 ? { qpm } : undefined,
+    endpoints,
+    default_protocols: default_protocols.length > 0 ? default_protocols : undefined,
+    upstream_models: upstream_models.length > 0 ? upstream_models : undefined,
+    disabled_time_ranges: disabled_time_ranges.length > 0 ? disabled_time_ranges : undefined
+  };
+
+  try {
+    if (editProviderName) {
+      const result = await apiFetch(`/admin/runtime-config/draft/providers/${encodeURIComponent(editProviderName)}`, { method: 'PUT', body: JSON.stringify(body) });
+      // Update local state
+      const idx = providers.findIndex(p => p.name === editProviderName);
+      if (idx !== -1) {
+        providers[idx] = result;
+      }
+      showToast(`"${name}" updated.`);
+    } else {
+      const result = await apiFetch('/admin/runtime-config/draft/providers', { method: 'POST', body: JSON.stringify(body) });
+      providers.push(result);
+      showToast(`"${name}" created.`);
+    }
+    closeModal();
+    renderProviders();
+    updateDraftBar();
+  } catch (err) {
+    if (err.field) {
+      document.getElementById('pvNameErr').textContent = err.message;
+    }
+    showToast(err.message || 'An error occurred.', 'error');
+  }
+}
+
+// ══════ Delete Provider ══════
+
+function deleteProvider(name) {
+  showConfirm({
+    title: 'Delete Provider',
+    message: `This will remove provider <strong>${escapeHtml(name)}</strong>. Model groups referencing it will break.`,
+    danger: true,
+    onConfirm: async () => {
+      try {
+        await apiFetch(`/admin/runtime-config/draft/providers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        providers = providers.filter(p => p.name !== name);
+        renderProviders();
+        updateDraftBar();
+        showToast(`"${name}" deleted.`);
+      } catch (err) {
+        showToast(err.message || 'Delete failed.', 'error');
+      }
+    }
+  });
+}
+
+// ══════ Helpers ══════
+
+function escapeAttr(str) {
+  return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ══════ Init ══════
+
+loadProviders();
+</script>
+{{ end }}

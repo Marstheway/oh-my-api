@@ -10,6 +10,7 @@ import (
 
 type chatToResponsesStreamMapper struct {
 	responseID               string
+	requestedModel           string
 	model                    string
 	responseCreated          bool
 	textItemAdded            bool
@@ -29,6 +30,7 @@ func newChatToResponsesStreamMapper(responseID, model string) *chatToResponsesSt
 	}
 	return &chatToResponsesStreamMapper{
 		responseID:               responseID,
+		requestedModel:           model,
 		model:                    model,
 		messageItemID:            fmt.Sprintf("msg-%d", time.Now().UnixNano()),
 		textOutputIndex:          -1,
@@ -55,7 +57,9 @@ func (m *chatToResponsesStreamMapper) ensureResponseCreated(chunk dto.ChatComple
 			m.responseID = fmt.Sprintf("resp-%d", time.Now().UnixNano())
 		}
 	}
-	if m.model == "" {
+	if m.requestedModel != "" {
+		m.model = m.requestedModel
+	} else if m.model == "" {
 		m.model = chunk.Model
 	}
 	m.responseCreated = true
@@ -106,7 +110,9 @@ func (m *chatToResponsesStreamMapper) Map(chunk dto.ChatCompletionChunk) ([]dto.
 	if m.responseID == "" && chunk.ID != "" {
 		m.responseID = chunk.ID
 	}
-	if m.model == "" && chunk.Model != "" {
+	if m.requestedModel != "" {
+		m.model = m.requestedModel
+	} else if m.model == "" && chunk.Model != "" {
 		m.model = chunk.Model
 	}
 	if len(chunk.Choices) == 0 || chunk.Choices[0].Delta == nil {
@@ -131,13 +137,13 @@ func (m *chatToResponsesStreamMapper) Map(chunk dto.ChatCompletionChunk) ([]dto.
 
 	for _, tc := range delta.ToolCalls {
 		m.ensureResponseCreated(chunk, &events)
-		if _, exists := m.toolOutputIndexByTCIndex[tc.Index]; !exists && tc.ID != "" {
+		if _, exists := m.toolOutputIndexByTCIndex[tc.GetIndex()]; !exists && tc.ID != "" {
 			outputIdx := m.nextOutputIndex
 			m.nextOutputIndex++
-			m.toolOutputIndexByTCIndex[tc.Index] = outputIdx
-			m.toolCallIDByTCIndex[tc.Index] = tc.ID
-			m.toolNameByTCIndex[tc.Index] = tc.Function.Name
-			m.accumulatedArgsByTCIndex[tc.Index] = ""
+			m.toolOutputIndexByTCIndex[tc.GetIndex()] = outputIdx
+			m.toolCallIDByTCIndex[tc.GetIndex()] = tc.ID
+			m.toolNameByTCIndex[tc.GetIndex()] = tc.Function.Name
+			m.accumulatedArgsByTCIndex[tc.GetIndex()] = ""
 			events = append(events, dto.ResponsesStreamEvent{
 				Type:        "response.output_item.added",
 				OutputIndex: intPtr(outputIdx),
@@ -151,12 +157,12 @@ func (m *chatToResponsesStreamMapper) Map(chunk dto.ChatCompletionChunk) ([]dto.
 			})
 		}
 		if tc.Function.Arguments != "" {
-			outputIdx, exists := m.toolOutputIndexByTCIndex[tc.Index]
+			outputIdx, exists := m.toolOutputIndexByTCIndex[tc.GetIndex()]
 			if !exists {
 				continue
 			}
-			m.accumulatedArgsByTCIndex[tc.Index] += tc.Function.Arguments
-			callID := m.toolCallIDByTCIndex[tc.Index]
+			m.accumulatedArgsByTCIndex[tc.GetIndex()] += tc.Function.Arguments
+			callID := m.toolCallIDByTCIndex[tc.GetIndex()]
 			events = append(events, dto.ResponsesStreamEvent{
 				Type:        "response.function_call_arguments.delta",
 				ItemID:      fmt.Sprintf("fc-%s", callID),

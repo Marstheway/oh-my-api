@@ -1,6 +1,10 @@
 package scheduler
 
-import "math/rand"
+import (
+	"math/rand"
+
+	"github.com/Marstheway/oh-my-api/internal/health"
+)
 
 type WeightedSelector struct {
 	items []selectorItem
@@ -61,11 +65,47 @@ func (s *WeightedSelector) Select() *Task {
 func (s *WeightedSelector) Remove(providerName string) {
 	for i := range s.items {
 		if s.items[i].task.ProviderName == providerName {
-			s.total -= s.items[i].weight
-			s.items = append(s.items[:i], s.items[i+1:]...)
+			s.removeAt(i)
 			return
 		}
 	}
+}
+
+// RemoveTask 从选择器中移除当前被选中的具体 task。
+func (s *WeightedSelector) RemoveTask(task *Task) {
+	if task == nil {
+		return
+	}
+	for i := range s.items {
+		if &s.items[i].task == task {
+			s.removeAt(i)
+			return
+		}
+	}
+}
+
+// RemoveByHealthKey 从选择器中移除同一健康键下的所有剩余 task。
+func (s *WeightedSelector) RemoveByHealthKey(healthKey string) {
+	if healthKey == "" {
+		return
+	}
+
+	filtered := s.items[:0]
+	total := 0
+	for _, item := range s.items {
+		if health.MakeHealthKey(item.task.ProviderName, item.task.OutboundProtocol) == healthKey {
+			continue
+		}
+		filtered = append(filtered, item)
+		total += item.weight
+	}
+	s.items = filtered
+	s.total = total
+}
+
+func (s *WeightedSelector) removeAt(i int) {
+	s.total -= s.items[i].weight
+	s.items = append(s.items[:i], s.items[i+1:]...)
 }
 
 // IsEmpty 检查是否还有可用项

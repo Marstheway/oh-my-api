@@ -26,4 +26,4 @@ COPY --from=builder /out/oh-my-api /app/oh-my-api
 EXPOSE 18000 9090
 
 ENTRYPOINT ["/app/oh-my-api"]
-CMD ["--config", "/app/config.docker.yaml", "serve"]
+CMD ["--config", "/app/config.yaml", "serve"]

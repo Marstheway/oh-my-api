@@ -44,9 +44,17 @@ func runTest(configPath, internalName string) {
 		os.Exit(1)
 	}
 
+	// 默认 120 秒
+	timeout := 120 * time.Second
+	if cfg.Server.Timeout != "" {
+		if d, err := time.ParseDuration(cfg.Server.Timeout); err == nil {
+			timeout = d
+		}
+	}
+
 	client := provider.NewClient(map[string]config.ProviderConfig{
 		providerName: providerCfg,
-	}, cfg.Providers.Timeout)
+	}, timeout, 0)
 
 	testReq := &dto.ChatCompletionRequest{
 		Model: upstreamModel,
@@ -69,16 +77,24 @@ func runTest(configPath, internalName string) {
 	}
 	if len(providerCfg.Endpoints) > 0 {
 		for _, ep := range providerCfg.Endpoints {
+			protocol := ""
+			if len(ep.Protocols) > 0 {
+				protocol = ep.Protocols[0]
+			}
 			testEndpoints = append(testEndpoints, struct {
 				url      string
 				protocol string
-			}{url: ep.URL, protocol: ep.Protocol})
+			}{url: ep.URL, protocol: protocol})
 		}
 	} else if providerCfg.Endpoint != "" {
+		protocol := ""
+		if len(providerCfg.Protocols) > 0 {
+			protocol = providerCfg.Protocols[0]
+		}
 		testEndpoints = append(testEndpoints, struct {
 			url      string
 			protocol string
-		}{url: providerCfg.Endpoint, protocol: providerCfg.Protocol})
+		}{url: providerCfg.Endpoint, protocol: protocol})
 	}
 
 	if len(testEndpoints) == 0 {
@@ -94,7 +110,7 @@ func runTest(configPath, internalName string) {
 		fmt.Printf("=== Endpoint %d/%d (%s) ===\n", i+1, len(testEndpoints), ep.protocol)
 		fmt.Printf("URL: %s\n", ep.url)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
 		// 直接使用 endpoint 的 URL 和 protocol 构建请求
 		requestURL := adaptor.BuildURL(ep.url, adaptor.Protocol(ep.protocol))

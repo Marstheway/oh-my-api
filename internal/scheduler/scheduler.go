@@ -26,33 +26,48 @@ func (e *RateLimitError) Unwrap() error {
 }
 
 type Scheduler struct {
-	strategies map[string]Strategy
-	ratelimit  *ratelimit.Manager
-	client     *provider.Client
-	health     *health.Checker
+	strategies        map[string]Strategy
+	ratelimit         *ratelimit.Manager
+	client            *provider.Client
+	health            *health.Checker
+	prefillTimeout    time.Duration
+	streamIdleTimeout time.Duration
+	failoverStrat     *FailoverStrategy
+	concurrentStrat   *ConcurrentStrategy
+	lbStrat           *LoadBalanceStrategy
+	adaptiveStrat     *AdaptiveStrategy
 }
 
-func New(rl *ratelimit.Manager, client *provider.Client, h *health.Checker) *Scheduler {
+func New(rl *ratelimit.Manager, client *provider.Client, h *health.Checker, prefillTimeout time.Duration, streamIdleTimeout time.Duration) *Scheduler {
+	failover := NewFailoverStrategy(client, rl, h, prefillTimeout, streamIdleTimeout)
+	concurrent := NewConcurrentStrategy(client, rl, h, prefillTimeout, streamIdleTimeout)
+	lb := NewLoadBalanceStrategy(client, rl, h, prefillTimeout, streamIdleTimeout)
+	adaptive := NewAdaptiveStrategy(client, rl, h, prefillTimeout, streamIdleTimeout)
+
 	s := &Scheduler{
-		strategies: make(map[string]Strategy),
-		ratelimit:  rl,
-		client:     client,
-		health:     h,
+		strategies:        make(map[string]Strategy),
+		ratelimit:         rl,
+		client:            client,
+		health:            h,
+		prefillTimeout:    prefillTimeout,
+		streamIdleTimeout: streamIdleTimeout,
+		failoverStrat:     failover,
+		concurrentStrat:   concurrent,
+		lbStrat:           lb,
+		adaptiveStrat:     adaptive,
 	}
-	s.strategies["concurrent"] = NewConcurrentStrategy(client, rl, h)
-	s.strategies["load-balance"] = NewLoadBalanceStrategy(client, rl, h)
-	s.strategies["failover"] = NewFailoverStrategy(client, rl, h)
+	s.strategies["concurrent"] = concurrent
+	s.strategies["load-balance"] = lb
+	s.strategies["failover"] = failover
+	s.strategies["adaptive"] = adaptive
 	return s
 }
 
-func (s *Scheduler) Execute(ctx context.Context, mode string, timeout time.Duration, tasks []Task) (*Result, error) {
+func (s *Scheduler) Execute(ctx context.Context, mode string, tasks []Task) (*Result, error) {
 	strategy, ok := s.strategies[mode]
 	if !ok {
 		return nil, ErrUnknownStrategy
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	return strategy.Execute(ctx, tasks)
 }

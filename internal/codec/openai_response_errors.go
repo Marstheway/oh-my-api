@@ -1,6 +1,13 @@
 package codec
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrMultimodalDetected is returned when multimodal content is detected
+// to trigger the multimodal processing path.
+var ErrMultimodalDetected = errors.New("multimodal content detected")
 
 // ConversionError represents a typed codec conversion failure with structured context.
 type ConversionError struct {

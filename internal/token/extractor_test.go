@@ -86,6 +86,38 @@ func TestExtractTextFromClaudeRequest(t *testing.T) {
 	}
 }
 
+func TestExtractTextFromClaudeRequest_JSONUnmarshaledTools(t *testing.T) {
+	Init()
+
+	req := &dto.ClaudeRequest{
+		Model: "claude-3-opus",
+		Tools: []any{
+			map[string]any{
+				"type":         "function",
+				"name":         "get_weather",
+				"description":  "Get current weather",
+				"input_schema": map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}},
+			},
+			map[string]any{
+				"type": "web_search_20250305",
+				"name": "web_search",
+				"user_location": map[string]any{
+					"type":     "approximate",
+					"country":  "CN",
+					"timezone": "Asia/Shanghai",
+				},
+			},
+		},
+	}
+
+	text := ExtractTextFromClaudeRequest(req)
+	for _, expected := range []string{"get_weather", "Get current weather", `"city"`, "web_search", `"country":"CN"`} {
+		if !strings.Contains(text, expected) {
+			t.Errorf("expected extracted text to contain %q, got %q", expected, text)
+		}
+	}
+}
+
 func TestExtractTextFromOpenAIResponse(t *testing.T) {
 	Init()
 
@@ -158,10 +190,11 @@ func TestExtractTextFromClaudeStreamEvent(t *testing.T) {
 	})
 
 	t.Run("tool_use delta partial_json", func(t *testing.T) {
+		partialJSON := `{"loc":"beijing"}`
 		event := &dto.ClaudeStreamEvent{
 			Type: "content_block_delta",
 			Delta: &dto.ClaudeDelta{
-				PartialJSON: `{"loc":"beijing"}`,
+				PartialJSON: &partialJSON,
 			},
 		}
 
@@ -282,5 +315,103 @@ func TestCountResponseTokens(t *testing.T) {
 		if tokens != 0 {
 			t.Errorf("CountResponseTokens for unknown type should be 0, got %d", tokens)
 		}
+	})
+}
+
+func TestCountRequestTokensFor_ModelSelection(t *testing.T) {
+	// 在不加载 deepseek tokenizer 时，所有模型都走 default tokenizer
+	for _, upstreamModel := range []string{"gpt-4", "claude-3", "deepseek-chat", "DEEPSEEK-V3"} {
+		t.Run("no_deepseek_loaded_"+upstreamModel, func(t *testing.T) {
+			// 确保 deepseek tokenizer 未加载
+			prev := deepseekTk
+			deepseekTk = nil
+			defer func() { deepseekTk = prev }()
+
+			if defaultTk == nil {
+				defaultTk = &tiktokenTokenizer{encoding: EncodingCL100K}
+			}
+
+			tk := Pick(upstreamModel)
+			if tk != defaultTk {
+				t.Errorf("Pick(%q) = %T, want defaultTk when deepseek not loaded", upstreamModel, tk)
+			}
+		})
+	}
+
+	// 加载 deepseek tokenizer 后再验证
+	loadAndInitDeepseek(t)
+
+	t.Run("deepseek_model_selects_deepseek_tokenizer", func(t *testing.T) {
+		req := &dto.ChatCompletionRequest{
+			Model: "deepseek-chat",
+			Messages: []dto.Message{
+				{Role: "user", Content: "你好，世界"},
+			},
+		}
+
+		text := ExtractTextFromOpenAIRequest(req)
+		dsExpected := deepseekTk.CountTokens(text)
+		defExpected := defaultTk.CountTokens(text)
+
+		dsTokens := CountRequestTokensFor("deepseek-chat", req)
+		if dsTokens != dsExpected {
+			t.Errorf("CountRequestTokensFor(deepseek-chat) = %d, deepseekTk.CountTokens = %d (should match deepseek tokenizer)", dsTokens, dsExpected)
+		}
+		if defExpected != dsExpected {
+			t.Logf("deepseek count=%d, default count=%d (different as expected)", dsExpected, defExpected)
+		}
+
+		defTokens := CountRequestTokensFor("gpt-4", req)
+		if defTokens != defExpected {
+			t.Errorf("CountRequestTokensFor(gpt-4) = %d, defaultTk.CountTokens = %d (should match default tokenizer)", defTokens, defExpected)
+		}
+	})
+
+	t.Run("case_insensitive_match", func(t *testing.T) {
+		req := &dto.ChatCompletionRequest{
+			Model: "DEEPSEEK-V3",
+			Messages: []dto.Message{
+				{Role: "user", Content: "Hello!"},
+			},
+		}
+
+		tk1 := Pick("deepseek-chat")
+		tk2 := Pick("DEEPSEEK-V3")
+		if tk1 != tk2 {
+			t.Error("Pick should be case-insensitive for deepseek model names")
+		}
+
+		dsTokens := CountRequestTokensFor("DEEPSEEK-V3", req)
+		defTokens := CountRequestTokensFor("gpt-4o", req)
+		if dsTokens == 0 || defTokens == 0 {
+			t.Fatal("both should produce non-zero counts")
+		}
+		if dsTokens == defTokens {
+			t.Log("deepseek and default tokenizer produced same count for 'Hello!'")
+		}
+	})
+
+	t.Run("claude_request_with_deepseek_model", func(t *testing.T) {
+		req := &dto.ClaudeRequest{
+			Model:  "deepseek-chat",
+			System: "Be concise.",
+			Messages: []dto.ClaudeMessage{
+				{Role: "user", Content: "你好，世界"},
+			},
+		}
+
+		dsTokens := CountRequestTokensFor("deepseek-chat", req)
+		defTokens := CountRequestTokensFor("claude-3", req)
+
+		if dsTokens == 0 {
+			t.Fatal("CountRequestTokensFor should return > 0 for Claude request with deepseek model")
+		}
+
+		text := ExtractTextFromClaudeRequest(req)
+		dsExpected := deepseekTk.CountTokens(text)
+		if dsTokens != dsExpected {
+			t.Errorf("CountRequestTokensFor(deepseek-chat) = %d, deepseekTk.CountTokens = %d", dsTokens, dsExpected)
+		}
+		_ = defTokens
 	})
 }

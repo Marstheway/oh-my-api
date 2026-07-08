@@ -5,23 +5,26 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Marstheway/oh-my-api/internal/config"
+	"github.com/gin-gonic/gin"
 )
 
 func init() {
 	gin.SetMode(gin.TestMode)
 }
 
+// mockKeyProvider 用于测试，实现 KeyProvider 接口
+type mockKeyProvider struct {
+	keys []config.KeyConfig
+}
+
+func (m *mockKeyProvider) ActiveKeys() []config.KeyConfig { return m.keys }
+
 func TestAuth(t *testing.T) {
-	cfg := &config.Config{
-		Inbound: config.InboundConfig{
-			Auth: config.AuthConfig{
-				Keys: []config.KeyConfig{
-					{Name: "app1", Key: "sk-valid-1"},
-					{Name: "app2", Key: "sk-valid-2"},
-				},
-			},
+	kp := &mockKeyProvider{
+		keys: []config.KeyConfig{
+			{Name: "app1", Key: "sk-valid-1"},
+			{Name: "app2", Key: "sk-valid-2"},
 		},
 	}
 
@@ -78,7 +81,7 @@ func TestAuth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := gin.New()
-			r.Use(Auth(cfg))
+			r.Use(Auth(kp))
 			r.Any("/v1/*path", func(c *gin.Context) {
 				c.Status(http.StatusOK)
 			})
@@ -104,18 +107,14 @@ func TestAuth(t *testing.T) {
 }
 
 func TestAuth_ErrorFormat(t *testing.T) {
-	cfg := &config.Config{
-		Inbound: config.InboundConfig{
-			Auth: config.AuthConfig{
-				Keys: []config.KeyConfig{
-					{Name: "test", Key: "sk-valid"},
-				},
-			},
+	kp := &mockKeyProvider{
+		keys: []config.KeyConfig{
+			{Name: "test", Key: "sk-valid"},
 		},
 	}
 
 	r := gin.New()
-	r.Use(Auth(cfg))
+	r.Use(Auth(kp))
 
 	t.Run("OpenAI format for /v1/chat/completions", func(t *testing.T) {
 		r.POST("/v1/chat/completions", func(c *gin.Context) {
@@ -151,12 +150,55 @@ func TestAuth_ErrorFormat(t *testing.T) {
 	})
 }
 
+// TestAuth_HotReload 验证 KeyProvider 返回的 keys 变更后立即生效（模拟 Apply 后场景）
+func TestAuth_HotReload(t *testing.T) {
+	kp := &mockKeyProvider{
+		keys: []config.KeyConfig{{Name: "old", Key: "sk-old"}},
+	}
+
+	r := gin.New()
+	r.Use(Auth(kp))
+	r.POST("/v1/test", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	// 旧 key 有效
+	req := httptest.NewRequest("POST", "/v1/test", nil)
+	req.Header.Set("Authorization", "Bearer sk-old")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("old key: status = %d, want 200", w.Code)
+	}
+
+	// 模拟 Apply：替换 keys
+	kp.keys = []config.KeyConfig{{Name: "new", Key: "sk-new"}}
+
+	// 旧 key 立即失效
+	req = httptest.NewRequest("POST", "/v1/test", nil)
+	req.Header.Set("Authorization", "Bearer sk-old")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("old key after reload: status = %d, want 401", w.Code)
+	}
+
+	// 新 key 立即生效
+	req = httptest.NewRequest("POST", "/v1/test", nil)
+	req.Header.Set("Authorization", "Bearer sk-new")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("new key after reload: status = %d, want 200", w.Code)
+	}
+}
+
 func TestExtractAPIKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		headers  map[string]string
-		query    string
-		wantKey  string
+		name    string
+		headers map[string]string
+		query   string
+		wantKey string
 	}{
 		{
 			name:    "Authorization Bearer takes priority",

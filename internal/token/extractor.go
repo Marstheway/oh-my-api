@@ -47,11 +47,66 @@ func ExtractTextFromClaudeRequest(req *dto.ClaudeRequest) string {
 		texts = append(texts, extractClaudeContent(msg.Content))
 	}
 
-	for _, tool := range req.Tools {
-		texts = append(texts, tool.Name)
-		texts = append(texts, tool.Description)
-		if schema, err := json.Marshal(tool.InputSchema); err == nil {
-			texts = append(texts, string(schema))
+	switch tools := req.Tools.(type) {
+	case []any:
+		for _, tool := range tools {
+			switch t := tool.(type) {
+			case dto.ClaudeTool:
+				texts = append(texts, t.Name)
+				texts = append(texts, t.Description)
+				if schema, err := json.Marshal(t.InputSchema); err == nil {
+					texts = append(texts, string(schema))
+				}
+			case *dto.ClaudeTool:
+				texts = append(texts, t.Name)
+				texts = append(texts, t.Description)
+				if schema, err := json.Marshal(t.InputSchema); err == nil {
+					texts = append(texts, string(schema))
+				}
+			case dto.ClaudeWebSearchTool:
+				if t.Name != "" {
+					texts = append(texts, t.Name)
+				}
+				if t.UserLocation != nil {
+					if b, err := json.Marshal(t.UserLocation); err == nil {
+						texts = append(texts, string(b))
+					}
+				}
+			case *dto.ClaudeWebSearchTool:
+				if t.Name != "" {
+					texts = append(texts, t.Name)
+				}
+				if t.UserLocation != nil {
+					if b, err := json.Marshal(t.UserLocation); err == nil {
+						texts = append(texts, string(b))
+					}
+				}
+			case map[string]any:
+				if name, _ := t["name"].(string); name != "" {
+					texts = append(texts, name)
+				}
+				if desc, _ := t["description"].(string); desc != "" {
+					texts = append(texts, desc)
+				}
+				if schema, ok := t["input_schema"]; ok {
+					if b, err := json.Marshal(schema); err == nil {
+						texts = append(texts, string(b))
+					}
+				}
+				if loc, ok := t["user_location"]; ok {
+					if b, err := json.Marshal(loc); err == nil {
+						texts = append(texts, string(b))
+					}
+				}
+			}
+		}
+	case []dto.ClaudeTool:
+		for _, t := range tools {
+			texts = append(texts, t.Name)
+			texts = append(texts, t.Description)
+			if schema, err := json.Marshal(t.InputSchema); err == nil {
+				texts = append(texts, string(schema))
+			}
 		}
 	}
 
@@ -123,7 +178,16 @@ func ExtractTextFromResponsesRequest(req *dto.ResponsesRequest) string {
 				for _, item := range items {
 					texts = append(texts, item.Name)
 					texts = append(texts, item.Arguments)
-					texts = append(texts, item.Output)
+					// Output 字段是 json.RawMessage，需要解出字符串
+					if len(item.Output) > 0 {
+						var s string
+						if err := json.Unmarshal(item.Output, &s); err == nil {
+							texts = append(texts, s)
+						} else {
+							// 无法解析为字符串，使用原始 JSON
+							texts = append(texts, string(item.Output))
+						}
+					}
 					// extract message content
 					if len(item.Content) > 0 {
 						var contentStr string
@@ -172,6 +236,19 @@ func CountRequestTokens(req any) int {
 		return CountTokens(ExtractTextFromClaudeRequest(r))
 	case *dto.ResponsesRequest:
 		return CountTokens(ExtractTextFromResponsesRequest(r))
+	default:
+		return 0
+	}
+}
+
+func CountRequestTokensFor(upstreamModel string, req any) int {
+	switch r := req.(type) {
+	case *dto.ChatCompletionRequest:
+		return CountTokensFor(upstreamModel, ExtractTextFromOpenAIRequest(r))
+	case *dto.ClaudeRequest:
+		return CountTokensFor(upstreamModel, ExtractTextFromClaudeRequest(r))
+	case *dto.ResponsesRequest:
+		return CountTokensFor(upstreamModel, ExtractTextFromResponsesRequest(r))
 	default:
 		return 0
 	}
@@ -302,8 +379,8 @@ func ExtractTextFromClaudeStreamEvent(event *dto.ClaudeStreamEvent) string {
 			if event.Delta.Thinking != "" {
 				texts = append(texts, event.Delta.Thinking)
 			}
-			if event.Delta.PartialJSON != "" {
-				texts = append(texts, event.Delta.PartialJSON)
+			if event.Delta.PartialJSON != nil && *event.Delta.PartialJSON != "" {
+				texts = append(texts, *event.Delta.PartialJSON)
 			}
 		}
 		return joinTexts(texts)

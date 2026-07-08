@@ -96,3 +96,47 @@ func TestQuerierQueryByProviders(t *testing.T) {
 		t.Errorf("expected %s LatencyMs 100, got %d", key, providers[key].LatencyMs)
 	}
 }
+
+// TestQueryByProviders_PreservesProviderUpstreamDimensions 验证 QueryByProviders 以 provider/upstream_model
+// 为维度聚合，而非以 alias 为维度，从而确认 stats 存储不受 alias 污染。
+func TestQueryByProviders_PreservesProviderUpstreamDimensions(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	if err := Init(dbPath); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer Close()
+
+	// 模拟两次请求：同一 provider/upstream_model 组合，存入真实 winner 信息
+	_ = GetRecorder().Record("alice", "openai", "gpt-4o", 100, 50, 100)
+	_ = GetRecorder().Record("bob", "openai", "gpt-4o", 200, 100, 200)
+
+	q := GetQuerier()
+	providers, err := q.QueryByProviders("", "")
+	if err != nil {
+		t.Fatalf("QueryByProviders failed: %v", err)
+	}
+
+	// provider/upstream_model 维度应单独存在
+	key := "openai/gpt-4o"
+	if _, ok := providers[key]; !ok {
+		t.Fatalf("expected key %q in providers result, got keys: %v", key, providerKeys(providers))
+	}
+
+	if providers[key].RequestCount != 2 {
+		t.Errorf("expected RequestCount 2, got %d", providers[key].RequestCount)
+	}
+
+	// 不应存在以 alias 为 key 的条目（alias 不应出现在 upstream_model 维度）
+	const fakeAlias = "openai/my-alias"
+	if _, ok := providers[fakeAlias]; ok {
+		t.Errorf("alias %q should not appear in provider stats dimensions", fakeAlias)
+	}
+}
+
+func providerKeys(m map[string]*ProviderStats) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}

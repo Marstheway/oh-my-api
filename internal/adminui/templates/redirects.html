@@ -1,0 +1,421 @@
+{{ define "title" }}Redirects{{ end }}
+
+{{ define "styles" }}
+  /* ═══ Draft Bar ═══ */
+  .draft-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 14px; border-radius: var(--radius-sm);
+    background: var(--bg-elevated); border: 1px solid var(--border-default);
+    margin-bottom: 20px;
+  }
+
+  .draft-bar-left {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
+  }
+
+  .draft-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted);
+  }
+
+  .draft-bar.has-changes .draft-dot {
+    background: var(--warning);
+    box-shadow: 0 0 6px var(--warning-glow);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+
+  /* ═══ Table ═══ */
+  .table-wrap {
+    border: 1px solid var(--border-default); border-radius: var(--radius-md);
+    overflow: hidden; background: var(--bg-surface);
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+
+  thead th {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 500;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;
+    padding: 9px 14px; text-align: left;
+    border-bottom: 1px solid var(--border-default); background: var(--bg-elevated);
+  }
+
+  tbody td {
+    padding: 10px 14px; font-family: var(--font-mono); font-size: 13px;
+    border-bottom: 1px solid var(--border-default); vertical-align: middle;
+  }
+
+  tbody tr { transition: background var(--transition-fast); }
+  tbody tr:hover { background: var(--bg-hover); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  /* ═══ Empty State ═══ */
+  .empty-state {
+    padding: 40px 20px; display: flex; flex-direction: column;
+    align-items: center; gap: 8px;
+  }
+
+  .empty-icon {
+    font-size: 28px; color: var(--text-muted); opacity: 0.5;
+  }
+
+  .empty-title {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+  }
+
+  .empty-subtitle {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); opacity: 0.7;
+  }
+
+  /* ═══ Code Value ═══ */
+  .code { font-family: var(--font-mono); font-size: 12px; color: var(--text-primary); }
+  .code-secondary { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+  .code-accent { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
+  .code-muted { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+
+  /* ═══ Chain Arrow ═══ */
+  .chain-arrow {
+    color: var(--text-muted); font-family: var(--font-mono);
+    text-align: center;
+  }
+
+  /* ═══ Badge ═══ */
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: var(--radius-sm);
+    font-family: var(--font-mono); font-size: 12px;
+    background: var(--bg-hover); color: var(--text-muted);
+  }
+
+  .badge-chain {
+    background: var(--bg-elevated); color: var(--text-secondary);
+  }
+
+  /* ═══ Mobile Responsive (768px) ═══ */
+  @media (max-width: 768px) {
+    /* 表格最小宽度 */
+    .table-wrap table {
+      min-width: 550px;
+    }
+  }
+{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <div class="page-title">Redirects</div>
+    <div class="page-subtitle">Define client-facing model aliases that route to model groups or other aliases</div>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-primary" onclick="openRedirectModal()">
+      <i data-lucide="plus" style="width:13px;height:13px"></i>
+      <span>New Redirect</span>
+    </button>
+  </div>
+</div>
+
+{{ template "draft-bar" }}
+
+<!-- Redirects Table -->
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:22%">Alias</th>
+        <th style="width:5%"></th>
+        <th style="width:22%">Target</th>
+        <th style="width:18%">Resolved</th>
+        <th style="width:10%">Context</th>
+        <th style="width:12%">Exposure</th>
+        <th style="width:10%"></th>
+      </tr>
+    </thead>
+    <tbody id="redirectTableBody"></tbody>
+  </table>
+  <div class="empty-state" id="redirectsEmpty" style="display:none">
+    <div class="empty-icon">→</div>
+    <div class="empty-title">No redirects defined</div>
+    <div class="empty-subtitle">Create aliases to route client model names to model groups</div>
+  </div>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script>
+// ══════ State ══════
+
+let state = {
+  draft: { model_groups: [], redirect: [] }
+};
+let originalRedirects = [];
+let editRedirectAlias = null;
+
+// Draft bar 配置（shared.js 使用）
+window.draftBarConfig = {
+  hasChanges: () => JSON.stringify(state.draft.redirect) !== JSON.stringify(originalRedirects),
+  onApplySuccess: () => {
+    originalRedirects = JSON.parse(JSON.stringify(state.draft.redirect));
+    updateNavBadges();
+  }
+};
+
+// ══════ Load Data ══════
+
+async function loadData() {
+  try {
+    const data = await apiFetch('/admin/runtime-config/draft');
+    state.draft.model_groups = data.model_groups || [];
+    state.draft.redirect = data.redirect || [];
+    if (!originalRedirects || originalRedirects.length === 0) {
+      originalRedirects = JSON.parse(JSON.stringify(state.draft.redirect));
+    }
+    renderRedirects();
+    updateDraftBar();
+    updateNavBadges();
+  } catch (err) {
+    showToast(err.message || 'Failed to load data.', 'error');
+  }
+}
+
+// ══════ Nav Badges ══════
+
+function updateNavBadges() {
+  const redirectBadge = document.querySelector('.nav-item[href="/admin/redirects"] .nav-badge');
+  if (redirectBadge) {
+    const count = state.draft.redirect.length;
+    redirectBadge.textContent = count;
+    const hasChanges = JSON.stringify(state.draft.redirect) !== JSON.stringify(originalRedirects);
+    redirectBadge.classList.toggle('has-changes', hasChanges);
+  }
+}
+
+// ══════ Render Redirects ══════
+
+function renderRedirects() {
+  const redirects = state.draft.redirect;
+  const tbody = document.getElementById('redirectTableBody');
+  const empty = document.getElementById('redirectsEmpty');
+
+  if (!redirects || redirects.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+  empty.style.display = 'none';
+
+  // redirect 现在是数组，每个元素包含 source, target, resolved_group, chain_length, exposure, context_length
+  const sortedRedirects = [...redirects].sort((a, b) => a.source.localeCompare(b.source));
+  tbody.innerHTML = sortedRedirects.map(r => {
+    const source = r.source;
+    const target = r.target;
+    const chainLen = r.chain_length;
+    const resolvedGroup = r.resolved_group;
+
+    let resolvedHtml = '';
+    if (chainLen === 0) {
+      resolvedHtml = `<span class="badge">direct</span>`;
+    } else {
+      resolvedHtml = `<span class="badge badge-chain">${chainLen} hop</span> <span class="code-secondary">${escapeHtml(resolvedGroup)}</span>`;
+    }
+
+    // context_length 显示（蓝色 badge）
+    let ctxHtml = '<span style="color:var(--text-muted);font-size:11px">—</span>';
+    if (r.context_length) {
+      const val = r.context_length;
+      const formatted = val >= 1000000 ? (val/1000000).toFixed(0) + 'M' : (val/1000).toFixed(0) + 'k';
+      ctxHtml = `<span class="chip" style="color:var(--accent)">${formatted}</span>`;
+    }
+
+    const visHtml = exposureLabel(r.exposure);
+
+    return `
+      <tr>
+        <td><span class="code">${escapeHtml(source)}</span></td>
+        <td class="chain-arrow">→</td>
+        <td><span class="code-accent">${escapeHtml(target)}</span></td>
+        <td>${resolvedHtml}</td>
+        <td>${ctxHtml}</td>
+        <td>${visHtml}</td>
+        <td>
+          <div class="row-actions" style="justify-content:flex-end">
+            <button class="btn-icon" onclick="openRedirectModal('${escapeAttr(source)}')" title="Edit">
+              <i data-lucide="pencil" style="width:12px;height:12px"></i>
+            </button>
+            <button class="btn-icon" onclick="deleteRedirect('${escapeAttr(source)}')" title="Delete" style="color:var(--danger);opacity:0.6">
+              <i data-lucide="trash-2" style="width:12px;height:12px"></i>
+            </button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+// ══════ Helpers ══════
+
+function openRedirectModal(source) {
+  editRedirectAlias = source || null;
+
+  // 找到对应的 redirect（如果存在）
+  const existing = source ? state.draft.redirect.find(r => r.source === source) : null;
+  const target = existing ? existing.target : '';
+  const exposureVal = existing && existing.exposure ? existing.exposure : 'public'; // 默认 public
+
+  // 构建 Target 下拉选项（分组：Model Groups + Redirect Aliases）
+  const modelGroupOpts = state.draft.model_groups
+    .map(g => `<option value="${escapeAttr(g.name)}" ${target === g.name ? 'selected' : ''}>${escapeHtml(g.name)}</option>`)
+    .join('');
+
+  // 收集已有 redirect aliases（排除当前编辑的）
+  const aliasOpts = state.draft.redirect
+    .filter(r => r.source !== source)
+    .map(r => {
+      const label = r.chain_length > 0 ? `${r.source} (${r.chain_length} hop → ${r.resolved_group})` : `${r.source} (→ ${r.resolved_group || r.target})`;
+      return `<option value="${escapeAttr(r.source)}" ${target === r.source ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    })
+    .join('');
+
+  const body = `
+    <div class="form-group">
+      <label class="form-label">Source <span class="required">*</span></label>
+      <input class="form-input" id="rdAlias" type="text" value="${escapeAttr(source || '')}" placeholder="claude-fast">
+      <span class="form-hint">The client-facing model name in API requests.</span>
+      <span class="form-error" id="rdAliasErr"></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Target <span class="required">*</span></label>
+      <select class="form-select" id="rdTarget" data-dropdown>
+        <option value="">Select target...</option>
+        <optgroup label="Model Groups">
+          ${modelGroupOpts}
+        </optgroup>
+        ${aliasOpts ? `<optgroup label="Redirect Aliases (chain)">${aliasOpts}</optgroup>` : ''}
+      </select>
+      <span class="form-hint">Route to a model group or chain through another alias.</span>
+      <span class="form-error" id="rdTargetErr"></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Exposure</label>
+      <select class="form-select" id="rdExposure" data-dropdown>
+        <option value="public">public</option>
+        <option value="hidden">hidden</option>
+        <option value="internal">internal</option>
+      </select>
+      <span class="form-hint">public：出现在 /v1/models 且可直调；hidden：不展示但可直调；internal：不展示且不可外部直调（仅内部引用）。</span>
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    <button class="btn btn-primary" onclick="saveRedirect()">${source ? 'Save Changes' : 'Create Redirect'}</button>
+  `;
+
+  showModal(source ? 'Edit Redirect' : 'Create Redirect', body, footer);
+  document.getElementById('rdExposure').value = exposureVal;
+}
+
+// ══════ Save Redirect ══════
+
+async function saveRedirect() {
+  const source = document.getElementById('rdAlias').value.trim();
+  const target = document.getElementById('rdTarget').value;
+  const exposure = document.getElementById('rdExposure').value;
+
+  document.getElementById('rdAliasErr').textContent = '';
+  document.getElementById('rdTargetErr').textContent = '';
+  if (!source) { document.getElementById('rdAliasErr').textContent = 'Source is required.'; return; }
+  if (!target) { document.getElementById('rdTargetErr').textContent = 'Target is required.'; return; }
+
+  const body = { source, target, exposure };
+
+  try {
+    if (editRedirectAlias) {
+      await apiFetch(`/admin/runtime-config/draft/redirects/${encodeURIComponent(editRedirectAlias)}`, {
+        method: 'PUT',
+        body: JSON.stringify(body)
+      });
+      showToast(`"${source}" updated.`);
+    } else {
+      await apiFetch('/admin/runtime-config/draft/redirects', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+      showToast(`"${source}" created.`);
+    }
+    closeModal();
+    await loadData();
+  } catch (err) {
+    if (err.field === 'source') {
+      document.getElementById('rdAliasErr').textContent = err.message;
+    } else if (err.field === 'target') {
+      document.getElementById('rdTargetErr').textContent = err.message;
+    }
+    showToast(err.message || 'An error occurred.', 'error');
+  }
+}
+
+// ══════ Delete Redirect ══════
+
+async function deleteRedirect(source) {
+  try {
+    // 先调用 GET API 获取 redirect 详情，检查是否有引用
+    const detail = await apiFetch(`/admin/runtime-config/draft/redirects/${encodeURIComponent(source)}`);
+
+    // 如果有反向引用（resolved_group 为空或 chain_length > 0），显示详细警告
+    const hasReferences = detail.chain_length > 0 || detail.resolved_group === '';
+
+    let message = `This will remove the source <strong>${escapeHtml(source)}</strong>.`;
+    if (hasReferences) {
+      message += `<br><br><strong>Warning:</strong> This redirect is referenced by other configurations. Deleting it may cause errors for clients using this alias.`;
+    } else {
+      message += `<br>Clients using this name will receive errors.`;
+    }
+
+    showConfirm({
+      title: 'Delete Redirect',
+      message: message,
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await apiFetch(`/admin/runtime-config/draft/redirects/${encodeURIComponent(source)}`, { method: 'DELETE' });
+          showToast(`"${source}" deleted.`);
+          await loadData();
+        } catch (err) {
+          // 显示后端返回的具体引用信息
+          const errorMsg = err.message || 'Delete failed.';
+          if (err.field) {
+            showToast(`${errorMsg} (Field: ${err.field})`, 'error');
+          } else {
+            showToast(errorMsg, 'error');
+          }
+        }
+      }
+    });
+  } catch (err) {
+    showToast('Failed to check redirect details.', 'error');
+  }
+}
+
+// ══════ Helpers ══════
+
+function exposureLabel(exposure) {
+  switch (exposure) {
+    case 'internal':
+      return '<span class="vis-label" style="color:var(--text-muted)"><span class="vis-dot internal"></span>internal</span>';
+    case 'hidden':
+      return '<span class="vis-label" style="color:var(--warning)"><span class="vis-dot hidden"></span>hidden</span>';
+    default:
+      return '<span class="vis-label" style="color:var(--success)"><span class="vis-dot public"></span>public</span>';
+  }
+}
+
+function escapeAttr(str) {
+  return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ══════ Init ══════
+
+loadData();
+</script>
+{{ end }}

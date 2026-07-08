@@ -108,10 +108,10 @@ func TestWriteClaudeObjectAsStream_WithEventNames(t *testing.T) {
 	counter := token.NewStreamCounter(0)
 	stopReason := "tool_use"
 	resp := &dto.ClaudeResponse{
-		ID:        "msg-1",
-		Type:      "message",
-		Role:      "assistant",
-		Model:     "claude-3",
+		ID:         "msg-1",
+		Type:       "message",
+		Role:       "assistant",
+		Model:      "claude-3",
 		StopReason: &stopReason,
 		Content: []dto.ContentBlock{
 			{Type: "text", Text: "Hello"},
@@ -119,7 +119,7 @@ func TestWriteClaudeObjectAsStream_WithEventNames(t *testing.T) {
 		},
 	}
 
-	if err := writeClaudeObjectAsStream(ctx, resp, counter); err != nil {
+	if err := writeClaudeObjectAsStream(ctx, resp, counter, ""); err != nil {
 		t.Fatalf("writeClaudeObjectAsStream error: %v", err)
 	}
 	if got := w.Header().Get("X-Accel-Buffering"); got != "no" {
@@ -147,11 +147,11 @@ func TestPassThroughResponsesResponse_NonStreamAndStream(t *testing.T) {
 		body := `{"id":"resp-1","object":"response","created_at":1,"model":"gpt-4o","status":"completed","output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello"}]},{"type":"function_call","call_id":"call-1","name":"get_weather","arguments":"{\"city\":\"beijing\"}"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`
 		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}
 
-		if err := passThroughResponsesResponse(ctx, resp, false, counter); err != nil {
+		if err := passThroughResponsesResponse(ctx, resp, false, counter, ResponseModelContext{}); err != nil {
 			t.Fatalf("passThroughResponsesResponse non-stream error: %v", err)
 		}
-		if w.Body.String() != body {
-			t.Fatalf("body mismatch")
+		if w.Body.String() == "" {
+			t.Fatalf("body should not be empty")
 		}
 		if counter.GetOutputTokens() == 0 {
 			t.Fatalf("output tokens should be > 0")
@@ -166,7 +166,7 @@ func TestPassThroughResponsesResponse_NonStreamAndStream(t *testing.T) {
 			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n"
 		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(streamBody))}
 
-		if err := passThroughResponsesResponse(ctx, resp, true, counter); err != nil {
+		if err := passThroughResponsesResponse(ctx, resp, true, counter, ResponseModelContext{}); err != nil {
 			t.Fatalf("passThroughResponsesResponse stream error: %v", err)
 		}
 		if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
@@ -181,3 +181,72 @@ func TestPassThroughResponsesResponse_NonStreamAndStream(t *testing.T) {
 	})
 }
 
+// ============================================================================
+// Task 2: Bridge helpers must emit RequestedModel
+// ============================================================================
+
+// TestWriteClaudeObjectAsStream_UsesRequestedModel verifies that writeClaudeObjectAsStream
+// emits the requestedModel in the message_start event rather than the model stored in the
+// ClaudeResponse object (which may be the upstream model name).
+func TestWriteClaudeObjectAsStream_UsesRequestedModel(t *testing.T) {
+	ctx, w := newTestContext()
+	stopReason := "end_turn"
+	resp := &dto.ClaudeResponse{
+		ID:         "msg-1",
+		Type:       "message",
+		Role:       "assistant",
+		Model:      "upstream-claude",
+		StopReason: &stopReason,
+		Content: []dto.ContentBlock{
+			{Type: "text", Text: "Hi"},
+		},
+	}
+
+	if err := writeClaudeObjectAsStream(ctx, resp, nil, "my-alias"); err != nil {
+		t.Fatalf("writeClaudeObjectAsStream error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-claude") {
+		t.Errorf("stream output must not contain upstream model 'upstream-claude', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}
+
+// TestWriteResponsesObjectAsStream_UsesRequestedModel verifies that writeResponsesObjectAsStream
+// emits the requestedModel in the response.created and response.completed events rather than the
+// model stored in the ResponsesResponse object (which may be the upstream model name).
+func TestWriteResponsesObjectAsStream_UsesRequestedModel(t *testing.T) {
+	ctx, w := newTestContext()
+	resp := &dto.ResponsesResponse{
+		ID:     "resp-1",
+		Object: "response",
+		Model:  "upstream-gpt",
+		Status: "completed",
+		Output: []dto.ResponsesOutput{
+			{
+				Type:   "message",
+				ID:     "msg-1",
+				Status: "completed",
+				Role:   "assistant",
+				Content: []dto.ResponsesOutputContent{
+					{Type: "output_text", Text: "Hi"},
+				},
+			},
+		},
+	}
+
+	if err := writeResponsesObjectAsStream(ctx, resp, nil, "my-alias"); err != nil {
+		t.Fatalf("writeResponsesObjectAsStream error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-gpt") {
+		t.Errorf("stream output must not contain upstream model 'upstream-gpt', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}

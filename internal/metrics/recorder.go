@@ -23,6 +23,15 @@ func RecordRequest(ctx context.Context, info RequestInfo) {
 		info.KeyName,
 		info.Status,
 	).Observe(info.Duration)
+
+	if info.FirstTokenDuration > 0 {
+		requestFirstTokenSeconds.WithLabelValues(
+			info.Provider,
+			info.UpstreamModel,
+			info.KeyName,
+			info.Status,
+		).Observe(info.FirstTokenDuration)
+	}
 }
 
 // RecordToken 记录 token 消耗
@@ -55,6 +64,31 @@ func SetProviderHealth(provider string, healthy bool) {
 // RecordProviderFailure 记录 Provider 失败
 func RecordProviderFailure(provider, errorType string) {
 	providerRequestFailures.WithLabelValues(provider, errorType).Inc()
+}
+
+// RecordProviderAttempt 记录 Provider 尝试
+func RecordProviderAttempt(info ProviderAttemptInfo) {
+	providerAttemptTotal.WithLabelValues(
+		info.Scheduler,
+		info.Provider,
+		info.UpstreamModel,
+		info.ModelGroup,
+		info.OutboundProtocol,
+		info.Result,
+		info.FailureReason,
+		info.StatusCode,
+	).Inc()
+
+	providerAttemptDuration.WithLabelValues(
+		info.Scheduler,
+		info.Provider,
+		info.UpstreamModel,
+		info.ModelGroup,
+		info.OutboundProtocol,
+		info.Result,
+		info.FailureReason,
+		info.StatusCode,
+	).Observe(info.Duration)
 }
 
 // RecordRatelimitTriggered 记录限流触发

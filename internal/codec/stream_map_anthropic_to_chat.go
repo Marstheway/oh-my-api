@@ -9,11 +9,13 @@ import (
 
 // claudeToChatStreamMapper maps individual Anthropic SSE events to Chat completion chunks.
 type claudeToChatStreamMapper struct {
-	responseID string
-	model      string
-	created    int64
-	roleSent   bool
-	finishSent bool
+	responseID     string
+	requestedModel string
+	model          string
+	created        int64
+	roleSent       bool
+	finishSent     bool
+	toolCallByIndex map[int]dto.ToolCall
 }
 
 func newClaudeToChatStreamMapper(responseID, model string, created int64) *claudeToChatStreamMapper {
@@ -24,9 +26,11 @@ func newClaudeToChatStreamMapper(responseID, model string, created int64) *claud
 		created = time.Now().Unix()
 	}
 	return &claudeToChatStreamMapper{
-		responseID: responseID,
-		model:      model,
-		created:    created,
+		responseID:     responseID,
+		requestedModel: model,
+		model:          model,
+		created:        created,
+		toolCallByIndex: map[int]dto.ToolCall{},
 	}
 }
 
@@ -47,7 +51,9 @@ func (m *claudeToChatStreamMapper) Map(event dto.ClaudeStreamEvent) ([]dto.ChatC
 			if event.Message.ID != "" {
 				m.responseID = event.Message.ID
 			}
-			if event.Message.Model != "" {
+			if m.requestedModel != "" {
+				m.model = m.requestedModel
+			} else if event.Message.Model != "" {
 				m.model = event.Message.Model
 			}
 		}
@@ -56,14 +62,17 @@ func (m *claudeToChatStreamMapper) Map(event dto.ClaudeStreamEvent) ([]dto.ChatC
 
 	case "content_block_start":
 		if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
-			return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{ToolCalls: []dto.ToolCall{{
-				ID:   event.ContentBlock.ID,
-				Type: "function",
+			toolCall := dto.ToolCall{
+				Index: &event.Index,
+				ID:    event.ContentBlock.ID,
+				Type:  "function",
 				Function: dto.ToolCallFunc{
 					Name:      event.ContentBlock.Name,
 					Arguments: "",
 				},
-			}}}, nil)}, nil
+			}
+			m.toolCallByIndex[event.Index] = toolCall
+			return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{ToolCalls: []dto.ToolCall{toolCall}}, nil)}, nil
 		}
 		return nil, nil
 
@@ -75,9 +84,15 @@ func (m *claudeToChatStreamMapper) Map(event dto.ClaudeStreamEvent) ([]dto.ChatC
 		case "text_delta":
 			return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{Content: event.Delta.Text}, nil)}, nil
 		case "input_json_delta":
-			return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{ToolCalls: []dto.ToolCall{{
-				Function: dto.ToolCallFunc{Arguments: event.Delta.PartialJSON},
-			}}}, nil)}, nil
+			if event.Delta.PartialJSON != nil {
+				toolCall, ok := m.toolCallByIndex[event.Index]
+				if !ok {
+					toolCall = dto.ToolCall{Index: &event.Index, Type: "function"}
+				}
+				toolCall.Function.Arguments = *event.Delta.PartialJSON
+				return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{ToolCalls: []dto.ToolCall{toolCall}}, nil)}, nil
+			}
+			return nil, nil
 		case "thinking_delta":
 			return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{ReasoningContent: event.Delta.Thinking}, nil)}, nil
 		}

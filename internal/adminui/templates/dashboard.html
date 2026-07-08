@@ -1,0 +1,512 @@
+{{ define "title" }}Dashboard{{ end }}
+
+{{ define "styles" }}
+  /* ═══ Time Range ═══ */
+  .time-range {
+    display: inline-flex; gap: 1px;
+    background: var(--border-default); border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm); overflow: hidden;
+  }
+
+  .time-btn {
+    padding: 6px 14px; background: var(--bg-surface);
+    color: var(--text-secondary); border: none; cursor: pointer;
+    font-family: var(--font-mono); font-size: 12px;
+    transition: all var(--transition-fast);
+  }
+
+  .time-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+  .time-btn.active { background: var(--accent); color: #fff; }
+
+  /* ═══ Section Header ═══ */
+  .section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .section-title {
+    font-family: var(--font-mono); font-size: 13px; font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  /* ═══ Quick Nav Cards ═══ */
+  .dash-card-grid {
+    display: grid; gap: 1px; background: var(--border-default);
+    border: 1px solid var(--border-default); border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+
+  .dash-card-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+  .dash-card {
+    background: var(--bg-surface); padding: 10px 16px;
+    display: flex; flex-direction: column; gap: 4px;
+    cursor: pointer; transition: background var(--transition-fast);
+  }
+
+  .dash-card:hover { background: var(--bg-hover); }
+
+  .dash-card-title {
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;
+  }
+
+  .dash-card-meta {
+    font-family: var(--font-mono); font-size: 20px; font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  /* ═══ Usage Metrics ═══ */
+  .usage-metrics {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--border-default); border: 1px solid var(--border-default);
+    border-radius: var(--radius-md); overflow: hidden; margin-bottom: 28px;
+  }
+
+  .usage-card {
+    background: var(--bg-surface); padding: 20px 24px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+
+  .usage-card-label {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+
+  .usage-card-value {
+    font-family: var(--font-mono); font-size: 30px; font-weight: 500;
+    color: var(--text-primary); line-height: 1;
+  }
+
+  .usage-card-sub {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+  }
+
+  /* ═══ Tables ═══ */
+  .table-wrap {
+    border: 1px solid var(--border-default); border-radius: var(--radius-md);
+    overflow: hidden; background: var(--bg-surface); margin-bottom: 24px;
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+
+  thead th {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 500;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;
+    padding: 9px 14px; text-align: left;
+    border-bottom: 1px solid var(--border-default); background: var(--bg-elevated);
+  }
+
+  tbody td {
+    padding: 10px 14px; font-size: 13px;
+    border-bottom: 1px solid var(--border-default); vertical-align: middle;
+  }
+
+  tbody tr { transition: background var(--transition-fast); }
+  tbody tr:hover { background: var(--bg-hover); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  /* ═══ Empty State ═══ */
+  .empty-state {
+    padding: 40px 20px; display: flex; flex-direction: column;
+    align-items: center; gap: 8px;
+  }
+
+  .empty-icon {
+    font-size: 28px; color: var(--text-muted); opacity: 0.5;
+  }
+
+  .empty-title {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+  }
+
+  /* ═══ Code Value ═══ */
+  .code { font-family: var(--font-mono); font-size: 12px; color: var(--text-primary); }
+  .code-secondary { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
+
+  /* ═══ Mobile Responsive (768px) ═══ */
+  @media (max-width: 768px) {
+    /* Header 区域堆叠 */
+    .page-header + div {
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* 时间选择器全宽 */
+    .time-range {
+      width: 100%;
+      justify-content: stretch;
+    }
+
+    .time-btn {
+      flex: 1;
+    }
+
+    /* 指标卡片 2 列 */
+    .usage-metrics {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1px;
+    }
+
+    .usage-card {
+      padding: 16px 20px;
+    }
+
+    .usage-card-value {
+      font-size: 24px;
+    }
+
+    /* 快捷导航 2 列 */
+    .dash-card-grid.cols-4 {
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <div class="page-title">Dashboard</div>
+    <div class="page-subtitle">Usage Analytics &amp; Configuration Overview</div>
+  </div>
+</div>
+
+<!-- Time Range + Quick Nav -->
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+  <div class="time-range" id="timeRange">
+    <button class="time-btn active" data-range="today">Today</button>
+    <button class="time-btn" data-range="week">Week</button>
+    <button class="time-btn" data-range="month">Month</button>
+  </div>
+  <div class="dash-card-grid cols-4" style="margin-bottom:0;flex:0 0 auto;gap:1px;border-radius:var(--radius-md)">
+    <div class="dash-card" onclick="navigateTo('model-groups')">
+      <div class="dash-card-title">Model Groups</div>
+      <div class="dash-card-meta" id="dashGroupCount">-</div>
+    </div>
+    <div class="dash-card" onclick="navigateTo('providers')">
+      <div class="dash-card-title">Providers</div>
+      <div class="dash-card-meta" id="dashProvCount">-</div>
+    </div>
+    <div class="dash-card" onclick="navigateTo('redirects')">
+      <div class="dash-card-title">Redirects</div>
+      <div class="dash-card-meta" id="dashRedirectCount">-</div>
+    </div>
+    <div class="dash-card" onclick="navigateTo('auth-keys')">
+      <div class="dash-card-title">Auth Keys</div>
+      <div class="dash-card-meta" id="dashAuthCount">-</div>
+    </div>
+  </div>
+</div>
+
+<!-- Usage Metrics -->
+<div class="usage-metrics" id="usageMetrics">
+  <div class="usage-card">
+    <div class="usage-card-label">Requests</div>
+    <div class="usage-card-value" id="metricRequests">-</div>
+    <div class="usage-card-sub" id="metricRequestsSub"></div>
+  </div>
+  <div class="usage-card">
+    <div class="usage-card-label">Input Tokens</div>
+    <div class="usage-card-value" id="metricInputTokens">-</div>
+    <div class="usage-card-sub" id="metricInputSub"></div>
+  </div>
+  <div class="usage-card">
+    <div class="usage-card-label">Output Tokens</div>
+    <div class="usage-card-value" id="metricOutputTokens">-</div>
+    <div class="usage-card-sub" id="metricOutputSub"></div>
+  </div>
+  <div class="usage-card">
+    <div class="usage-card-label">Avg Latency</div>
+    <div class="usage-card-value" id="metricLatency">-</div>
+    <div class="usage-card-sub" id="metricLatencySub"></div>
+  </div>
+</div>
+
+<!-- Provider Breakdown -->
+<div class="section-header" style="margin-top:28px">
+  <span class="section-title">Provider Breakdown</span>
+  <span class="code-secondary" id="statsRangeLabel"></span>
+</div>
+<div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th>Provider</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Latency</th><th style="width:10%">Share</th>
+    </tr></thead>
+    <tbody id="dashProviderTable"></tbody>
+  </table>
+  <div class="empty-state" id="providerStatsEmpty" style="display:none">
+    <div class="empty-icon">&#x25A3;</div>
+    <div class="empty-title">No usage data for this period</div>
+  </div>
+</div>
+
+<!-- By Key -->
+<div class="section-header" style="margin-top:24px">
+  <span class="section-title">By Key</span>
+</div>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Key</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Latency</th><th style="width:10%">Share</th></tr></thead>
+    <tbody id="dashKeyTable"></tbody>
+  </table>
+  <div class="empty-state" id="keyStatsEmpty" style="display:none">
+    <div class="empty-icon">&#x25A3;</div>
+    <div class="empty-title">No usage data for this period</div>
+  </div>
+</div>
+
+<!-- By Upstream Model -->
+<div class="section-header" style="margin-top:24px">
+  <span class="section-title">By Upstream Model</span>
+</div>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Model</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Latency</th><th style="width:10%">Share</th></tr></thead>
+    <tbody id="dashModelTable"></tbody>
+  </table>
+  <div class="empty-state" id="modelStatsEmpty" style="display:none">
+    <div class="empty-icon">&#x25A3;</div>
+    <div class="empty-title">No usage data for this period</div>
+  </div>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script>
+let stats = null;
+let draftConfig = null;
+let timeRange = 'today';
+
+// Navigate to other pages
+function navigateTo(page) {
+  window.location.href = '/admin/' + page.replace('-', '-');
+}
+
+// Time range selector
+document.getElementById('timeRange').addEventListener('click', (e) => {
+  if (e.target.classList.contains('time-btn')) {
+    document.querySelectorAll('.time-btn').forEach(btn => btn.classList.remove('active'));
+    e.target.classList.add('active');
+    timeRange = e.target.dataset.range;
+    loadStats();
+  }
+});
+
+function getTimeRangeParams() {
+  const now = new Date();
+  let since;
+
+  if (timeRange === 'today') {
+    since = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  } else if (timeRange === 'week') {
+    since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  } else if (timeRange === 'month') {
+    since = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+  }
+
+  if (since) {
+    const formatDate = (d) => d.toISOString().split('T')[0];
+    return `since=${encodeURIComponent(formatDate(since))}&until=${encodeURIComponent(formatDate(now))}`;
+  }
+  return '';
+}
+
+async function loadStats() {
+  try {
+    const params = getTimeRangeParams();
+    const url = params ? '/admin/stats?' + params : '/admin/stats';
+    const resp = await apiFetch(url);
+    stats = resp;
+    renderMetrics();
+    renderProviderTable();
+    renderKeyTable();
+    renderModelTable();
+    updateStatsRangeLabel();
+  } catch (err) {
+    console.error('Failed to load stats:', err);
+    showToast('Failed to load statistics', 'error');
+  }
+}
+
+async function loadDraftConfig() {
+  try {
+    const resp = await apiFetch('/admin/runtime-config/draft');
+    draftConfig = resp;
+    updateQuickNavCounts();
+  } catch (err) {
+    console.error('Failed to load draft config:', err);
+  }
+}
+
+function updateQuickNavCounts() {
+  if (!draftConfig) return;
+
+  document.getElementById('dashGroupCount').textContent = draftConfig.model_groups ? draftConfig.model_groups.length : 0;
+  document.getElementById('dashProvCount').textContent = draftConfig.providers ? Object.keys(draftConfig.providers).length : 0;
+  document.getElementById('dashRedirectCount').textContent = draftConfig.redirect ? Object.keys(draftConfig.redirect).length : 0;
+  document.getElementById('dashAuthCount').textContent = draftConfig.auth_keys ? draftConfig.auth_keys.length : 0;
+}
+
+function renderMetrics() {
+  if (!stats || !stats.total) {
+    document.getElementById('metricRequests').textContent = '0';
+    document.getElementById('metricInputTokens').textContent = '0';
+    document.getElementById('metricOutputTokens').textContent = '0';
+    document.getElementById('metricLatency').textContent = '-';
+    return;
+  }
+
+  const total = stats.total;
+  const reqCount = total.request_count || 0;
+
+  document.getElementById('metricRequests').textContent = reqCount.toLocaleString();
+  document.getElementById('metricInputTokens').textContent = (total.input_tokens || 0).toLocaleString();
+  document.getElementById('metricOutputTokens').textContent = (total.output_tokens || 0).toLocaleString();
+
+  const avgLatency = reqCount > 0 ? (total.latency_ms / reqCount / 1000) : 0;
+  document.getElementById('metricLatency').textContent = avgLatency.toFixed(2) + 's';
+}
+
+function renderProviderTable() {
+  const tbody = document.getElementById('dashProviderTable');
+  const empty = document.getElementById('providerStatsEmpty');
+
+  if (!stats || !stats.by_provider || stats.by_provider.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  empty.style.display = 'none';
+
+  const totalInput = stats.total.input_tokens || 0;
+  const totalOutput = stats.total.output_tokens || 0;
+  const totalTokens = totalInput + totalOutput;
+
+  // 计算每个 provider 的 share 并排序
+  const providersWithShare = stats.by_provider.map(p => {
+    const pInput = p.input_tokens || 0;
+    const pOutput = p.output_tokens || 0;
+    const providerTokens = pInput + pOutput;
+    const sharePct = totalTokens > 0 ? (providerTokens / totalTokens * 100) : 0;
+    return { ...p, pInput, pOutput, providerTokens, sharePct };
+  }).sort((a, b) => b.sharePct - a.sharePct);
+
+  tbody.innerHTML = providersWithShare.map((p, i) => {
+    const avgLatency = p.request_count > 0 ? (p.latency_ms / p.request_count / 1000).toFixed(2) : '-';
+
+    return `
+      <tr>
+        <td class="code">${escapeHtml(p.provider_name)}</td>
+        <td class="code">${p.request_count.toLocaleString()}</td>
+        <td class="code">${p.pInput.toLocaleString()}</td>
+        <td class="code">${p.pOutput.toLocaleString()}</td>
+        <td class="code-secondary">${avgLatency}s</td>
+        <td class="code">${p.sharePct.toFixed(1)}%</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderKeyTable() {
+  const tbody = document.getElementById('dashKeyTable');
+  const empty = document.getElementById('keyStatsEmpty');
+
+  if (!stats || !stats.by_key || stats.by_key.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  empty.style.display = 'none';
+
+  const totalInput = stats.total.input_tokens || 0;
+  const totalOutput = stats.total.output_tokens || 0;
+  const totalTokens = totalInput + totalOutput;
+
+  // 计算每个 key 的 share 并排序
+  const keysWithShare = stats.by_key.map(k => {
+    const kInput = k.input_tokens || 0;
+    const kOutput = k.output_tokens || 0;
+    const keyTokens = kInput + kOutput;
+    const sharePct = totalTokens > 0 ? (keyTokens / totalTokens * 100) : 0;
+    return { ...k, kInput, kOutput, keyTokens, sharePct };
+  }).sort((a, b) => b.sharePct - a.sharePct);
+
+  tbody.innerHTML = keysWithShare.map(k => {
+    const avgLatency = k.request_count > 0 ? (k.latency_ms / k.request_count / 1000).toFixed(2) : '-';
+    return `
+      <tr>
+        <td class="code">${escapeHtml(k.key_name)}</td>
+        <td class="code">${k.request_count.toLocaleString()}</td>
+        <td class="code">${k.kInput.toLocaleString()}</td>
+        <td class="code">${k.kOutput.toLocaleString()}</td>
+        <td class="code-secondary">${avgLatency}s</td>
+        <td class="code">${k.sharePct.toFixed(1)}%</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderModelTable() {
+  const tbody = document.getElementById('dashModelTable');
+  const empty = document.getElementById('modelStatsEmpty');
+
+  if (!stats || !stats.by_model || stats.by_model.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  empty.style.display = 'none';
+
+  const totalInput = stats.total.input_tokens || 0;
+  const totalOutput = stats.total.output_tokens || 0;
+  const totalTokens = totalInput + totalOutput;
+
+  // 计算每个 model 的 share 并排序
+  const modelsWithShare = stats.by_model.map(m => {
+    const mInput = m.input_tokens || 0;
+    const mOutput = m.output_tokens || 0;
+    const modelTokens = mInput + mOutput;
+    const sharePct = totalTokens > 0 ? (modelTokens / totalTokens * 100) : 0;
+    return { ...m, mInput, mOutput, modelTokens, sharePct };
+  }).sort((a, b) => b.sharePct - a.sharePct);
+
+  tbody.innerHTML = modelsWithShare.map(m => {
+    const avgLatency = m.request_count > 0 ? (m.latency_ms / m.request_count / 1000).toFixed(2) : '-';
+    return `
+      <tr>
+        <td class="code">${escapeHtml(m.model)}</td>
+        <td class="code">${m.request_count.toLocaleString()}</td>
+        <td class="code">${m.mInput.toLocaleString()}</td>
+        <td class="code">${m.mOutput.toLocaleString()}</td>
+        <td class="code-secondary">${avgLatency}s</td>
+        <td class="code">${m.sharePct.toFixed(1)}%</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function updateStatsRangeLabel() {
+  const label = document.getElementById('statsRangeLabel');
+  const now = new Date();
+
+  let since;
+  if (timeRange === 'today') {
+    since = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    label.textContent = since.toLocaleDateString() + ' – Today';
+  } else if (timeRange === 'week') {
+    since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    label.textContent = since.toLocaleDateString() + ' – ' + now.toLocaleDateString();
+  } else if (timeRange === 'month') {
+    since = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+    label.textContent = since.toLocaleDateString() + ' – ' + now.toLocaleDateString();
+  }
+}
+
+// Initialize
+loadDraftConfig();
+loadStats();
+</script>
+{{ end }}

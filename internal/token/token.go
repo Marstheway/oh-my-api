@@ -3,82 +3,97 @@ package token
 import (
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/pkoukk/tiktoken-go"
 )
 
-const (
-	EncodingCL100K = "cl100k_base"
-)
+const EncodingCL100K = "cl100k_base"
+
+// Tokenizer counts tokens for a given text.
+type Tokenizer interface {
+	CountTokens(text string) int
+}
 
 var (
-	estimator *EstimatorImpl
-	once      sync.Once
+	defaultTk  Tokenizer
+	deepseekTk Tokenizer
+	initMu     sync.Mutex
 )
 
-func Init() error {
-	once.Do(func() {
-		estimator = &EstimatorImpl{
-			encoding: EncodingCL100K,
-		}
-	})
-	return nil
+// init ensures defaultTk is never nil, preventing nil-pointer panics in
+// CountTokens / NewStreamCounter / Pick when Init has not been called.
+func init() {
+	defaultTk = &tiktokenTokenizer{encoding: EncodingCL100K}
 }
 
-func GetEstimator() *EstimatorImpl {
-	if estimator == nil {
-		Init()
-	}
-	return estimator
-}
-
-type EstimatorImpl struct {
+// tiktokenTokenizer uses tiktoken cl100k_base encoding.
+type tiktokenTokenizer struct {
 	encoding string
 }
 
-func (e *EstimatorImpl) CountTokens(text string) int {
+func (t *tiktokenTokenizer) CountTokens(text string) int {
 	if text == "" {
 		return 0
 	}
-
-	tke, err := tiktoken.GetEncoding(e.encoding)
+	tke, err := tiktoken.GetEncoding(t.encoding)
 	if err != nil {
 		return len(text) / 4
 	}
-
 	return len(tke.Encode(text, nil, nil))
 }
 
+// Init initializes the DeepSeek tokenizer from embedded data.
+func Init() error {
+	initMu.Lock()
+	defer initMu.Unlock()
+
+	if deepseekTk != nil {
+		return nil
+	}
+
+	return loadDeepseekTokenizer()
+}
+
+// Pick returns the appropriate Tokenizer for the given upstream model name.
+func Pick(upstreamModel string) Tokenizer {
+	if deepseekTk != nil && strings.Contains(strings.ToLower(upstreamModel), "deepseek") {
+		return deepseekTk
+	}
+	return defaultTk
+}
+
+// CountTokensFor counts tokens using the tokenizer appropriate for upstreamModel.
+func CountTokensFor(upstreamModel, text string) int {
+	return Pick(upstreamModel).CountTokens(text)
+}
+
+// CountTokens counts tokens using the default tiktoken tokenizer.
+func CountTokens(text string) int {
+	return defaultTk.CountTokens(text)
+}
+
+// StreamCounter accumulates input/output token counts for a single request.
 type StreamCounter struct {
-	estimator    *EstimatorImpl
+	tk           Tokenizer
 	inputTokens  int
 	outputTokens int
-	startTime    time.Time
-	latency      time.Duration
 	textBuilder  strings.Builder
 	mu           sync.Mutex
 }
 
-func NewStreamCounter(inputTokens int) *StreamCounter {
+// NewStreamCounterFor creates a StreamCounter using the tokenizer for upstreamModel.
+func NewStreamCounterFor(upstreamModel string, inputTokens int) *StreamCounter {
 	return &StreamCounter{
-		estimator:    GetEstimator(),
-		inputTokens:  inputTokens,
-		outputTokens: 0,
+		tk:          Pick(upstreamModel),
+		inputTokens: inputTokens,
 	}
 }
 
-func (c *StreamCounter) SetStartTime(start time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.startTime = start
-}
-
-func (c *StreamCounter) SetLatency() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.startTime.IsZero() {
-		c.latency = time.Since(c.startTime)
+// NewStreamCounter creates a StreamCounter using the default tiktoken tokenizer.
+func NewStreamCounter(inputTokens int) *StreamCounter {
+	return &StreamCounter{
+		tk:          defaultTk,
+		inputTokens: inputTokens,
 	}
 }
 
@@ -86,9 +101,7 @@ func (c *StreamCounter) AddOutputTokens(text string) {
 	if text == "" {
 		return
 	}
-
-	tokens := c.estimator.CountTokens(text)
-
+	tokens := c.tk.CountTokens(text)
 	c.mu.Lock()
 	c.outputTokens += tokens
 	c.mu.Unlock()
@@ -109,7 +122,7 @@ func (c *StreamCounter) ComputeOutputTokens() {
 	c.mu.Unlock()
 
 	if text != "" {
-		tokens := c.estimator.CountTokens(text)
+		tokens := c.tk.CountTokens(text)
 		c.mu.Lock()
 		c.outputTokens = tokens
 		c.mu.Unlock()
@@ -126,14 +139,4 @@ func (c *StreamCounter) GetOutputTokens() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.outputTokens
-}
-
-func (c *StreamCounter) GetLatency() time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.latency
-}
-
-func CountTokens(text string) int {
-	return GetEstimator().CountTokens(text)
 }

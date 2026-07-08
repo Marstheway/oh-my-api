@@ -8,6 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Protocol 标识入方向的错误响应格式（OpenAI 风格 vs Anthropic 风格）。
+// 与 adaptor.Protocol（出方向协议路由）是不同概念：此处仅用于选择错误响应格式，
+// 不参与 provider 协议路由。值固定为 "openai"/"anthropic"，对应两种错误格式。
 type Protocol string
 
 const (

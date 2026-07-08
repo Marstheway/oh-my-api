@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/yaml.v3"
 	"github.com/Marstheway/oh-my-api/internal/stats"
+	"gopkg.in/yaml.v3"
 )
 
 func runStats(configPath string, args []string) {

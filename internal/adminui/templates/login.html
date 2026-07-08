@@ -1,0 +1,505 @@
+{{ define "title" }}Login{{ end }}
+
+{{ define "styles" }}
+  /* Override layout body for login page */
+  body {
+    background: #040508 !important;
+    font-weight: 300 !important;
+  }
+
+  /* Hide sidebar, scanline, grid background for login */
+  .sidebar, .scanline { display: none !important; }
+  body::before { display: none !important; }
+  .main {
+    margin-left: 0 !important;
+    padding: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    min-height: 100vh !important;
+    width: 100% !important;
+  }
+
+  /* ═══ Ambient halo ═══ */
+  .halo {
+    position: fixed;
+    width: 640px; height: 640px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(107,159,255,0.06) 0%, transparent 70%);
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    animation: haloBreath 8s ease-in-out infinite;
+  }
+  @keyframes haloBreath {
+    0%, 100% { opacity: 0.6; transform: translate(-50%, -50%) scale(1); }
+    50%      { opacity: 1;   transform: translate(-50%, -50%) scale(1.15); }
+  }
+
+  /* ═══ Grid dots ═══ */
+  .grid-dots {
+    position: fixed; inset: 0;
+    background-image: radial-gradient(circle, rgba(107,159,255,0.08) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+  }
+
+  /* ═══ Geometric accent lines ═══ */
+  .geo-line {
+    position: fixed;
+    pointer-events: none;
+    opacity: 0.08;
+  }
+  .geo-line.h { height: 1px; background: var(--accent); }
+  .geo-line.v { width:  1px; background: var(--accent); }
+  .geo-line:nth-child(1) { top: 20%; left: 0; width: 100%; }
+  .geo-line:nth-child(2) { top: 80%; left: 0; width: 100%; }
+  .geo-line:nth-child(3) { top: 0; left: 15%; height: 100%; }
+  .geo-line:nth-child(4) { top: 0; right: 15%; height: 100%; }
+
+  /* ═══ Card ═══ */
+  .card {
+    position: relative; z-index: 1;
+    width: 420px;
+    padding: 56px 48px 48px;
+    background: #0a0c14;
+    border: 1px solid #1a1d2e;
+    border-radius: 2px;
+    box-shadow:
+      0 0 0 1px rgba(107,159,255,0.04),
+      0 24px 80px rgba(0,0,0,0.6);
+    animation: cardEnter 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  @keyframes cardEnter {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* Top accent line */
+  .card::before {
+    content: '';
+    position: absolute; top: 0; left: 40px; right: 40px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #4466aa, transparent);
+    opacity: 0.4;
+  }
+
+  /* ═══ Brand ═══ */
+  .brand {
+    margin-bottom: 44px;
+  }
+  .brand-name {
+    font-family: 'DM Serif Display', Georgia, serif;
+    font-size: 32px;
+    font-weight: 400;
+    color: #e4e5eb;
+    letter-spacing: -0.3px;
+    line-height: 1;
+  }
+  .brand-name span {
+    color: #6b9fff;
+  }
+  .brand-desc {
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 12px;
+    color: #3d4052;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-top: 10px;
+  }
+
+  /* ═══ Form ═══ */
+  .field-group { position: relative; }
+
+  .field-label {
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    color: #6b6e7e;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    display: block;
+  }
+
+  .input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: #040508;
+    border: 1px solid #1a1d2e;
+    border-radius: 2px;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  }
+  .input-wrap:focus-within {
+    border-color: #4466aa;
+    box-shadow:
+      0 0 0 4px rgba(107,159,255,0.06),
+      inset 0 0 20px rgba(107,159,255,0.03);
+  }
+  .input-wrap.error {
+    border-color: #e0556a;
+    box-shadow: 0 0 0 4px rgba(224,85,106,0.08);
+    animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+  }
+  @keyframes shake {
+    10%, 90%        { transform: translateX(-1px); }
+    20%, 80%        { transform: translateX(2px); }
+    30%, 50%, 70%   { transform: translateX(-3px); }
+    40%, 60%        { transform: translateX(3px); }
+  }
+
+  .input-wrap input {
+    flex: 1;
+    background: none;
+    border: none;
+    padding: 14px 16px;
+    color: #e4e5eb;
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 15px;
+    font-weight: 400;
+    letter-spacing: 1px;
+    outline: none;
+    width: 100%;
+  }
+  .input-wrap input::placeholder {
+    color: #3d4052;
+    letter-spacing: 0;
+    font-weight: 300;
+  }
+  .input-wrap input::-ms-reveal,
+  .input-wrap input::-ms-clear { display: none; }
+
+  .toggle-vis {
+    flex-shrink: 0;
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    background: none; border: none;
+    color: #3d4052;
+    cursor: pointer;
+    transition: color 0.2s;
+    margin-right: 4px;
+  }
+  .toggle-vis:hover { color: #6b6e7e; }
+  .toggle-vis svg { width: 18px; height: 18px; }
+
+  /* Error message */
+  .error-msg {
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 12px;
+    color: #e0556a;
+    margin-top: 10px;
+    min-height: 16px;
+    opacity: 0;
+    transition: opacity 0.3s;
+    letter-spacing: -0.2px;
+  }
+  .error-msg.visible { opacity: 1; }
+
+  /* ═══ Config hint (no password) ═══ */
+  .config-hint {
+    text-align: center;
+    padding: 32px 0 8px;
+  }
+  .hint-icon {
+    color: #6b9fff;
+    opacity: 0.4;
+    margin-bottom: 20px;
+  }
+  .hint-title {
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 14px;
+    font-weight: 500;
+    color: #6b6e7e;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+  }
+  .hint-desc {
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 12px;
+    color: #4a4d5e;
+    line-height: 1.6;
+  }
+  .hint-desc code {
+    background: #0d0f16;
+    padding: 2px 6px;
+    border-radius: 2px;
+    color: #6b9fff;
+    font-size: 11px;
+  }
+
+  /* ═══ Button ═══ */
+  .btn {
+    width: 100%;
+    margin-top: 24px;
+    padding: 14px;
+    background: transparent;
+    border: 1px solid #4466aa;
+    border-radius: 2px;
+    color: #6b9fff;
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+  }
+  .btn::before {
+    content: '';
+    position: absolute; inset: 0;
+    background: #6b9fff;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+  }
+  .btn:hover::before { opacity: 0.06; }
+  .btn:hover {
+    border-color: #6b9fff;
+    box-shadow: 0 0 30px rgba(107,159,255,0.12);
+  }
+  .btn:active { transform: scale(0.985); }
+
+  .btn.loading {
+    pointer-events: none;
+    color: transparent;
+  }
+  .btn.loading::after {
+    content: '';
+    position: absolute; top: 50%; left: 50%;
+    width: 18px; height: 18px;
+    margin: -9px 0 0 -9px;
+    border: 2px solid #4466aa;
+    border-top-color: #6b9fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Status indicator */
+  .status-dot {
+    display: inline-block;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: #3d4052;
+    margin-right: 8px;
+    vertical-align: middle;
+    transition: background 0.4s;
+  }
+  .status-dot.active { background: #6b9fff; box-shadow: 0 0 6px rgba(107,159,255,0.5); }
+  .status-dot.error-dot { background: #e0556a; box-shadow: 0 0 6px rgba(224,85,106,0.5); }
+
+  /* ═══ Footer ═══ */
+  .footer {
+    position: fixed; bottom: 32px; left: 0; right: 0;
+    text-align: center;
+    z-index: 1;
+  }
+  .footer-text {
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 12px;
+    color: #3d4052;
+    letter-spacing: 1px;
+  }
+
+  /* Key hint */
+  .key-hint {
+    position: absolute; right: 8px; top: 50%;
+    transform: translateY(-50%);
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 12px;
+    color: #3d4052;
+    letter-spacing: 0.5px;
+    padding: 2px 6px;
+    border: 1px solid #1a1d2e;
+    border-radius: 2px;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+  .input-wrap:focus-within .key-hint { opacity: 1; }
+
+  /* ═══ Responsive ═══ */
+  @media (max-width: 480px) {
+    .card {
+      width: calc(100vw - 32px);
+      padding: 40px 28px 36px;
+    }
+    .card::before { left: 24px; right: 24px; }
+    .brand-name { font-size: 28px; }
+  }
+{{ end }}
+
+{{ define "content" }}
+<div class="halo"></div>
+<div class="grid-dots"></div>
+<div class="geo-line h"></div>
+<div class="geo-line h"></div>
+<div class="geo-line v"></div>
+<div class="geo-line v"></div>
+
+<div class="card">
+  <div class="brand">
+    <div class="brand-name">oh<span>-</span>my<span>-</span>api</div>
+    <div class="brand-desc">
+      <span class="status-dot" id="statusDot"></span>Admin Console
+    </div>
+  </div>
+
+  <form id="loginForm">
+    {{ if .HasPassword }}
+    <div class="field-group">
+      <label class="field-label" for="password">Access Key</label>
+      <div class="input-wrap" id="inputWrap">
+        <input
+          id="password"
+          type="password"
+          placeholder="Enter admin password"
+          autocomplete="current-password"
+          spellcheck="false"
+        >
+        <button type="button" class="toggle-vis" id="toggleVis" tabindex="-1" aria-label="Toggle visibility">
+          <!-- Eye icon -->
+          <i data-lucide="eye-off" id="eyeOff" style="width:20px;height:20px"></i>
+          <i data-lucide="eye" id="eyeOn" style="width:20px;height:20px;display:none"></i>
+        </button>
+        <span class="key-hint">⏎</span>
+      </div>
+      <div class="error-msg" id="errorMsg"></div>
+    </div>
+
+    <button type="submit" class="btn" id="submitBtn">Authenticate</button>
+    {{ else }}
+    <div class="config-hint">
+      <div class="hint-icon">
+        <i data-lucide="settings" style="width:32px;height:32px"></i>
+      </div>
+      <div class="hint-title">Password Not Configured</div>
+      <div class="hint-desc">
+        Please set <code>server.admin.password</code> in <code>config.yaml</code> to enable admin features.
+      </div>
+    </div>
+    {{ end }}
+  </form>
+</div>
+
+<div class="footer">
+  <span class="footer-text">oh-my-api admin gateway</span>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script>
+const form = document.getElementById('loginForm');
+const input = document.getElementById('password');
+const inputWrap = document.getElementById('inputWrap');
+const submitBtn = document.getElementById('submitBtn');
+const errorMsg = document.getElementById('errorMsg');
+const statusDot = document.getElementById('statusDot');
+const toggleVis = document.getElementById('toggleVis');
+const eyeOff = document.getElementById('eyeOff');
+const eyeOn = document.getElementById('eyeOn');
+
+// 仅在有密码输入框时绑定事件
+if (input) {
+  // ── Toggle password visibility ──
+  if (toggleVis) {
+    toggleVis.addEventListener('click', () => {
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      eyeOff.style.display = show ? 'none' : '';
+      eyeOn.style.display = show ? '' : 'none';
+      input.focus();
+    });
+  }
+
+  // ── Clear error on input ──
+  input.addEventListener('input', () => {
+    inputWrap.classList.remove('error');
+    errorMsg.classList.remove('visible');
+    statusDot.classList.remove('error-dot');
+  });
+
+  // ── Auto-focus ──
+  input.focus();
+
+  // ── Submit ──
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const password = input.value.trim();
+
+    if (!password) {
+      showError('Password is required');
+      return;
+    }
+
+    // Clear previous error state
+    inputWrap.classList.remove('error');
+    errorMsg.classList.remove('visible');
+    statusDot.classList.remove('error-dot');
+
+    setLoading(true);
+
+  try {
+    const response = await fetch('/admin/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ password }),
+    });
+
+    const data = await response.json();
+
+    if (response.ok && data.success) {
+      // Login successful, redirect to admin page
+      statusDot.classList.add('active');
+      submitBtn.textContent = 'Access Granted';
+      submitBtn.style.color = '#10b981';
+      submitBtn.style.borderColor = '#10b981';
+      submitBtn.style.boxShadow = '0 0 30px rgba(16,185,129,0.15)';
+      submitBtn.classList.remove('loading');
+
+      // 读取 redirect 参数
+      const params = new URLSearchParams(window.location.search);
+      const redirectPath = params.get('redirect') || '/admin/';
+
+      setTimeout(() => {
+        window.location.href = redirectPath;
+      }, 500);
+    } else {
+      // Login failed
+      const msg = data.error?.message || 'Login failed, please try again';
+      showError(msg);
+      setLoading(false);
+    }
+  } catch (err) {
+    showError('Network error, please check connection');
+    setLoading(false);
+  }
+  });
+
+  function showError(msg) {
+    errorMsg.textContent = msg;
+    errorMsg.classList.add('visible');
+    inputWrap.classList.add('error');
+    statusDot.classList.add('error-dot');
+    input.focus();
+    input.select();
+  }
+
+  function setLoading(loading) {
+    if (loading) {
+      submitBtn.classList.add('loading');
+      submitBtn.textContent = 'Verifying';
+      input.disabled = true;
+    } else {
+      submitBtn.classList.remove('loading');
+      submitBtn.textContent = 'Authenticate';
+      input.disabled = false;
+    }
+  }
+}
+</script>
+{{ end }}

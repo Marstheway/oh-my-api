@@ -31,14 +31,14 @@ func (m *Manager) Allow(providerName, upstreamModel string) bool {
 	if !ok {
 		slog.Debug("ratelimit allow bypassed: provider limiter not found",
 			"provider", providerName,
-			"model", upstreamModel,
+			"upstream_identity", providerName+"/"+upstreamModel,
 		)
 		return true
 	}
 	if !l.Allow() {
 		slog.Debug("ratelimit blocked by provider limiter",
 			"provider", providerName,
-			"model", upstreamModel,
+			"upstream_identity", providerName+"/"+upstreamModel,
 		)
 		return false
 	}
@@ -47,12 +47,11 @@ func (m *Manager) Allow(providerName, upstreamModel string) bool {
 		if !allowed {
 			slog.Debug("ratelimit blocked by model limiter",
 				"provider", providerName,
-				"model", upstreamModel,
+				"upstream_identity", providerName+"/"+upstreamModel,
 			)
 		}
 		return allowed
 	}
-
 
 	return true
 }

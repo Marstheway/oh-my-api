@@ -1,0 +1,476 @@
+{{ define "title" }}Model Groups{{ end }}
+
+{{ define "styles" }}
+  /* ═══ Draft Bar ═══ */
+  .draft-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 14px; border-radius: var(--radius-sm);
+    background: var(--bg-elevated); border: 1px solid var(--border-default);
+    margin-bottom: 20px;
+  }
+
+  .draft-bar-left {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
+  }
+
+  .draft-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted);
+  }
+
+  .draft-bar.has-changes .draft-dot {
+    background: var(--warning);
+    box-shadow: 0 0 6px var(--warning-glow);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+  /* ═══ Models Editor ═══ */
+  .models-editor { display: flex; flex-direction: column; gap: 4px; }
+
+  .model-row-header {
+    display: flex; align-items: center; gap: 6px;
+  }
+
+  .model-row-header span {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    flex: 1;
+  }
+
+  .model-row-header .w-20 { flex: 0 0 72px; }
+  .model-row-header .w-16 { flex: 0 0 56px; }
+
+  .model-row {
+    display: flex; align-items: center; gap: 6px;
+  }
+
+  .model-row .form-input { flex: 1; }
+  .model-row .form-input.w-20 { flex: 0 0 72px; min-width: 0; }
+  .model-row .form-input.w-16 { flex: 0 0 56px; min-width: 0; }
+
+  .model-row .drag-handle {
+    flex-shrink: 0;
+    width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: grab; color: var(--text-muted);
+    opacity: 0.5; transition: opacity 0.15s;
+  }
+  .model-row:hover .drag-handle { opacity: 1; }
+  .model-row .drag-handle:active { cursor: grabbing; }
+
+  .model-row.sortable-ghost {
+    background: var(--bg-hover);
+    opacity: 0.6;
+  }
+  .model-row.sortable-chosen {
+    background: var(--bg-elevated);
+  }
+
+  /* ═══ Table Column Widths ═══ */
+  .table-wrap table th:nth-child(2),
+  .table-wrap table td:nth-child(2) {
+    min-width: 110px;
+  }
+
+  /* ═══ Mobile Responsive (768px) ═══ */
+  @media (max-width: 768px) {
+    /* 表格最小宽度 */
+    .table-wrap table {
+      min-width: 700px;
+    }
+
+    /* Modal 表单堆叠 */
+    .modal .form-row {
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Models Editor 输入框全宽 */
+    .modal .model-row {
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .modal .model-row .form-input {
+      width: 100%;
+    }
+
+    /* 隐藏 Models Editor 列标题 */
+    .modal .model-row-header {
+      display: none;
+    }
+
+    /* 隐藏拖拽手柄 */
+    .modal .model-row .drag-handle {
+      display: none;
+    }
+
+  }
+{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <div class="page-title">Model Groups</div>
+    <div class="page-subtitle">Define how client-requested models route to providers</div>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-primary" onclick="openModelGroupModal()">
+      <i data-lucide="plus" style="width:13px;height:13px"></i>
+      New Group
+    </button>
+  </div>
+</div>
+
+{{ template "draft-bar" }}
+
+<!-- Model Groups Table -->
+<div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th>Name</th><th>Mode</th><th>Models</th><th>Context</th><th>Exposure</th><th></th>
+    </tr></thead>
+    <tbody id="groupTableBody"></tbody>
+  </table>
+  <div class="empty-state" id="groupsEmpty" style="display:none">
+    <div class="empty-icon">&#x25A1;</div>
+    <div class="empty-title">No model groups configured</div>
+    <button class="btn btn-primary btn-sm" onclick="openModelGroupModal()">Create First Group</button>
+  </div>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script>
+let state = { draft: { model_groups: [] } };
+let originalModelGroups = [];
+let editGroupName = null;
+
+// Draft bar 配置（shared.js 使用）
+window.draftBarConfig = {
+  hasChanges: () => JSON.stringify(originalModelGroups) !== JSON.stringify(state.draft.model_groups),
+  onApplySuccess: () => {
+    originalModelGroups = JSON.parse(JSON.stringify(state.draft.model_groups));
+  }
+};
+
+async function loadData() {
+  try {
+    const resp = await apiFetch('/admin/runtime-config/draft');
+    state.draft.model_groups = resp.model_groups || [];
+    // 仅在首次加载时保存原始状态
+    if (originalModelGroups.length === 0 || resp.model_groups.length === 0) {
+      originalModelGroups = JSON.parse(JSON.stringify(resp.model_groups || []));
+    }
+    renderModelGroups();
+    updateDraftBar();
+  } catch (err) {
+    showToast('Failed to load configuration', 'error');
+  }
+}
+
+// ══════ Render ══════
+
+function renderModelGroups() {
+  const groups = state.draft.model_groups;
+  const tbody = document.getElementById('groupTableBody');
+  const empty = document.getElementById('groupsEmpty');
+
+  if (groups.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+  empty.style.display = 'none';
+
+  const sortedGroups = [...groups].sort((a, b) => a.name.localeCompare(b.name));
+  tbody.innerHTML = sortedGroups.map(g => {
+    const mode = g.mode || 'concurrent';
+    const modeCls = getModeClass(mode);
+
+    const modelsHtml = g.models.map(m => {
+      let extra = '';
+      if (mode === 'load-balance' && m.weight !== 1) extra = ` <span class="chip-muted">w:${m.weight}</span>`;
+      else if (mode === 'failover' && m.priority > 0) extra = ` <span class="chip-muted">p:${m.priority}</span>`;
+      const isRef = !m.model.includes('/');
+      return `<span class="chip" style="${isRef ? 'border-style:dashed' : ''}">${escapeHtml(m.model)}${extra}</span>`;
+    }).join('');
+
+    // context_length: 优先显示配置值，其次计算值
+    let ctxHtml = '<span style="color:var(--text-muted);font-size:11px">—</span>';
+    if (g.model_metadata) {
+      if (g.model_metadata.context_length) {
+        // 配置值：普通 badge
+        const val = g.model_metadata.context_length;
+        const formatted = val >= 1000000 ? (val/1000000).toFixed(0) + 'M' : (val/1000).toFixed(0) + 'k';
+        ctxHtml = `<span class="chip chip-muted">${formatted}</span>`;
+      } else if (g.model_metadata.computed_context_length) {
+        // 计算值：蓝色 badge（区分于配置值）
+        const val = g.model_metadata.computed_context_length;
+        const formatted = val >= 1000000 ? (val/1000000).toFixed(0) + 'M' : (val/1000).toFixed(0) + 'k';
+        ctxHtml = `<span class="chip" style="color:var(--accent)">${formatted}</span>`;
+      }
+    }
+
+    const visHtml = exposureLabel(g.exposure);
+
+    return `
+      <tr>
+        <td><span class="code">${escapeHtml(g.name)}</span></td>
+        <td><span class="badge badge-mode-${modeCls}">${mode}</span></td>
+        <td><div class="chips">${modelsHtml}</div></td>
+        <td>${ctxHtml}</td>
+        <td>${visHtml}</td>
+        <td>
+          <div class="row-actions">
+            <button class="btn-icon" onclick="openModelGroupModal('${escapeAttr(g.name)}')" title="Edit">
+              <i data-lucide="pencil" style="width:12px;height:12px"></i>
+            </button>
+            <button class="btn-icon" onclick="deleteModelGroup('${escapeAttr(g.name)}')" title="Delete" style="color:var(--danger);opacity:0.6">
+              <i data-lucide="trash-2" style="width:12px;height:12px"></i>
+            </button>
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
+}
+
+function getModeClass(mode) {
+  if (!mode || mode === 'concurrent') return 'concurrent';
+  if (mode === 'load-balance' || mode === 'loadbalance') return 'loadbalance';
+  if (mode === 'failover') return 'failover';
+  if (mode === 'adaptive') return 'adaptive';
+  return 'concurrent';
+}
+
+// ══════ CRUD ══════
+
+function openModelGroupModal(name) {
+  editGroupName = name || null;
+  const group = name ? state.draft.model_groups.find(g => g.name === name) : null;
+
+  const nameVal = group ? group.name : '';
+  const modeVal = group ? (group.mode || 'concurrent') : 'concurrent';
+  const exposureVal = group && group.exposure ? group.exposure : 'public';
+  const ctxLen = group && group.model_metadata && group.model_metadata.context_length ? group.model_metadata.context_length : '';
+
+  const models = (group && group.models && group.models.length > 0) ? group.models : [{ model: '', weight: 1, priority: 0 }];
+
+  const modeHintMap = {
+    'concurrent': 'All models called in parallel; first response wins.',
+    'load-balance': 'Requests distributed across models by weight.',
+    'failover': 'Models tried in priority order on failure.',
+    'adaptive': 'Models ranked by TTFT latency; tried in best-first order.'
+  };
+
+  const modelsRows = models.map((m, i) => `
+    <div class="model-row" data-index="${i}">
+      <span class="drag-handle" title="Drag to reorder">
+        <i data-lucide="grip-vertical" style="width:14px;height:14px"></i>
+      </span>
+      <input class="form-input" type="text" value="${escapeAttr(m.model)}" placeholder="provider/model or group-ref" data-field="model">
+      <input class="form-input w-20 weight-input" type="number" value="${m.weight}" min="1" data-field="weight" style="display:none">
+      <button class="btn-icon" onclick="removeModelRow(this)" title="Remove" ${models.length <= 1 ? 'disabled style="opacity:0.3"' : ''}>
+        <i data-lucide="minus" style="width:11px;height:11px"></i>
+      </button>
+    </div>
+  `).join('');
+
+  const body = `
+    <div class="form-group">
+      <label class="form-label">Group Name <span class="required">*</span></label>
+      <input class="form-input" id="mgName" type="text" value="${escapeAttr(nameVal)}" placeholder="my-model-group">
+      <span class="form-error" id="mgNameErr"></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Mode</label>
+      <select class="form-select" id="mgMode" data-dropdown onchange="updateModeHint(this.value)">
+        <option value="concurrent" ${modeVal === 'concurrent' ? 'selected' : ''}>concurrent</option>
+        <option value="load-balance" ${modeVal === 'load-balance' || modeVal === 'loadbalance' ? 'selected' : ''}>load-balance</option>
+        <option value="failover" ${modeVal === 'failover' ? 'selected' : ''}>failover</option>
+        <option value="adaptive" ${modeVal === 'adaptive' ? 'selected' : ''}>adaptive</option>
+      </select>
+      <span class="form-hint" id="mgModeHint">${modeHintMap[modeVal] || modeHintMap['concurrent']}</span>
+    </div>
+    <div class="form-group">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <label class="form-label">Models <span class="required">*</span></label>
+        <button class="btn btn-ghost btn-sm" onclick="addModelRow()">+ Add</button>
+      </div>
+      <div class="models-editor" id="modelsEditor">
+        <div class="model-row-header">
+          <span style="width:20px;flex-shrink:0"></span>
+          <span>Model (provider/name or group ref)</span>
+          <span class="w-20 weight-header" style="display:none">Weight</span>
+        </div>
+        ${modelsRows}
+      </div>
+      <span class="form-hint">Use <em>provider/model</em> format for direct upstream, or just a name for nested group references.</span>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Context Length Override</label>
+        <input class="form-input" id="mgCtx" type="number" value="${ctxLen}" min="1" placeholder="Auto from catalog">
+        <span class="form-hint">Leave empty to use the catalog default.</span>
+      </div>
+      <div class="form-group" style="justify-content:flex-end">
+        <label class="form-label">Exposure</label>
+        <select class="form-select" id="mgExposure" data-dropdown>
+          <option value="public">public</option>
+          <option value="hidden">hidden</option>
+          <option value="internal">internal</option>
+        </select>
+        <span class="form-hint">public：出现在 /v1/models 且可直调；hidden：不展示但可直调；internal：不展示且不可外部直调（仅内部引用）。</span>
+      </div>
+    </div>
+  `;
+
+  const footer = `
+    <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    <button class="btn btn-primary" onclick="saveModelGroup()">${name ? 'Save Changes' : 'Create Group'}</button>
+  `;
+
+  showModal(name ? 'Edit Model Group' : 'Create Model Group', body, footer);
+  document.getElementById('mgExposure').value = exposureVal;
+  updateModeHint(modeVal);
+  initModelsEditorSortable();
+}
+
+function updateModeHint(mode) {
+  const hints = {
+    'concurrent': 'All models called in parallel; first response wins.',
+    'load-balance': 'Requests distributed across models by weight.',
+    'failover': 'Models tried in order on failure.',
+    'adaptive': 'Models ranked by TTFT latency; best-first order.'
+  };
+  const el = document.getElementById('mgModeHint');
+  if (el) el.textContent = hints[mode] || '';
+  
+  // 根据模式切换 weight 列的显示
+  const showWeight = mode === 'load-balance' || mode === 'loadbalance';
+  document.querySelectorAll('.weight-header').forEach(h => h.style.display = showWeight ? '' : 'none');
+  document.querySelectorAll('.weight-input').forEach(i => i.style.display = showWeight ? '' : 'none');
+}
+
+let modelsEditorSortable = null;
+
+function initModelsEditorSortable() {
+  if (modelsEditorSortable) {
+    modelsEditorSortable.destroy();
+    modelsEditorSortable = null;
+  }
+  const editor = document.getElementById('modelsEditor');
+  if (!editor) return;
+  modelsEditorSortable = new Sortable(editor, {
+    animation: 150,
+    handle: '.drag-handle',
+    ghostClass: 'sortable-ghost',
+    chosenClass: 'sortable-chosen',
+    filter: '.model-row-header',
+  });
+}
+
+function exposureLabel(exposure) {
+  switch (exposure) {
+    case 'internal':
+      return '<span class="vis-label" style="color:var(--text-muted)"><span class="vis-dot internal"></span>internal</span>';
+    case 'hidden':
+      return '<span class="vis-label" style="color:var(--warning)"><span class="vis-dot hidden"></span>hidden</span>';
+    default:
+      return '<span class="vis-label" style="color:var(--success)"><span class="vis-dot public"></span>public</span>';
+  }
+}
+
+function addModelRow() {
+  const editor = document.getElementById('modelsEditor');
+  const row = document.createElement('div');
+  row.className = 'model-row';
+  const showWeight = document.getElementById('mgMode').value === 'load-balance';
+  row.innerHTML = `
+    <span class="drag-handle" title="Drag to reorder">
+      <i data-lucide="grip-vertical" style="width:14px;height:14px"></i>
+    </span>
+    <input class="form-input" type="text" placeholder="provider/model" data-field="model">
+    <input class="form-input w-20 weight-input" type="number" value="1" min="1" data-field="weight" style="display:${showWeight ? '' : 'none'}">
+    <button class="btn-icon" onclick="removeModelRow(this)" title="Remove">
+      <i data-lucide="minus" style="width:11px;height:11px"></i>
+    </button>`;
+  editor.appendChild(row);
+  row.querySelector('[data-field="model"]').focus();
+  lucide.createIcons();
+}
+
+function removeModelRow(btn) {
+  const rows = document.querySelectorAll('#modelsEditor .model-row');
+  if (rows.length <= 1) return;
+  btn.closest('.model-row').remove();
+}
+
+async function saveModelGroup() {
+  const name = document.getElementById('mgName').value.trim();
+  const mode = document.getElementById('mgMode').value;
+  const exposure = document.getElementById('mgExposure').value;
+  const ctxLen = document.getElementById('mgCtx').value.trim();
+
+  const rows = document.querySelectorAll('#modelsEditor .model-row');
+  const models = Array.from(rows).map(r => ({
+    model: r.querySelector('[data-field="model"]').value.trim(),
+    weight: parseInt(r.querySelector('[data-field="weight"]').value) || 1
+  })).filter(m => m.model);
+
+  document.getElementById('mgNameErr').textContent = '';
+  if (!name) { document.getElementById('mgNameErr').textContent = 'Group name is required.'; return; }
+  if (models.length === 0) { showToast('At least one model is required.', 'error'); return; }
+
+  const body = {
+    name, mode, models, exposure,
+    model_metadata: ctxLen ? { context_length: parseInt(ctxLen) } : undefined
+  };
+
+  try {
+    if (editGroupName) {
+      await apiFetch(`/admin/runtime-config/draft/model-groups/${encodeURIComponent(editGroupName)}`, { method: 'PUT', body: JSON.stringify(body) });
+      showToast(`"${name}" updated.`);
+    } else {
+      await apiFetch('/admin/runtime-config/draft/model-groups', { method: 'POST', body: JSON.stringify(body) });
+      showToast(`"${name}" created.`);
+    }
+    closeModal();
+    await loadData();
+  } catch (err) {
+    if (err.field) {
+      const el = document.getElementById('mgNameErr');
+      if (el) el.textContent = err.message;
+    }
+    showToast(err.message || 'An error occurred.', 'error');
+  }
+}
+
+function deleteModelGroup(name) {
+  showConfirm({
+    title: 'Delete Model Group',
+    message: `This will remove <strong>${escapeHtml(name)}</strong> from the draft configuration. The change takes effect after Apply.`,
+    danger: true,
+    onConfirm: async () => {
+      try {
+        await apiFetch(`/admin/runtime-config/draft/model-groups/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        showToast(`"${name}" deleted.`);
+        await loadData();
+      } catch (err) { showToast(err.message || 'Delete failed.', 'error'); }
+    }
+  });
+}
+
+// ══════ Helpers ══════
+
+function escapeAttr(str) {
+  return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ══════ Init ══════
+
+loadData();
+</script>
+{{ end }}

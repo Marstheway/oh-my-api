@@ -14,18 +14,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func passThroughOpenAIResponse(c *gin.Context, resp *http.Response, isStream bool, counter TokenCounter) error {
-	for k, v := range resp.Header {
-		c.Writer.Header()[k] = v
-	}
-	c.Writer.WriteHeader(resp.StatusCode)
-
+func passThroughOpenAIResponse(c *gin.Context, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
 	if isStream {
-		err := passThroughOpenAIStream(c, resp, counter)
-		if counter != nil {
-			counter.SetLatency()
-		}
-		return err
+		copyResponseHeaders(c.Writer.Header(), resp.Header)
+		c.Writer.WriteHeader(resp.StatusCode)
+		return passThroughOpenAIStream(c, resp, counter, rmc.RequestedModel)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -33,25 +26,34 @@ func passThroughOpenAIResponse(c *gin.Context, resp *http.Response, isStream boo
 		return err
 	}
 
+	var openAIResp dto.ChatCompletionResponse
+	if err := json.Unmarshal(body, &openAIResp); err != nil {
+		return err
+	}
+
 	if counter != nil {
 		if sc, ok := counter.(*token.StreamCounter); ok {
-			var openAIResp dto.ChatCompletionResponse
-			if err := json.Unmarshal(body, &openAIResp); err == nil {
-				text := token.ExtractTextFromOpenAIResponse(&openAIResp)
-				sc.AddOutputText(text)
-				sc.ComputeOutputTokens()
-			}
+			text := token.ExtractTextFromOpenAIResponse(&openAIResp)
+			sc.AddOutputText(text)
+			sc.ComputeOutputTokens()
 		}
 	}
 
-	c.Data(resp.StatusCode, "application/json", body)
-	if counter != nil {
-		counter.SetLatency()
+	outBody, err := rewriteTopLevelModel(body, rmc.RequestedModel)
+	if err != nil {
+		return err
 	}
+
+	copyResponseHeaders(c.Writer.Header(), resp.Header)
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	c.Data(resp.StatusCode, contentType, outBody)
 	return nil
 }
 
-func passThroughOpenAIStream(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func passThroughOpenAIStream(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
@@ -67,27 +69,42 @@ func passThroughOpenAIStream(c *gin.Context, resp *http.Response, counter TokenC
 			return err
 		}
 
-		_, _ = c.Writer.WriteString(line)
-		flusher.Flush()
-
-		if strings.HasPrefix(line, "data: ") && counter != nil {
+		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 			data = strings.TrimSuffix(data, "\n")
-			if data != "[DONE]" {
-				if sc, ok := counter.(*token.StreamCounter); ok {
-					var chunk dto.ChatCompletionChunk
-					if err := json.Unmarshal([]byte(data), &chunk); err == nil {
-						text := token.ExtractTextFromOpenAIChunk(&chunk)
-						sc.AddOutputText(text)
+			if data == "[DONE]" {
+				if counter != nil {
+					if sc, ok2 := counter.(*token.StreamCounter); ok2 {
+						sc.ComputeOutputTokens()
+					}
+				}
+				_, _ = c.Writer.WriteString(line)
+				flusher.Flush()
+				break
+			}
+			var chunk dto.ChatCompletionChunk
+			if jsonErr := json.Unmarshal([]byte(data), &chunk); jsonErr == nil {
+				if counter != nil {
+					if sc, ok2 := counter.(*token.StreamCounter); ok2 {
+						sc.AddOutputText(token.ExtractTextFromOpenAIChunk(&chunk))
+					}
+				}
+				if requestedModel != "" {
+					if rewrittenData, rewriteErr := rewriteTopLevelModel([]byte(data), requestedModel); rewriteErr == nil {
+						_, _ = fmt.Fprintf(c.Writer, "data: %s\n", rewrittenData)
+						flusher.Flush()
+						continue
 					}
 				}
 			}
+			_, _ = c.Writer.WriteString(line)
+			flusher.Flush()
+		} else {
+			_, _ = c.Writer.WriteString(line)
+			flusher.Flush()
 		}
 
-		if strings.Contains(line, "[DONE]") {
-			if sc, ok := counter.(*token.StreamCounter); ok {
-				sc.ComputeOutputTokens()
-			}
+		if err == io.EOF {
 			break
 		}
 	}
@@ -95,7 +112,7 @@ func passThroughOpenAIStream(c *gin.Context, resp *http.Response, counter TokenC
 	return nil
 }
 
-func writeOpenAIResponseAsAnthropic(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func writeOpenAIResponseAsAnthropic(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -115,14 +132,14 @@ func writeOpenAIResponseAsAnthropic(c *gin.Context, resp *http.Response, counter
 	}
 
 	claudeResp := convertOpenAIResponseToAnthropic(&openAIResp)
-	c.JSON(http.StatusOK, claudeResp)
-	if counter != nil {
-		counter.SetLatency()
+	if rmc.RequestedModel != "" {
+		claudeResp.Model = rmc.RequestedModel
 	}
+	c.JSON(http.StatusOK, claudeResp)
 	return nil
 }
 
-func writeOpenAIStreamAsAnthropic(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func writeOpenAIStreamAsAnthropic(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
@@ -141,7 +158,7 @@ func writeOpenAIStreamAsAnthropic(c *gin.Context, resp *http.Response, counter T
 	toolIndex := make(map[string]int)
 	stopSent := false
 	messageID := ""
-	model := ""
+	model := requestedModel
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -182,7 +199,7 @@ func writeOpenAIStreamAsAnthropic(c *gin.Context, resp *http.Response, counter T
 			} else {
 				messageID = fmt.Sprintf("msg-%d", time.Now().UnixNano())
 			}
-			if chunk.Model != "" {
+			if requestedModel == "" && chunk.Model != "" {
 				model = chunk.Model
 			}
 			start := dto.ClaudeStreamEvent{
@@ -261,7 +278,7 @@ func writeOpenAIStreamAsAnthropic(c *gin.Context, resp *http.Response, counter T
 					deltaEvent := dto.ClaudeStreamEvent{
 						Type:  "content_block_delta",
 						Index: idx,
-						Delta: &dto.ClaudeDelta{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
+						Delta: &dto.ClaudeDelta{Type: "input_json_delta", PartialJSON: &tc.Function.Arguments},
 					}
 					if err := writeAnthropicEvent(c.Writer, deltaEvent); err != nil {
 						return err
@@ -327,7 +344,6 @@ func writeOpenAIStreamAsAnthropic(c *gin.Context, resp *http.Response, counter T
 		if sc, ok := counter.(*token.StreamCounter); ok {
 			sc.ComputeOutputTokens()
 		}
-		counter.SetLatency()
 	}
 
 	return nil
@@ -357,9 +373,10 @@ func convertOpenAIResponseToAnthropic(resp *dto.ChatCompletionResponse) *dto.Cla
 
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		msg := resp.Choices[0].Message
-		if msg.Content != "" {
-			out.Content = append(out.Content, dto.ContentBlock{Type: "text", Text: msg.Content})
-		}
+		// 尝试将 Content 解析为多模态内容
+		contentBlocks := convertOpenAIContentToAnthropicBlocks(msg.Content)
+		out.Content = append(out.Content, contentBlocks...)
+
 		for _, tc := range msg.ToolCalls {
 			input := map[string]any{}
 			if tc.Function.Arguments != "" {
@@ -384,7 +401,54 @@ func convertOpenAIResponseToAnthropic(resp *dto.ChatCompletionResponse) *dto.Cla
 		OutputTokens: resp.Usage.CompletionTokens,
 	}
 
+	// 透传 Usage 缓存 token 统计字段
+	if resp.Usage.PromptTokensDetails != nil && resp.Usage.PromptTokensDetails.CachedTokens > 0 {
+		out.Usage.CacheReadInputTokens = resp.Usage.PromptTokensDetails.CachedTokens
+	}
+
 	return out
+}
+
+// convertOpenAIContentToAnthropicBlocks 将 OpenAI 响应的内容转换为 Anthropic ContentBlock 数组
+// 支持检测 Data URI 格式的图片和文件并转换为对应的 block 类型
+func convertOpenAIContentToAnthropicBlocks(content string) []dto.ContentBlock {
+	if content == "" {
+		return nil
+	}
+
+	// 解析 Data URI
+	mediaType, data, isDataURI := parseDataURI(content)
+	if !isDataURI {
+		// 非 Data URI，作为普通文本
+		return []dto.ContentBlock{{Type: "text", Text: content}}
+	}
+
+	// 根据 media type 判断类型
+	if isImageMediaType(mediaType) {
+		return []dto.ContentBlock{{
+			Type: "image",
+			Source: &dto.MessageSource{
+				Type:      "base64",
+				MediaType: mediaType,
+				Data:      data,
+			},
+		}}
+	}
+
+	// 其他类型统一作为 document
+	return []dto.ContentBlock{{
+		Type: "document",
+		Source: &dto.MessageSource{
+			Type:      "base64",
+			MediaType: mediaType,
+			Data:      data,
+		},
+	}}
+}
+
+// isImageMediaType 判断 media type 是否为图片类型
+func isImageMediaType(mediaType string) bool {
+	return strings.HasPrefix(mediaType, "image/")
 }
 
 func finishReasonToStopReason(finishReason string) string {

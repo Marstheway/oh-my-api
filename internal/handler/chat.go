@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -9,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/Marstheway/oh-my-api/internal/adaptor"
 	"github.com/Marstheway/oh-my-api/internal/codec"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/dto"
@@ -20,18 +17,31 @@ import (
 	"github.com/Marstheway/oh-my-api/internal/scheduler"
 	"github.com/Marstheway/oh-my-api/internal/stats"
 	"github.com/Marstheway/oh-my-api/internal/token"
+	"github.com/gin-gonic/gin"
 )
 
 var (
-	cfg      *config.Config
-	resolver *model.Resolver
-	sched    *scheduler.Scheduler
+	cfg        *config.Config
+	resolver   *model.Resolver
+	sched      *scheduler.Scheduler
+	timeout    = 120 * time.Second
+	catalogIdx catalogContextIndex
 )
 
 func Init(c *config.Config, r *model.Resolver, s *scheduler.Scheduler) {
 	cfg = c
 	resolver = r
 	sched = s
+
+	// 默认 120 秒
+	timeout = 120 * time.Second
+	if c.Server.Timeout != "" {
+		if d, err := time.ParseDuration(c.Server.Timeout); err == nil {
+			timeout = d
+		}
+	}
+
+	catalogIdx = LoadCatalogContextIndex(c)
 }
 
 func Chat(c *gin.Context) {
@@ -56,89 +66,69 @@ func Chat(c *gin.Context) {
 		return
 	}
 
-	c.Set("model", req.Model)
+	originalModel := req.Model
+	c.Set("model", originalModel)
 
-	inputTokens := token.CountRequestTokens(req)
+	// Smart route：解码请求后、resolver.Resolve 之前
+	effectiveModel := originalModel
+	if resolver.SmartRouteEnabled() {
+		sri := resolver.GetSmartRouteIndex()
+		obs := ObserveTurnOpenAIChat(req)
+		srResult := SmartRoute(c.Request.Context(), originalModel, obs, sri)
+		effectiveModel = srResult.EffectiveModel
 
-	result, err := resolver.Resolve(req.Model)
+		// 记录 smart route 日志
+		slog.Info("smart route",
+			"enabled", true,
+			"original_model", originalModel,
+			"decision", srResult.Decision,
+			"decision_path", srResult.DecisionPath,
+			"effective_model", effectiveModel,
+			"fallback_reason", srResult.FallbackReason,
+		)
+	}
+
+	result, err := resolver.Resolve(effectiveModel)
 	if err != nil {
 		errs.WriteError(c, errs.ProtocolOpenAI, http.StatusNotFound,
-			errs.ErrModelNotFound, fmt.Sprintf("model not found: %s", req.Model))
+			errs.ErrModelNotFound, fmt.Sprintf("model not found: %s", effectiveModel))
 		return
 	}
 
-	dests := make([]string, len(result.Tasks))
-	for i, t := range result.Tasks {
-		dests[i] = t.ProviderName + "/" + t.UpstreamModel
-	}
+	// 记录日志：从 plan tree 收集叶子 dest 信息
+	dests := collectPlanDests(result.Plan)
 	slog.Info("request",
 		"key", c.GetString("key_name"),
-		"protocol", "openai",
+		"protocol", "openai.chat",
 		"model", req.Model,
 		"scheduler", result.Mode,
-		"dest", strings.Join(dests, ","),
+		"dest", strings.Join(dests, " | "),
 	)
 
 	metrics.IncConcurrent()
-
 	start := time.Now()
 
-	tasks := make([]scheduler.Task, len(result.Tasks))
-	for i, t := range result.Tasks {
-		outboundStr := t.Provider.GetOutboundProtocol("openai")
-		outboundFormat, fmtErr := codec.SelectFormatForInbound(outboundStr, codec.FormatOpenAIChat)
-		if fmtErr != nil {
-			outboundFormat, fmtErr = codec.SelectFormatForInbound(t.Provider.Protocol, codec.FormatOpenAIChat)
-		}
-		if fmtErr != nil {
-			errs.WriteError(c, errs.ProtocolOpenAI, http.StatusInternalServerError,
-				errs.ErrInternal, "unknown outbound format: "+outboundStr)
-			return
-		}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
 
-		bodyBytes, encErr := inboundCodec.EncodeRequest(outboundFormat, req, t.UpstreamModel)
-		if encErr != nil {
-			handleCodecError(c, errs.ProtocolOpenAI, "encode_request", encErr)
-			return
-		}
-
-		var ada adaptor.Adaptor
-		var adaProtocol adaptor.Protocol
-		switch outboundFormat {
-		case codec.FormatAnthropicMessages:
-			ada = adaptor.GetAdaptor("anthropic")
-			adaProtocol = adaptor.ProtocolAnthropic
-		case codec.FormatOpenAIResponse:
-			ada = adaptor.GetAdaptor("openai")
-			adaProtocol = adaptor.ProtocolOpenAIResponse
-		default:
-			ada = adaptor.GetAdaptor("openai")
-			adaProtocol = adaptor.ProtocolOpenAI
-		}
-
-		upstreamReq := ada.BuildRequest(c.Request.Context(), &t.Provider, t.UpstreamModel, bytes.NewReader(bodyBytes), adaProtocol)
-		tasks[i] = scheduler.Task{
-			ProviderName:  t.ProviderName,
-			Provider:      t.Provider,
-			UpstreamModel: t.UpstreamModel,
-			OutboundProtocol: string(outboundFormat),
-			Weight:        t.Weight,
-			Priority:      t.Priority,
-			Request:       upstreamReq,
-		}
+	rootNode, matErr := materializePlan(ctx, result.Plan, codec.FormatOpenAIChat, inboundCodec, req, result.ModelGroup)
+	if matErr != nil {
+		metrics.DecConcurrent()
+		handleCodecError(c, errs.ProtocolOpenAI, "encode_request", matErr)
+		return
 	}
 
-	resp, err := sched.Execute(c.Request.Context(), result.Mode, result.Timeout, tasks)
+	resp, schedErr := sched.ExecuteNode(ctx, rootNode)
 	metrics.DecConcurrent()
-	if err != nil {
-		recordRequestMetrics(c, "openai.chat", "openai", result.ModelGroup, "", "", "error", time.Since(start))
-		handleUpstreamError(c, errs.ProtocolOpenAI, err)
+	if schedErr != nil {
+		recordRequestMetrics(c, "openai.chat", "openai.chat", result.ModelGroup, "", "", "error", time.Since(start), 0)
+		handleUpstreamError(c, errs.ProtocolOpenAI, schedErr)
 		return
 	}
 	defer resp.Response.Body.Close()
 
 	if resp.Response.StatusCode >= 400 {
-		recordRequestMetrics(c, "openai.chat", "openai", result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", time.Since(start))
+		recordRequestMetrics(c, "openai.chat", "openai.chat", result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", time.Since(start), 0)
 		handleUpstreamResponseError(c, errs.ProtocolOpenAI, resp.Winner, resp.Response)
 		return
 	}
@@ -147,36 +137,44 @@ func Chat(c *gin.Context) {
 
 	latency := time.Since(start)
 
+	// 从 plan tree 中找到 winner 对应的 outbound format
+	outboundFormat, reason, cost := findWinnerOutbound(result.Plan, resp.Winner, resp.UpstreamModel, codec.FormatOpenAIChat)
+
 	slog.Info("response",
 		"status", resp.Response.StatusCode,
-		"protocol", "openai",
+		"protocol", "openai.chat",
+		"stream", req.Stream,
 		"latency", fmt.Sprintf("%.2fs", latency.Seconds()),
 		"model", resp.Winner+"/"+resp.UpstreamModel,
+		"inbound_format", string(codec.FormatOpenAIChat),
+		"outbound_selected", string(outboundFormat),
+		"selection_reason", reason,
+		"conversion_cost", cost,
+		"candidate_count", func() int {
+			if result.Plan == nil {
+				return 0
+			}
+			return len(result.Plan.Leaves) + len(result.Plan.Children)
+		}(),
 	)
 
-	var winnerProvider config.ProviderConfig
-	for _, t := range result.Tasks {
-		if t.ProviderName == resp.Winner {
-			winnerProvider = t.Provider
-			break
-		}
-	}
-	outboundStr := winnerProvider.GetOutboundProtocol("openai")
-	outboundFormat, fmtErr := codec.SelectFormatForInbound(outboundStr, codec.FormatOpenAIChat)
-	if fmtErr != nil {
-		outboundFormat, _ = codec.SelectFormatForInbound(winnerProvider.Protocol, codec.FormatOpenAIChat)
+	counter := token.NewStreamCounterFor(resp.UpstreamModel, token.CountRequestTokensFor(resp.UpstreamModel, req))
+
+	rmc := codec.ResponseModelContext{
+		RequestedModel:      req.Model,
+		ModelGroup:          result.ModelGroup,
+		WinnerProvider:      resp.Winner,
+		WinnerUpstreamModel: resp.UpstreamModel,
+		IncludeUsage:        req.StreamOptions != nil && req.StreamOptions.IncludeUsage,
 	}
 
-	counter := token.NewStreamCounter(inputTokens)
-	counter.SetStartTime(start)
-
-	if writeErr := inboundCodec.WriteResponse(c, outboundFormat, resp.Response, req.Stream, counter); writeErr != nil {
+	if writeErr := inboundCodec.WriteResponse(c, outboundFormat, resp.Response, req.Stream, counter, rmc); writeErr != nil {
 		handleCodecError(c, errs.ProtocolOpenAI, "write_response", writeErr)
 		return
 	}
 
-	recordRequestMetrics(c, "openai.chat", "openai", result.ModelGroup, resp.Winner, resp.UpstreamModel, "success", latency)
-	recordStats(c, resp.Winner, resp.UpstreamModel, counter.GetInputTokens(), counter.GetOutputTokens(), counter.GetLatency())
+	recordRequestMetrics(c, "openai.chat", "openai.chat", result.ModelGroup, resp.Winner, resp.UpstreamModel, "success", latency, resp.StreamTTFT)
+	recordStats(c, resp.Winner, resp.UpstreamModel, counter.GetInputTokens(), counter.GetOutputTokens(), latency)
 }
 
 func recordStats(c *gin.Context, providerName, upstreamModel string, inputTokens, outputTokens int, latency time.Duration) {
@@ -200,7 +198,7 @@ func recordStats(c *gin.Context, providerName, upstreamModel string, inputTokens
 }
 
 // recordRequestMetrics 记录请求级 metrics
-func recordRequestMetrics(c *gin.Context, metricInboundProtocol, routingInboundProtocol, modelGroup, provider, upstreamModel, status string, latency time.Duration) {
+func recordRequestMetrics(c *gin.Context, metricInboundProtocol, routingInboundProtocol, modelGroup, provider, upstreamModel, status string, latency, ttft time.Duration) {
 	keyName := c.GetString("key_name")
 	if keyName == "" {
 		return
@@ -209,18 +207,63 @@ func recordRequestMetrics(c *gin.Context, metricInboundProtocol, routingInboundP
 	var outboundProtocol string
 	if provider != "" {
 		if prov, exists := cfg.Providers.Items[provider]; exists {
-			outboundProtocol = prov.GetOutboundProtocol(routingInboundProtocol)
+			inboundFormat, err := codec.NormalizeProviderFormat(routingInboundProtocol)
+			if err == nil {
+				if outboundFormat, _, _, selErr := prov.SelectOutboundFormatForModel(inboundFormat, upstreamModel); selErr == nil {
+					outboundProtocol = string(outboundFormat)
+				}
+			}
+			if outboundProtocol == "" {
+				outboundProtocol = prov.GetOutboundProtocol(routingInboundProtocol)
+			}
 		}
 	}
 
 	metrics.RecordRequest(context.Background(), metrics.RequestInfo{
-		InboundProtocol:  metricInboundProtocol,
-		OutboundProtocol: outboundProtocol,
-		Provider:         provider,
-		UpstreamModel:    upstreamModel,
-		ModelGroup:       modelGroup,
-		KeyName:          keyName,
-		Status:           status,
-		Duration:         latency.Seconds(),
+		InboundProtocol:   metricInboundProtocol,
+		OutboundProtocol:  outboundProtocol,
+		Provider:          provider,
+		UpstreamModel:     upstreamModel,
+		ModelGroup:        modelGroup,
+		KeyName:           keyName,
+		Status:            status,
+		Duration:          latency.Seconds(),
+		FirstTokenDuration: ttft.Seconds(),
 	})
+}
+
+// collectPlanDests 从 plan tree 收集所有叶子的 provider/model 字符串（用于日志）。
+func collectPlanDests(node *model.PlanNode) []string {
+	if node == nil {
+		return nil
+	}
+	var dests []string
+	for _, leaf := range node.Leaves {
+		dests = append(dests, leaf.ProviderName+"/"+leaf.UpstreamModel)
+	}
+	for _, child := range node.Children {
+		childDests := collectPlanDests(child)
+		dests = append(dests, child.GroupName+"["+child.Mode+": "+strings.Join(childDests,", ")+"]")
+	}
+	return dests
+}
+
+// findWinnerOutbound 从 plan tree 中找 winner 对应的 outbound format。
+// 若找不到，返回 inboundFormat 作为 fallback。
+func findWinnerOutbound(node *model.PlanNode, winner, upstreamModel string, inboundFormat codec.Format) (codec.Format, string, int) {
+	if node == nil {
+		return inboundFormat, "unknown", 0
+	}
+	for _, leaf := range node.Leaves {
+		if leaf.ProviderName == winner && leaf.UpstreamModel == upstreamModel {
+			f, reason, cost, _ := leaf.Provider.SelectOutboundFormatForModel(inboundFormat, leaf.UpstreamModel)
+			return f, reason, cost
+		}
+	}
+	for _, child := range node.Children {
+		if f, reason, cost := findWinnerOutbound(child, winner, upstreamModel, inboundFormat); f != inboundFormat || reason != "unknown" {
+			return f, reason, cost
+		}
+	}
+	return inboundFormat, "unknown", 0
 }

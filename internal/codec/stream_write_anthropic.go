@@ -30,15 +30,16 @@ func writeClaudeEvent(c *gin.Context, event dto.ClaudeStreamEvent) error {
 	return nil
 }
 
-func writeResponsesStreamAsClaudeStream(c *gin.Context, resp *http.Response, counter TokenCounter) error {
+func writeResponsesStreamAsClaudeStream(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("Transfer-Encoding", "chunked")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 
-	mapper1 := newResponsesToChatStreamMapper("", "", 0)
+	mapper1 := newResponsesToChatStreamMapper("", requestedModel, 0)
 	mapper2 := newChatToClaudeStreamMapper()
+	mapper2.requestedModel = requestedModel
 
 	err := scanSSEData(resp.Body, func(data string) error {
 		var event dto.ResponsesStreamEvent
@@ -87,7 +88,6 @@ func writeResponsesStreamAsClaudeStream(c *gin.Context, resp *http.Response, cou
 		if sc, ok := counter.(*token.StreamCounter); ok {
 			sc.ComputeOutputTokens()
 		}
-		counter.SetLatency()
 	}
 	return err
 }

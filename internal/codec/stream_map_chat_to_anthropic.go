@@ -10,19 +10,23 @@ import (
 
 // chatToClaudeStreamMapper maps individual Chat completion chunks to Anthropic SSE events.
 type chatToClaudeStreamMapper struct {
-	messageID        string
-	model            string
-	messageStarted   bool
-	textBlockStart   bool
-	textIndex        int
-	nextIndex        int
-	toolIndexByChunk map[int]int
+	messageID          string
+	requestedModel     string
+	model              string
+	messageStarted     bool
+	textBlockStart     bool
+	thinkingBlockStart bool
+	textIndex          int
+	thinkingIndex      int
+	nextIndex          int
+	toolIndexByChunk   map[int]int
 }
 
 func newChatToClaudeStreamMapper() *chatToClaudeStreamMapper {
 	return &chatToClaudeStreamMapper{
 		messageID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
 		textIndex:        -1,
+		thinkingIndex:    -1,
 		toolIndexByChunk: map[int]int{},
 	}
 }
@@ -35,7 +39,9 @@ func (m *chatToClaudeStreamMapper) ensureMessageStart(chunk dto.ChatCompletionCh
 	if chunk.ID != "" {
 		m.messageID = chunk.ID
 	}
-	if chunk.Model != "" {
+	if m.requestedModel != "" {
+		m.model = m.requestedModel
+	} else if chunk.Model != "" {
 		m.model = chunk.Model
 	}
 	*events = append(*events, dto.ClaudeStreamEvent{
@@ -65,10 +71,26 @@ func (m *chatToClaudeStreamMapper) ensureTextBlockStart(events *[]dto.ClaudeStre
 	})
 }
 
+func (m *chatToClaudeStreamMapper) ensureThinkingBlockStart(events *[]dto.ClaudeStreamEvent) {
+	if m.thinkingBlockStart {
+		return
+	}
+	m.thinkingBlockStart = true
+	m.thinkingIndex = m.nextIndex
+	m.nextIndex++
+	*events = append(*events, dto.ClaudeStreamEvent{
+		Type:         "content_block_start",
+		Index:        m.thinkingIndex,
+		ContentBlock: &dto.ContentBlock{Type: "thinking"},
+	})
+}
+
 func (m *chatToClaudeStreamMapper) Map(chunk dto.ChatCompletionChunk) ([]dto.ClaudeStreamEvent, error) {
 	var events []dto.ClaudeStreamEvent
 
-	if m.model == "" && chunk.Model != "" {
+	if m.requestedModel != "" {
+		m.model = m.requestedModel
+	} else if m.model == "" && chunk.Model != "" {
 		m.model = chunk.Model
 	}
 
@@ -79,23 +101,82 @@ func (m *chatToClaudeStreamMapper) Map(chunk dto.ChatCompletionChunk) ([]dto.Cla
 
 	delta := chunk.Choices[0].Delta
 
-	if delta.Content != "" {
+	// Handle role delta (usually first chunk)
+	if delta.Role != "" {
 		m.ensureMessageStart(chunk, &events)
-		m.ensureTextBlockStart(&events)
+	}
+
+	if delta.ReasoningContent != "" {
+		m.ensureMessageStart(chunk, &events)
+		m.ensureThinkingBlockStart(&events)
 		events = append(events, dto.ClaudeStreamEvent{
 			Type:  "content_block_delta",
-			Index: m.textIndex,
-			Delta: &dto.ClaudeDelta{Type: "text_delta", Text: delta.Content},
+			Index: m.thinkingIndex,
+			Delta: &dto.ClaudeDelta{Type: "thinking_delta", Thinking: delta.ReasoningContent},
 		})
+	}
+
+	if delta.Content != "" {
+		m.ensureMessageStart(chunk, &events)
+		// 检查是否为 Data URI 格式的多模态内容
+		mediaType, data, isDataURI := parseDataURI(delta.Content)
+		if isDataURI {
+			// 多模态内容：作为完整的 content_block_start 发送，不累积后续 delta
+			idx := m.nextIndex
+			m.nextIndex++
+			if isImageMediaType(mediaType) {
+				// 图片类型
+				events = append(events, dto.ClaudeStreamEvent{
+					Type:  "content_block_start",
+					Index: idx,
+					ContentBlock: &dto.ContentBlock{
+						Type: "image",
+						Source: &dto.MessageSource{
+							Type:      "base64",
+							MediaType: mediaType,
+							Data:      data,
+						},
+					},
+				})
+			} else {
+				// 文档类型
+				events = append(events, dto.ClaudeStreamEvent{
+					Type:  "content_block_start",
+					Index: idx,
+					ContentBlock: &dto.ContentBlock{
+						Type: "document",
+						Source: &dto.MessageSource{
+							Type:      "base64",
+							MediaType: mediaType,
+							Data:      data,
+						},
+					},
+				})
+			}
+			// 多模态内容需要 content_block_stop
+			events = append(events, dto.ClaudeStreamEvent{
+				Type:  "content_block_stop",
+				Index: idx,
+			})
+		} else {
+			// 普通文本内容
+			m.ensureTextBlockStart(&events)
+			events = append(events, dto.ClaudeStreamEvent{
+				Type:  "content_block_delta",
+				Index: m.textIndex,
+				Delta: &dto.ClaudeDelta{Type: "text_delta", Text: delta.Content},
+			})
+		}
 	}
 
 	for _, tc := range delta.ToolCalls {
 		m.ensureMessageStart(chunk, &events)
-		idx, exists := m.toolIndexByChunk[tc.Index]
+		idx, exists := m.toolIndexByChunk[tc.GetIndex()]
 		if !exists && tc.ID != "" {
 			idx = m.nextIndex
 			m.nextIndex++
-			m.toolIndexByChunk[tc.Index] = idx
+			m.toolIndexByChunk[tc.GetIndex()] = idx
+			exists = true
 			events = append(events, dto.ClaudeStreamEvent{
 				Type:  "content_block_start",
 				Index: idx,
@@ -114,13 +195,17 @@ func (m *chatToClaudeStreamMapper) Map(chunk dto.ChatCompletionChunk) ([]dto.Cla
 			events = append(events, dto.ClaudeStreamEvent{
 				Type:  "content_block_delta",
 				Index: idx,
-				Delta: &dto.ClaudeDelta{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
+				Delta: &dto.ClaudeDelta{Type: "input_json_delta", PartialJSON: &tc.Function.Arguments},
 			})
 		}
 	}
 
 	if chunk.Choices[0].FinishReason != nil {
 		m.ensureMessageStart(chunk, &events)
+		// content_block_stop for thinking
+		if m.thinkingBlockStart {
+			events = append(events, dto.ClaudeStreamEvent{Type: "content_block_stop", Index: m.thinkingIndex})
+		}
 		// content_block_stop for text
 		if m.textBlockStart {
 			events = append(events, dto.ClaudeStreamEvent{Type: "content_block_stop", Index: m.textIndex})

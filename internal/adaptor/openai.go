@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
+	"github.com/gin-gonic/gin"
 )
 
 type OpenAIAdaptor struct{}
@@ -22,6 +23,12 @@ func (a *OpenAIAdaptor) BuildRequest(ctx context.Context, provider *config.Provi
 
 	endpoint := provider.GetEndpoint(string(inbound))
 	url := BuildURL(endpoint, inbound)
+	slog.Debug("build upstream request",
+		"provider_protocols", provider.Protocols,
+		"inbound_protocol", string(inbound),
+		"upstream_model", upstreamModel,
+		"url", url,
+	)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
@@ -38,17 +45,9 @@ func (a *OpenAIAdaptor) WriteResponse(c *gin.Context, inbound Protocol,
 	c.Writer.WriteHeader(resp.StatusCode)
 
 	if isStream {
-		err := a.writeStreamResponse(c, resp, counter)
-		if counter != nil {
-			counter.SetLatency()
-		}
-		return err
+		return a.writeStreamResponse(c, resp, counter)
 	}
-	err := a.writeNonStreamResponse(c, resp, counter)
-	if counter != nil {
-		counter.SetLatency()
-	}
-	return err
+	return a.writeNonStreamResponse(c, resp, counter)
 }
 
 func (a *OpenAIAdaptor) writeStreamResponse(c *gin.Context, resp *http.Response, counter TokenCounter) error {

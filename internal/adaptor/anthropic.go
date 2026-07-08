@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
+	"github.com/gin-gonic/gin"
 )
 
 type AnthropicAdaptor struct{}
@@ -38,11 +38,7 @@ func (a *AnthropicAdaptor) WriteResponse(c *gin.Context, inbound Protocol,
 	}
 
 	if isStream {
-		err := a.convertClaudeStreamToOpenAI(c, resp, counter)
-		if counter != nil {
-			counter.SetLatency()
-		}
-		return err
+		return a.convertClaudeStreamToOpenAI(c, resp, counter)
 	}
 	return a.convertClaudeResponseToOpenAI(c, resp, counter)
 }
@@ -55,7 +51,6 @@ func (a *AnthropicAdaptor) passThrough(c *gin.Context, resp *http.Response, isSt
 
 	if isStream && counter != nil {
 		err := a.passThroughStream(c, resp, counter)
-		counter.SetLatency()
 		return err
 	}
 
@@ -76,9 +71,6 @@ func (a *AnthropicAdaptor) passThrough(c *gin.Context, resp *http.Response, isSt
 	}
 
 	c.Data(resp.StatusCode, "application/json", body)
-	if counter != nil {
-		counter.SetLatency()
-	}
 	return nil
 }
 
@@ -131,9 +123,6 @@ func (a *AnthropicAdaptor) convertClaudeResponseToOpenAI(c *gin.Context, resp *h
 	var claudeResp dto.ClaudeResponse
 	if err := json.Unmarshal(body, &claudeResp); err != nil {
 		c.Data(resp.StatusCode, "application/json", body)
-		if counter != nil {
-			counter.SetLatency()
-		}
 		return nil
 	}
 
@@ -147,9 +136,6 @@ func (a *AnthropicAdaptor) convertClaudeResponseToOpenAI(c *gin.Context, resp *h
 
 	openAIResp := ConvertClaudeResponseToOpenAI(&claudeResp)
 	c.JSON(http.StatusOK, openAIResp)
-	if counter != nil {
-		counter.SetLatency()
-	}
 	return nil
 }
 

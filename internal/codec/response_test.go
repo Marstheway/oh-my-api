@@ -83,17 +83,24 @@ func TestOpenAIChatCodec_WriteResponse_NonStream(t *testing.T) {
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, counter); err != nil {
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
 	}
 	if w.Header().Get("X-Test") != "openai" {
-		t.Fatalf("header not preserved")
+		t.Fatalf("upstream header not forwarded to client")
 	}
-	if w.Body.String() != openAINonStreamBody {
-		t.Fatalf("body mismatch")
+	var out dto.ChatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("body parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "gpt-4" {
+		t.Fatalf("model = %q, want gpt-4", out.Model)
+	}
+	if len(out.Choices) == 0 || out.Choices[0].Message.Content != "Hello" {
+		t.Fatalf("content not preserved")
 	}
 	if counter.GetOutputTokens() == 0 {
 		t.Fatalf("output tokens should be > 0")
@@ -106,7 +113,7 @@ func TestOpenAIChatCodec_WriteResponse_FromAnthropicMessages(t *testing.T) {
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, counter); err != nil {
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	if w.Code != http.StatusOK {
@@ -132,7 +139,7 @@ func TestOpenAIChatCodec_WriteResponse_FromAnthropicMessages_InvalidJSON(t *test
 	resp := newResponse(http.StatusOK, "not-json", nil)
 	ctx, _ := newTestContext()
 
-	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil); err == nil {
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil, ResponseModelContext{}); err == nil {
 		t.Fatalf("expected error for invalid json")
 	}
 }
@@ -143,17 +150,24 @@ func TestAnthropicMessagesCodec_WriteResponse_NonStream(t *testing.T) {
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, counter); err != nil {
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusAccepted)
 	}
 	if w.Header().Get("X-Test") != "anthropic" {
-		t.Fatalf("header not preserved")
+		t.Fatalf("upstream header not forwarded to client")
 	}
-	if w.Body.String() != claudeNonStreamBody {
-		t.Fatalf("body mismatch")
+	var out dto.ClaudeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("body parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "claude-3" {
+		t.Fatalf("model = %q, want claude-3", out.Model)
+	}
+	if len(out.Content) == 0 || out.Content[0].Text != "Hello" {
+		t.Fatalf("content not preserved")
 	}
 	if counter.GetOutputTokens() == 0 {
 		t.Fatalf("output tokens should be > 0")
@@ -166,7 +180,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIChat(t *testing.T) {
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, counter); err != nil {
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	if w.Code != http.StatusOK {
@@ -195,7 +209,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIChat_InvalidJSON(t *test
 	resp := newResponse(http.StatusOK, "not-json", nil)
 	ctx, _ := newTestContext()
 
-	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil); err == nil {
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil, ResponseModelContext{}); err == nil {
 		t.Fatalf("expected error for invalid json")
 	}
 }
@@ -208,7 +222,7 @@ func TestOpenAIChatCodec_WriteResponse_Stream(t *testing.T) {
 		ctx, w := newTestContext()
 		counter := token.NewStreamCounter(0)
 
-		if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter); err != nil {
+		if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter, ResponseModelContext{}); err != nil {
 			t.Fatalf("WriteResponse error: %v", err)
 		}
 		if w.Code != http.StatusOK {
@@ -230,7 +244,7 @@ func TestOpenAIChatCodec_WriteResponse_Stream(t *testing.T) {
 		ctx, w := newTestContext()
 		counter := token.NewStreamCounter(0)
 
-		if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, counter); err != nil {
+		if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, counter, ResponseModelContext{}); err != nil {
 			t.Fatalf("WriteResponse error: %v", err)
 		}
 		body := w.Body.String()
@@ -255,7 +269,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromOpenAIChat_NonStream_Text(t *test
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, false, counter); err != nil {
+	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	if w.Code != http.StatusOK {
@@ -308,6 +322,40 @@ func TestOpenAIResponseCodec_WriteResponse_FromOpenAIChat_NonStream_Text(t *test
 	}
 }
 
+func TestOpenAIResponseCodec_WriteResponse_FromOpenAIChat_NonStream_Reasoning(t *testing.T) {
+	body := `{"id":"chatcmpl-r","object":"chat.completion","created":1234,"model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"Answer","reasoning_content":"First think."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
+
+	c := &OpenAIResponseCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+
+	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil, ResponseModelContext{}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ResponsesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if len(out.Output) < 2 {
+		t.Fatalf("output len = %d, want >= 2", len(out.Output))
+	}
+	if out.Output[0].Type != "reasoning" {
+		t.Fatalf("output[0].type = %q, want reasoning", out.Output[0].Type)
+	}
+	var summary []map[string]any
+	if err := json.Unmarshal(out.Output[0].Summary, &summary); err != nil {
+		t.Fatalf("summary parse error: %v", err)
+	}
+	if len(summary) != 1 || summary[0]["text"] != "First think." {
+		t.Fatalf("unexpected reasoning summary: %+v", summary)
+	}
+	if out.Output[1].Type != "message" {
+		t.Fatalf("output[1].type = %q, want message", out.Output[1].Type)
+	}
+}
+
 func TestOpenAIResponseCodec_WriteResponse_FromOpenAIChat_NonStream_Tools(t *testing.T) {
 	body := `{"id":"chatcmpl-2","object":"chat.completion","created":1234,"model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}}`
 
@@ -316,7 +364,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromOpenAIChat_NonStream_Tools(t *tes
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, false, counter); err != nil {
+	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	if w.Code != http.StatusOK {
@@ -356,7 +404,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromOpenAIChat_NonStream_InvalidChoic
 	resp := newResponse(http.StatusOK, body, nil)
 	ctx, _ := newTestContext()
 
-	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil); err == nil {
+	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil, ResponseModelContext{}); err == nil {
 		t.Fatalf("expected error for empty choices")
 	}
 }
@@ -369,7 +417,7 @@ func TestOpenAIChatCodec_WriteResponse_FromOpenAIResponse_NonStream_Text(t *test
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter); err != nil {
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	if w.Code != http.StatusOK {
@@ -417,7 +465,7 @@ func TestOpenAIChatCodec_WriteResponse_FromOpenAIResponse_NonStream_Tools(t *tes
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter); err != nil {
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	if w.Code != http.StatusOK {
@@ -457,7 +505,7 @@ func TestOpenAIChatCodec_WriteResponse_FromOpenAIResponse_NonStream_StatusFailed
 	resp := newResponse(http.StatusOK, body, nil)
 	ctx, _ := newTestContext()
 
-	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil); err == nil {
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{}); err == nil {
 		t.Fatalf("expected error for failed status")
 	}
 }
@@ -473,7 +521,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromOpenAIChat_Stream_Text(t *testing
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter); err != nil {
+	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -506,7 +554,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromOpenAIChat_Stream_Tools(t *testin
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter); err != nil {
+	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -539,7 +587,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromOpenAIChat_Stream_Tools_RealForma
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter); err != nil {
+	if err := c.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -575,7 +623,7 @@ func TestOpenAIChatCodec_WriteResponse_FromOpenAIResponse_Stream_Text(t *testing
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := chatCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter); err != nil {
+	if err := chatCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -606,7 +654,7 @@ func TestOpenAIChatCodec_WriteResponse_FromOpenAIResponse_Stream_Tools(t *testin
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := chatCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter); err != nil {
+	if err := chatCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -623,7 +671,7 @@ func TestOpenAIChatCodec_WriteResponse_FromOpenAIResponse_Stream_InvalidEvent(t 
 	resp := newResponse(http.StatusOK, responsesStreamBody, nil)
 	ctx, _ := newTestContext()
 
-	err := chatCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, nil)
+	err := chatCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, nil, ResponseModelContext{})
 	if err == nil {
 		t.Fatalf("expected error for response.failed event")
 	}
@@ -637,7 +685,7 @@ func TestAnthropicMessagesCodec_WriteResponse_Stream(t *testing.T) {
 		ctx, w := newTestContext()
 		counter := token.NewStreamCounter(0)
 
-		if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, counter); err != nil {
+		if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, counter, ResponseModelContext{}); err != nil {
 			t.Fatalf("WriteResponse error: %v", err)
 		}
 		if w.Code != http.StatusOK {
@@ -658,7 +706,7 @@ func TestAnthropicMessagesCodec_WriteResponse_Stream(t *testing.T) {
 		resp := newResponse(http.StatusOK, claudeStreamBody, map[string]string{"Content-Type": "text/event-stream"})
 		ctx, w := newTestContext()
 
-		if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, nil); err != nil {
+		if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, nil, ResponseModelContext{}); err != nil {
 			t.Fatalf("WriteResponse error: %v", err)
 		}
 		if w.Body.String() != claudeStreamBody {
@@ -671,7 +719,7 @@ func TestAnthropicMessagesCodec_WriteResponse_Stream(t *testing.T) {
 		ctx, w := newTestContext()
 		counter := token.NewStreamCounter(0)
 
-		if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter); err != nil {
+		if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, counter, ResponseModelContext{}); err != nil {
 			t.Fatalf("WriteResponse error: %v", err)
 		}
 		body := w.Body.String()
@@ -710,7 +758,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromAnthropicMessages_NonStream_ViaCh
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, counter); err != nil {
+	if err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -734,7 +782,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromAnthropicMessages_NonStream_ReadE
 	resp := &http.Response{StatusCode: http.StatusOK, Body: errReadCloser{}}
 	ctx, _ := newTestContext()
 
-	err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil)
+	err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil, ResponseModelContext{})
 	assertConversionError(t, err, "anthropic_to_response_via_chat", "response_read", FormatAnthropicMessages, FormatOpenAIResponse)
 }
 
@@ -743,7 +791,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromAnthropicMessages_NonStream_Inval
 	resp := newResponse(http.StatusOK, "not-json", nil)
 	ctx, _ := newTestContext()
 
-	err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil)
+	err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil, ResponseModelContext{})
 	assertConversionError(t, err, "anthropic_to_response_via_chat", "response_unmarshal", FormatAnthropicMessages, FormatOpenAIResponse)
 }
 
@@ -755,7 +803,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_NonStream_ViaCh
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter); err != nil {
+	if err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -776,7 +824,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_NonStream_ReadE
 	resp := &http.Response{StatusCode: http.StatusOK, Body: errReadCloser{}}
 	ctx, _ := newTestContext()
 
-	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil)
+	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{})
 	assertConversionError(t, err, "response_to_chat", "response_read", FormatOpenAIResponse, FormatAnthropicMessages)
 }
 
@@ -785,7 +833,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_NonStream_Inval
 	resp := newResponse(http.StatusOK, "not-json", nil)
 	ctx, _ := newTestContext()
 
-	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil)
+	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{})
 	assertConversionError(t, err, "response_to_chat", "response_unmarshal", FormatOpenAIResponse, FormatAnthropicMessages)
 }
 
@@ -796,7 +844,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_NonStream_Conve
 	resp := newResponse(http.StatusOK, responsesBody, nil)
 	ctx, _ := newTestContext()
 
-	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil)
+	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{})
 	assertConversionError(t, err, "response_to_chat", "response_conversion", FormatOpenAIResponse, FormatAnthropicMessages)
 }
 
@@ -806,7 +854,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromAnthropicMessages_Stream_ViaChat(
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, counter); err != nil {
+	if err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -836,7 +884,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_Stream_ViaChat(
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter); err != nil {
+	if err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -858,9 +906,36 @@ func TestOpenAIChatCodec_WriteResponse_FromOpenAIResponse_UnknownOutputItem(t *t
 	resp := newResponse(http.StatusOK, body, nil)
 	ctx, _ := newTestContext()
 
-	err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil)
-	if err == nil {
-		t.Fatalf("expected error for unknown output item type 'reasoning', got nil")
+	err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{})
+	if err != nil {
+		t.Fatalf("expected reasoning output to be supported, got error: %v", err)
+	}
+}
+
+func TestOpenAIChatCodec_WriteResponse_FromOpenAIResponse_NonStream_Reasoning(t *testing.T) {
+	body := `{"id":"resp-4","object":"response","created_at":1234,"model":"gpt-4o","status":"completed","output":[{"type":"reasoning","id":"rs-1","summary":[{"type":"summary_text","text":"thinking..."}]},{"type":"message","id":"msg-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`
+
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+
+	err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{})
+	if err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ChatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if out.Choices[0].Message == nil {
+		t.Fatal("message should not be nil")
+	}
+	if out.Choices[0].Message.ReasoningContent != "thinking..." {
+		t.Fatalf("reasoning_content = %q, want %q", out.Choices[0].Message.ReasoningContent, "thinking...")
+	}
+	if out.Choices[0].Message.Content != "Hello" {
+		t.Fatalf("content = %q, want Hello", out.Choices[0].Message.Content)
 	}
 }
 
@@ -869,7 +944,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_Stream_ReadErro
 	resp := &http.Response{StatusCode: http.StatusOK, Body: errReadCloser{}}
 	ctx, _ := newTestContext()
 
-	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, nil)
+	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, nil, ResponseModelContext{})
 	assertConversionError(t, err, "response_to_chat", "stream_read", FormatOpenAIResponse, FormatAnthropicMessages)
 }
 
@@ -883,7 +958,7 @@ func TestOpenAIResponseCodec_WriteResponse_OpenAIResponse_PassthroughStream(t *t
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter); err != nil {
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	result := w.Body.String()
@@ -981,6 +1056,7 @@ func TestMapChatChunkToClaudeEvents_TextDelta(t *testing.T) {
 
 func TestMapChatChunkToClaudeEvents_TextAfterToolUsesAllocatedTextIndex(t *testing.T) {
 	mapper := newChatToClaudeStreamMapper()
+	tcIdx0 := 0
 
 	toolChunk := dto.ChatCompletionChunk{
 		ID:      "chatcmpl-1",
@@ -988,7 +1064,7 @@ func TestMapChatChunkToClaudeEvents_TextAfterToolUsesAllocatedTextIndex(t *testi
 		Created: 1234,
 		Model:   "gpt-4",
 		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{ToolCalls: []dto.ToolCall{{
-			Index: 0,
+			Index: &tcIdx0,
 			ID:    "call-1",
 			Type:  "function",
 			Function: dto.ToolCallFunc{
@@ -1028,6 +1104,7 @@ func TestMapChatChunkToClaudeEvents_TextAfterToolUsesAllocatedTextIndex(t *testi
 }
 
 func TestMapChatChunkToClaudeEvents_ToolArgumentContinuationUsesChunkIndex(t *testing.T) {
+	tcIdx7 := 7
 	mapper := newChatToClaudeStreamMapper()
 
 	startChunk := dto.ChatCompletionChunk{
@@ -1036,7 +1113,7 @@ func TestMapChatChunkToClaudeEvents_ToolArgumentContinuationUsesChunkIndex(t *te
 		Created: 1234,
 		Model:   "gpt-4",
 		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{ToolCalls: []dto.ToolCall{{
-			Index: 7,
+			Index: &tcIdx7,
 			ID:    "call-1",
 			Type:  "function",
 			Function: dto.ToolCallFunc{
@@ -1055,7 +1132,7 @@ func TestMapChatChunkToClaudeEvents_ToolArgumentContinuationUsesChunkIndex(t *te
 		Created: 1234,
 		Model:   "gpt-4",
 		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{ToolCalls: []dto.ToolCall{{
-			Index: 7,
+			Index:    &tcIdx7,
 			Function: dto.ToolCallFunc{Arguments: "{\"city\":\"Beijing\"}"},
 		}}}}},
 	}
@@ -1096,7 +1173,7 @@ func TestOpenAIResponseCodec_WriteResponse_FromAnthropicMessages_Stream_FirstDel
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, counter); err != nil {
+	if err := responseCodec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -1133,7 +1210,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_Stream_FirstDel
 	ctx, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 
-	if err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter); err != nil {
+	if err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, counter, ResponseModelContext{}); err != nil {
 		t.Fatalf("WriteResponse error: %v", err)
 	}
 	body := w.Body.String()
@@ -1195,5 +1272,1383 @@ func TestMapChatChunkToResponsesEvents_TextDelta(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected response.output_text.delta, got %#v", events)
+	}
+}
+
+// Task 11: OpenAI -> Anthropic Usage fields passthrough tests
+
+func TestConvertOpenAIResponseToAnthropic_UsagePassthrough_CachedTokens(t *testing.T) {
+	// Test: OpenAI PromptTokensDetails.CachedTokens -> Claude CacheReadInputTokens
+	openAIResp := &dto.ChatCompletionResponse{
+		ID:      "chatcmpl-1",
+		Object:  "chat.completion",
+		Created: 1234,
+		Model:   "gpt-4",
+		Choices: []dto.Choice{{
+			Index: 0,
+			Message: &dto.ResMessage{
+				Role:    "assistant",
+				Content: "Hello",
+			},
+			FinishReason: ptr("stop"),
+		}},
+		Usage: dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+			PromptTokensDetails: &dto.UsageDetails{
+				CachedTokens: 80,
+			},
+		},
+	}
+
+	claudeResp := convertOpenAIResponseToAnthropic(openAIResp)
+
+	if claudeResp.Usage.InputTokens != 100 {
+		t.Fatalf("InputTokens = %d, want 100", claudeResp.Usage.InputTokens)
+	}
+	if claudeResp.Usage.OutputTokens != 50 {
+		t.Fatalf("OutputTokens = %d, want 50", claudeResp.Usage.OutputTokens)
+	}
+	if claudeResp.Usage.CacheReadInputTokens != 80 {
+		t.Fatalf("CacheReadInputTokens = %d, want 80", claudeResp.Usage.CacheReadInputTokens)
+	}
+}
+
+func TestConvertOpenAIResponseToAnthropic_UsagePassthrough_NoCachedTokens(t *testing.T) {
+	// Test: When PromptTokensDetails is nil or CachedTokens is 0, CacheReadInputTokens should be 0
+	openAIResp := &dto.ChatCompletionResponse{
+		ID:      "chatcmpl-2",
+		Object:  "chat.completion",
+		Created: 1234,
+		Model:   "gpt-4",
+		Choices: []dto.Choice{{
+			Index: 0,
+			Message: &dto.ResMessage{
+				Role:    "assistant",
+				Content: "Hello",
+			},
+			FinishReason: ptr("stop"),
+		}},
+		Usage: dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+		},
+	}
+
+	claudeResp := convertOpenAIResponseToAnthropic(openAIResp)
+
+	if claudeResp.Usage.CacheReadInputTokens != 0 {
+		t.Fatalf("CacheReadInputTokens = %d, want 0", claudeResp.Usage.CacheReadInputTokens)
+	}
+}
+
+func TestConvertOpenAIResponseToAnthropic_UsagePassthrough_ReasoningTokensIgnored(t *testing.T) {
+	// Test: CompletionTokensDetails.ReasoningTokens should be ignored (not mapped)
+	openAIResp := &dto.ChatCompletionResponse{
+		ID:      "chatcmpl-3",
+		Object:  "chat.completion",
+		Created: 1234,
+		Model:   "gpt-4",
+		Choices: []dto.Choice{{
+			Index: 0,
+			Message: &dto.ResMessage{
+				Role:    "assistant",
+				Content: "Hello",
+			},
+			FinishReason: ptr("stop"),
+		}},
+		Usage: dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+			CompletionTokensDetails: &dto.UsageDetails{
+				ReasoningTokens: 30,
+			},
+		},
+	}
+
+	claudeResp := convertOpenAIResponseToAnthropic(openAIResp)
+
+	// ReasoningTokens should NOT be mapped to any Claude field
+	// Just verify basic usage is correct
+	if claudeResp.Usage.InputTokens != 100 {
+		t.Fatalf("InputTokens = %d, want 100", claudeResp.Usage.InputTokens)
+	}
+	if claudeResp.Usage.OutputTokens != 50 {
+		t.Fatalf("OutputTokens = %d, want 50", claudeResp.Usage.OutputTokens)
+	}
+}
+
+func TestConvertOpenAIResponseToAnthropic_UsagePassthrough_BothDetails(t *testing.T) {
+	// Test: Both PromptTokensDetails and CompletionTokensDetails present
+	openAIResp := &dto.ChatCompletionResponse{
+		ID:      "chatcmpl-4",
+		Object:  "chat.completion",
+		Created: 1234,
+		Model:   "gpt-4",
+		Choices: []dto.Choice{{
+			Index: 0,
+			Message: &dto.ResMessage{
+				Role:    "assistant",
+				Content: "Hello",
+			},
+			FinishReason: ptr("stop"),
+		}},
+		Usage: dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+			PromptTokensDetails: &dto.UsageDetails{
+				CachedTokens: 80,
+			},
+			CompletionTokensDetails: &dto.UsageDetails{
+				ReasoningTokens: 30,
+			},
+		},
+	}
+
+	claudeResp := convertOpenAIResponseToAnthropic(openAIResp)
+
+	if claudeResp.Usage.CacheReadInputTokens != 80 {
+		t.Fatalf("CacheReadInputTokens = %d, want 80", claudeResp.Usage.CacheReadInputTokens)
+	}
+}
+
+func ptr(s string) *string { return &s }
+
+// ============================================================================
+// Task 1: 验证非流式响应中 model 字段使用 RequestedModel
+// ============================================================================
+
+func TestWriteClaudeResponseAsOpenAI_UsesRequestedModel(t *testing.T) {
+	// Claude 上游响应中 model 是 upstream-model，但请求中的别名是 my-alias
+	body := `{"id":"msg-1","type":"message","role":"assistant","content":[{"type":"text","text":"Hi"}],"model":"upstream-model","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}`
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ChatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "my-alias" {
+		t.Errorf("model = %q, want %q", out.Model, "my-alias")
+	}
+}
+
+func TestWriteOpenAIResponseAsAnthropic_UsesRequestedModel(t *testing.T) {
+	// OpenAI 上游响应中 model 是 upstream-model，但请求别名是 my-alias
+	body := `{"id":"chatcmpl-1","object":"chat.completion","created":1234,"model":"upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`
+	codec := &AnthropicMessagesCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ClaudeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "my-alias" {
+		t.Errorf("model = %q, want %q", out.Model, "my-alias")
+	}
+}
+
+func TestWriteOpenAIChatResponseAsResponses_UsesRequestedModel(t *testing.T) {
+	// OpenAI Chat 上游响应转换为 Responses 格式，model 应该是请求别名
+	body := `{"id":"chatcmpl-1","object":"chat.completion","created":1234,"model":"upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`
+	codec := &OpenAIResponseCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ResponsesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "my-alias" {
+		t.Errorf("model = %q, want %q", out.Model, "my-alias")
+	}
+}
+
+func TestWriteOpenAIResponseAsChatResponse_UsesRequestedModel(t *testing.T) {
+	// Responses 上游响应转换为 Chat 格式，model 应该是请求别名
+	body := `{"id":"resp-1","object":"response","created_at":1234,"model":"upstream-model","status":"completed","output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}`
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ChatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "my-alias" {
+		t.Errorf("model = %q, want %q", out.Model, "my-alias")
+	}
+}
+
+func TestPassThroughResponsesResponse_UsesRequestedModel(t *testing.T) {
+	// Responses 直通（passthrough），model 应该是请求别名
+	body := `{"id":"resp-1","object":"response","created_at":1234,"model":"upstream-model","status":"completed","output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}`
+	codec := &OpenAIResponseCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ResponsesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "my-alias" {
+		t.Errorf("model = %q, want %q", out.Model, "my-alias")
+	}
+}
+
+func TestPassThroughOpenAIResponse_UsesRequestedModel(t *testing.T) {
+	// OpenAI Chat 直通，model 应该是请求别名
+	body := `{"id":"chatcmpl-1","object":"chat.completion","created":1234,"model":"upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ChatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "my-alias" {
+		t.Errorf("model = %q, want %q", out.Model, "my-alias")
+	}
+}
+
+func TestPassThroughAnthropicResponse_UsesRequestedModel(t *testing.T) {
+	// Anthropic 直通，model 应该是请求别名
+	body := `{"id":"msg-1","type":"message","role":"assistant","content":[{"type":"text","text":"Hi"}],"model":"upstream-model","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}`
+	codec := &AnthropicMessagesCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ClaudeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "my-alias" {
+		t.Errorf("model = %q, want %q", out.Model, "my-alias")
+	}
+}
+
+// Task 12: Anthropic -> OpenAI Usage fields passthrough tests
+
+func TestConvertClaudeResponseToOpenAI_UsagePassthrough_CacheReadTokens(t *testing.T) {
+	// Test: Claude CacheReadInputTokens -> OpenAI PromptTokensDetails.CachedTokens
+	claudeResp := &dto.ClaudeResponse{
+		ID:   "msg-1",
+		Type: "message",
+		Role: "assistant",
+		Content: []dto.ContentBlock{{
+			Type: "text",
+			Text: "Hello",
+		}},
+		Model:      "claude-3",
+		StopReason: ptr("end_turn"),
+		Usage: dto.ClaudeUsage{
+			InputTokens:              100,
+			OutputTokens:             50,
+			CacheReadInputTokens:     80,
+			CacheCreationInputTokens: 10,
+		},
+	}
+
+	openAIResp := convertClaudeResponseToOpenAI(claudeResp)
+
+	if openAIResp.Usage.PromptTokens != 100 {
+		t.Fatalf("PromptTokens = %d, want 100", openAIResp.Usage.PromptTokens)
+	}
+	if openAIResp.Usage.CompletionTokens != 50 {
+		t.Fatalf("CompletionTokens = %d, want 50", openAIResp.Usage.CompletionTokens)
+	}
+	if openAIResp.Usage.TotalTokens != 150 {
+		t.Fatalf("TotalTokens = %d, want 150", openAIResp.Usage.TotalTokens)
+	}
+	if openAIResp.Usage.PromptTokensDetails == nil {
+		t.Fatalf("PromptTokensDetails should not be nil")
+	}
+	if openAIResp.Usage.PromptTokensDetails.CachedTokens != 80 {
+		t.Fatalf("PromptTokensDetails.CachedTokens = %d, want 80", openAIResp.Usage.PromptTokensDetails.CachedTokens)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_UsagePassthrough_NoCacheTokens(t *testing.T) {
+	// Test: When CacheReadInputTokens is 0, PromptTokensDetails should not be set (or CachedTokens should be 0)
+	claudeResp := &dto.ClaudeResponse{
+		ID:   "msg-2",
+		Type: "message",
+		Role: "assistant",
+		Content: []dto.ContentBlock{{
+			Type: "text",
+			Text: "Hello",
+		}},
+		Model:      "claude-3",
+		StopReason: ptr("end_turn"),
+		Usage: dto.ClaudeUsage{
+			InputTokens:  100,
+			OutputTokens: 50,
+		},
+	}
+
+	openAIResp := convertClaudeResponseToOpenAI(claudeResp)
+
+	if openAIResp.Usage.PromptTokens != 100 {
+		t.Fatalf("PromptTokens = %d, want 100", openAIResp.Usage.PromptTokens)
+	}
+	// When no cache tokens, PromptTokensDetails should be nil or have 0 cached tokens
+	if openAIResp.Usage.PromptTokensDetails != nil && openAIResp.Usage.PromptTokensDetails.CachedTokens != 0 {
+		t.Fatalf("PromptTokensDetails.CachedTokens = %d, want 0 or nil", openAIResp.Usage.PromptTokensDetails.CachedTokens)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_UsagePassthrough_CacheCreationIgnored(t *testing.T) {
+	// Test: CacheCreationInputTokens should be ignored (not mapped to OpenAI)
+	claudeResp := &dto.ClaudeResponse{
+		ID:   "msg-3",
+		Type: "message",
+		Role: "assistant",
+		Content: []dto.ContentBlock{{
+			Type: "text",
+			Text: "Hello",
+		}},
+		Model:      "claude-3",
+		StopReason: ptr("end_turn"),
+		Usage: dto.ClaudeUsage{
+			InputTokens:              100,
+			OutputTokens:             50,
+			CacheCreationInputTokens: 20,
+		},
+	}
+
+	openAIResp := convertClaudeResponseToOpenAI(claudeResp)
+
+	// CacheCreationInputTokens is not mapped to OpenAI
+	// Just verify it doesn't affect other fields
+	if openAIResp.Usage.PromptTokens != 100 {
+		t.Fatalf("PromptTokens = %d, want 100", openAIResp.Usage.PromptTokens)
+	}
+}
+
+// --- Task 8: Anthropic -> OpenAI Multimodal Response Conversion Tests ---
+
+func TestConvertClaudeResponseToOpenAI_ImageBlock_Base64(t *testing.T) {
+	// Test: Claude image block with base64 source -> OpenAI image_url
+	claudeResp := &dto.ClaudeResponse{
+		ID:   "msg-img-1",
+		Type: "message",
+		Role: "assistant",
+		Content: []dto.ContentBlock{{
+			Type: "image",
+			Source: &dto.MessageSource{
+				Type:      "base64",
+				MediaType: "image/jpeg",
+				Data:      "base64encodeddata",
+			},
+		}},
+		Model:      "claude-3",
+		StopReason: ptr("end_turn"),
+		Usage: dto.ClaudeUsage{
+			InputTokens:  100,
+			OutputTokens: 50,
+		},
+	}
+
+	openAIResp := convertClaudeResponseToOpenAI(claudeResp)
+
+	if len(openAIResp.Choices) != 1 {
+		t.Fatalf("len(choices) = %d, want 1", len(openAIResp.Choices))
+	}
+
+	// Content should be empty string for multimodal responses
+	if openAIResp.Choices[0].Message.Content != "" {
+		t.Fatalf("content = %q, want empty string", openAIResp.Choices[0].Message.Content)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_ImageBlock_URL(t *testing.T) {
+	// Test: Claude image block with URL source -> OpenAI image_url
+	claudeResp := &dto.ClaudeResponse{
+		ID:   "msg-img-2",
+		Type: "message",
+		Role: "assistant",
+		Content: []dto.ContentBlock{{
+			Type: "image",
+			Source: &dto.MessageSource{
+				Type: "url",
+				Url:  "https://example.com/image.jpg",
+			},
+		}},
+		Model:      "claude-3",
+		StopReason: ptr("end_turn"),
+		Usage: dto.ClaudeUsage{
+			InputTokens:  100,
+			OutputTokens: 50,
+		},
+	}
+
+	openAIResp := convertClaudeResponseToOpenAI(claudeResp)
+
+	if len(openAIResp.Choices) != 1 {
+		t.Fatalf("len(choices) = %d, want 1", len(openAIResp.Choices))
+	}
+
+	// Content should be empty string for multimodal responses
+	if openAIResp.Choices[0].Message.Content != "" {
+		t.Fatalf("content = %q, want empty string", openAIResp.Choices[0].Message.Content)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_DocumentBlock_Base64(t *testing.T) {
+	// Test: Claude document block with base64 source -> OpenAI file
+	claudeResp := &dto.ClaudeResponse{
+		ID:   "msg-doc-1",
+		Type: "message",
+		Role: "assistant",
+		Content: []dto.ContentBlock{{
+			Type: "document",
+			Source: &dto.MessageSource{
+				Type:      "base64",
+				MediaType: "application/pdf",
+				Data:      "base64pdfdata",
+			},
+		}},
+		Model:      "claude-3",
+		StopReason: ptr("end_turn"),
+		Usage: dto.ClaudeUsage{
+			InputTokens:  100,
+			OutputTokens: 50,
+		},
+	}
+
+	openAIResp := convertClaudeResponseToOpenAI(claudeResp)
+
+	if len(openAIResp.Choices) != 1 {
+		t.Fatalf("len(choices) = %d, want 1", len(openAIResp.Choices))
+	}
+
+	// Content should be empty string for multimodal responses
+	if openAIResp.Choices[0].Message.Content != "" {
+		t.Fatalf("content = %q, want empty string", openAIResp.Choices[0].Message.Content)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_MixedContent(t *testing.T) {
+	// Test: Mixed content - text + image + document
+	claudeResp := &dto.ClaudeResponse{
+		ID:   "msg-mixed-1",
+		Type: "message",
+		Role: "assistant",
+		Content: []dto.ContentBlock{
+			{
+				Type: "text",
+				Text: "Here is an image and a document:",
+			},
+			{
+				Type: "image",
+				Source: &dto.MessageSource{
+					Type:      "base64",
+					MediaType: "image/png",
+					Data:      "pngdata",
+				},
+			},
+			{
+				Type: "document",
+				Source: &dto.MessageSource{
+					Type:      "base64",
+					MediaType: "application/pdf",
+					Data:      "pdfdata",
+				},
+			},
+		},
+		Model:      "claude-3",
+		StopReason: ptr("end_turn"),
+		Usage: dto.ClaudeUsage{
+			InputTokens:  200,
+			OutputTokens: 100,
+		},
+	}
+
+	openAIResp := convertClaudeResponseToOpenAI(claudeResp)
+
+	if len(openAIResp.Choices) != 1 {
+		t.Fatalf("len(choices) = %d, want 1", len(openAIResp.Choices))
+	}
+
+	// Text content should contain only the text block
+	if openAIResp.Choices[0].Message.Content != "Here is an image and a document:" {
+		t.Fatalf("content = %q, want 'Here is an image and a document:'", openAIResp.Choices[0].Message.Content)
+	}
+}
+
+// --- Task 9: OpenAI → Anthropic Multimodal Response Conversion Tests ---
+
+func TestConvertOpenAIResponseToAnthropic_ImageContent_DataURI(t *testing.T) {
+	// Test: OpenAI response with Data URI image in content -> Anthropic image block
+	openAIResp := &dto.ChatCompletionResponse{
+		ID:      "chatcmpl-img-1",
+		Object:  "chat.completion",
+		Created: 1234,
+		Model:   "gpt-4",
+		Choices: []dto.Choice{{
+			Index: 0,
+			Message: &dto.ResMessage{
+				Role:    "assistant",
+				Content: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD",
+			},
+			FinishReason: ptr("stop"),
+		}},
+		Usage: dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+		},
+	}
+
+	claudeResp := convertOpenAIResponseToAnthropic(openAIResp)
+
+	if claudeResp.Type != "message" {
+		t.Fatalf("type = %q, want message", claudeResp.Type)
+	}
+	if len(claudeResp.Content) != 1 {
+		t.Fatalf("len(content) = %d, want 1", len(claudeResp.Content))
+	}
+	block := claudeResp.Content[0]
+	if block.Type != "image" {
+		t.Fatalf("content[0].type = %q, want image", block.Type)
+	}
+	if block.Source == nil {
+		t.Fatalf("content[0].source should not be nil")
+	}
+	if block.Source.Type != "base64" {
+		t.Fatalf("source.type = %q, want base64", block.Source.Type)
+	}
+	if block.Source.MediaType != "image/jpeg" {
+		t.Fatalf("source.media_type = %q, want image/jpeg", block.Source.MediaType)
+	}
+	if block.Source.Data != "/9j/4AAQSkZJRgABAQEASABIAAD" {
+		t.Fatalf("source.data = %q, want /9j/4AAQSkZJRgABAQEASABIAAD", block.Source.Data)
+	}
+}
+
+func TestConvertOpenAIResponseToAnthropic_FileContent_DataURI(t *testing.T) {
+	// Test: OpenAI response with Data URI file (PDF) in content -> Anthropic document block
+	openAIResp := &dto.ChatCompletionResponse{
+		ID:      "chatcmpl-file-1",
+		Object:  "chat.completion",
+		Created: 1234,
+		Model:   "gpt-4",
+		Choices: []dto.Choice{{
+			Index: 0,
+			Message: &dto.ResMessage{
+				Role:    "assistant",
+				Content: "data:application/pdf;base64,JVBERi0xLjQKJcOkw7zDtsOWw5PDgMO",
+			},
+			FinishReason: ptr("stop"),
+		}},
+		Usage: dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+		},
+	}
+
+	claudeResp := convertOpenAIResponseToAnthropic(openAIResp)
+
+	if len(claudeResp.Content) != 1 {
+		t.Fatalf("len(content) = %d, want 1", len(claudeResp.Content))
+	}
+	block := claudeResp.Content[0]
+	if block.Type != "document" {
+		t.Fatalf("content[0].type = %q, want document", block.Type)
+	}
+	if block.Source == nil {
+		t.Fatalf("content[0].source should not be nil")
+	}
+	if block.Source.Type != "base64" {
+		t.Fatalf("source.type = %q, want base64", block.Source.Type)
+	}
+	if block.Source.MediaType != "application/pdf" {
+		t.Fatalf("source.media_type = %q, want application/pdf", block.Source.MediaType)
+	}
+	if block.Source.Data != "JVBERi0xLjQKJcOkw7zDtsOWw5PDgMO" {
+		t.Fatalf("source.data = %q, want JVBERi0xLjQKJcOkw7zDtsOWw5PDgMO", block.Source.Data)
+	}
+}
+
+func TestConvertOpenAIResponseToAnthropic_TextContent(t *testing.T) {
+	// Test: Normal text content (not Data URI) -> Anthropic text block
+	openAIResp := &dto.ChatCompletionResponse{
+		ID:      "chatcmpl-text-1",
+		Object:  "chat.completion",
+		Created: 1234,
+		Model:   "gpt-4",
+		Choices: []dto.Choice{{
+			Index: 0,
+			Message: &dto.ResMessage{
+				Role:    "assistant",
+				Content: "Hello, this is a normal text response",
+			},
+			FinishReason: ptr("stop"),
+		}},
+		Usage: dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+		},
+	}
+
+	claudeResp := convertOpenAIResponseToAnthropic(openAIResp)
+
+	if len(claudeResp.Content) != 1 {
+		t.Fatalf("len(content) = %d, want 1", len(claudeResp.Content))
+	}
+	block := claudeResp.Content[0]
+	if block.Type != "text" {
+		t.Fatalf("content[0].type = %q, want text", block.Type)
+	}
+	if block.Text != "Hello, this is a normal text response" {
+		t.Fatalf("content[0].text = %q, want 'Hello, this is a normal text response'", block.Text)
+	}
+}
+
+func TestConvertOpenAIResponseToAnthropic_URLContent(t *testing.T) {
+	// Test: HTTP URL in content (not Data URI) -> Anthropic text block (URL as text)
+	openAIResp := &dto.ChatCompletionResponse{
+		ID:      "chatcmpl-url-1",
+		Object:  "chat.completion",
+		Created: 1234,
+		Model:   "gpt-4",
+		Choices: []dto.Choice{{
+			Index: 0,
+			Message: &dto.ResMessage{
+				Role:    "assistant",
+				Content: "https://example.com/image.jpg",
+			},
+			FinishReason: ptr("stop"),
+		}},
+		Usage: dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+		},
+	}
+
+	claudeResp := convertOpenAIResponseToAnthropic(openAIResp)
+
+	if len(claudeResp.Content) != 1 {
+		t.Fatalf("len(content) = %d, want 1", len(claudeResp.Content))
+	}
+	block := claudeResp.Content[0]
+	if block.Type != "text" {
+		t.Fatalf("content[0].type = %q, want text", block.Type)
+	}
+	if block.Text != "https://example.com/image.jpg" {
+		t.Fatalf("content[0].text = %q, want 'https://example.com/image.jpg'", block.Text)
+	}
+}
+
+// ============================================================================
+// P1-1: Invalid JSON error path tests for passthrough functions
+// ============================================================================
+
+// TestPassThroughOpenAIResponse_InvalidJSON verifies that passThroughOpenAIResponse
+// returns an error when the upstream 2xx body is not valid JSON, so the client
+// does not receive the unparseable raw body.
+func TestPassThroughOpenAIResponse_InvalidJSON(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, "not-valid-json", map[string]string{"X-Test": "openai"})
+	ctx, w := newTestContext()
+
+	err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil, ResponseModelContext{})
+	if err == nil {
+		t.Fatalf("expected error for invalid JSON body, got nil")
+	}
+	// No response body must have been written before the error was returned,
+	// so the caller can still write a proper error response.
+	if w.Body.String() != "" {
+		t.Fatalf("expected empty response body before error, got: %s", w.Body.String())
+	}
+}
+
+// TestPassThroughAnthropicResponse_InvalidJSON verifies that passThroughAnthropicResponse
+// returns an error when the upstream 2xx body is not valid JSON, so the client
+// does not receive the unparseable raw body.
+func TestPassThroughAnthropicResponse_InvalidJSON(t *testing.T) {
+	codec := &AnthropicMessagesCodec{}
+	resp := newResponse(http.StatusOK, "not-valid-json", map[string]string{"X-Test": "anthropic"})
+	ctx, w := newTestContext()
+
+	err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil, ResponseModelContext{})
+	if err == nil {
+		t.Fatalf("expected error for invalid JSON body, got nil")
+	}
+	// No response body must have been written before the error was returned,
+	// so the caller can still write a proper error response.
+	if w.Body.String() != "" {
+		t.Fatalf("expected empty response body before error, got: %s", w.Body.String())
+	}
+}
+
+// TestPassThroughResponsesResponse_InvalidJSON verifies that passThroughResponsesResponse
+// returns an error when the upstream 2xx body is not valid JSON, so the client
+// does not receive the unparseable raw body.
+func TestPassThroughResponsesResponse_InvalidJSON(t *testing.T) {
+	codec := &OpenAIResponseCodec{}
+	resp := newResponse(http.StatusOK, "not-valid-json", nil)
+	ctx, w := newTestContext()
+
+	err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{})
+	if err == nil {
+		t.Fatalf("expected error for invalid JSON body, got nil")
+	}
+	if strings.Contains(w.Body.String(), "not-valid-json") {
+		t.Fatalf("raw unparseable body must not be forwarded to client, got: %s", w.Body.String())
+	}
+}
+
+// ============================================================================
+// P1-2: Header preservation behavior for passthrough functions
+// ============================================================================
+
+// TestPassThroughResponsesResponse_PreservesUpstreamHeaders verifies that
+// passthrough Responses responses still forward upstream custom headers after
+// rewriting the model field.
+func TestPassThroughResponsesResponse_PreservesUpstreamHeaders(t *testing.T) {
+	body := `{"id":"resp-1","object":"response","created_at":1234,"model":"gpt-4o","status":"completed","output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}`
+	codec := &OpenAIResponseCodec{}
+	resp := newResponse(http.StatusOK, body, map[string]string{"X-Upstream-Custom": "value"})
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+	if got := w.Header().Get("X-Upstream-Custom"); got != "value" {
+		t.Fatalf("upstream header = %q, want %q", got, "value")
+	}
+}
+
+func TestPassThroughOpenAIResponse_PreservesUnknownFields(t *testing.T) {
+	body := `{"id":"chatcmpl-1","object":"chat.completion","created":1234,"model":"upstream-model","system_fingerprint":"fp_123","choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}`
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, false, nil, ResponseModelContext{RequestedModel: "my-alias"}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out["model"] != "my-alias" {
+		t.Fatalf("model = %v, want my-alias", out["model"])
+	}
+	if out["system_fingerprint"] != "fp_123" {
+		t.Fatalf("system_fingerprint = %v, want fp_123", out["system_fingerprint"])
+	}
+}
+
+func TestPassThroughAnthropicResponse_PreservesUnknownFields(t *testing.T) {
+	body := `{"id":"msg-1","type":"message","role":"assistant","content":[{"type":"text","text":"Hi"}],"model":"upstream-model","extra":"keep-me","usage":{"input_tokens":5,"output_tokens":3}}`
+	codec := &AnthropicMessagesCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, false, nil, ResponseModelContext{RequestedModel: "my-alias"}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	if out["model"] != "my-alias" {
+		t.Fatalf("model = %v, want my-alias", out["model"])
+	}
+	if out["extra"] != "keep-me" {
+		t.Fatalf("extra = %v, want keep-me", out["extra"])
+	}
+}
+
+func TestPassThroughOpenAIStream_PreservesUnknownFields(t *testing.T) {
+	streamBody := "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-model\",\"system_fingerprint\":\"fp_123\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n" +
+		"data: [DONE]\n\n"
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, streamBody, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, nil, ResponseModelContext{RequestedModel: "my-alias"}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, `"system_fingerprint":"fp_123"`) {
+		t.Fatalf("missing preserved system_fingerprint, body=%s", body)
+	}
+	if strings.Contains(body, "upstream-model") {
+		t.Fatalf("body should not contain upstream model, body=%s", body)
+	}
+}
+
+func TestPassThroughAnthropicStream_PreservesUnknownFields(t *testing.T) {
+	streamBody := "data: {\"type\":\"message_start\",\"extra\":\"keep-me\",\"message\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"upstream-model\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+	codec := &AnthropicMessagesCodec{}
+	resp := newResponse(http.StatusOK, streamBody, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, nil, ResponseModelContext{RequestedModel: "my-alias"}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, `"extra":"keep-me"`) {
+		t.Fatalf("missing preserved extra field, body=%s", body)
+	}
+	if strings.Contains(body, "upstream-model") {
+		t.Fatalf("body should not contain upstream model, body=%s", body)
+	}
+}
+
+func TestPassThroughResponsesResponse_AcceptsReasoningSummaryArray(t *testing.T) {
+	body := `{"id":"resp-1","object":"response","created_at":1234,"model":"upstream-model","status":"completed","output":[{"type":"reasoning","id":"rs-1","summary":[{"type":"summary_text","text":"thinking..."}]}],"extra":"keep-me","usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}`
+	codec := &OpenAIResponseCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{RequestedModel: "my-alias"}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+	var model string
+	if err := json.Unmarshal(out["model"], &model); err != nil {
+		t.Fatalf("model parse error: %v", err)
+	}
+	if model != "my-alias" {
+		t.Fatalf("model = %q, want my-alias", model)
+	}
+	var extra string
+	if err := json.Unmarshal(out["extra"], &extra); err != nil {
+		t.Fatalf("extra parse error: %v", err)
+	}
+	if extra != "keep-me" {
+		t.Fatalf("extra = %q, want keep-me", extra)
+	}
+	var rawOutput []map[string]json.RawMessage
+	if err := json.Unmarshal(out["output"], &rawOutput); err != nil {
+		t.Fatalf("output parse error: %v", err)
+	}
+	if len(rawOutput) != 1 {
+		t.Fatalf("len(output) = %d, want 1", len(rawOutput))
+	}
+	var summary []map[string]any
+	if err := json.Unmarshal(rawOutput[0]["summary"], &summary); err != nil {
+		t.Fatalf("summary parse error: %v", err)
+	}
+	if len(summary) != 1 {
+		t.Fatalf("len(summary) = %d, want 1", len(summary))
+	}
+}
+
+// ============================================================================
+// Task 2: Stream paths must emit RequestedModel
+// ============================================================================
+
+// TestWriteClaudeStreamAsOpenAI_UsesRequestedModel verifies that a Claude (Anthropic)
+// upstream stream is converted to OpenAI Chat chunks in which every model field equals
+// the RequestedModel alias, not the upstream model carried in message_start.
+func TestWriteClaudeStreamAsOpenAI_UsesRequestedModel(t *testing.T) {
+	streamBody := "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"upstream-claude\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, streamBody, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	// Every data chunk must have model == "my-alias" and NOT "upstream-claude"
+	if strings.Contains(body, "upstream-claude") {
+		t.Errorf("stream output must not contain upstream model 'upstream-claude', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}
+
+// TestWriteOpenAIStreamAsAnthropic_UsesRequestedModel verifies that an OpenAI Chat upstream
+// stream converted to Anthropic SSE uses RequestedModel in the message_start event.
+func TestWriteOpenAIStreamAsAnthropic_UsesRequestedModel(t *testing.T) {
+	streamBody := "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-gpt\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-gpt\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-gpt\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	codec := &AnthropicMessagesCodec{}
+	resp := newResponse(http.StatusOK, streamBody, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-gpt") {
+		t.Errorf("stream output must not contain upstream model 'upstream-gpt', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}
+
+// TestPassThroughResponsesStream_UsesRequestedModel verifies that a direct Responses API
+// stream passthrough rewrites model in response.created and response.completed events.
+func TestPassThroughResponsesStream_UsesRequestedModel(t *testing.T) {
+	streamBody := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"upstream-gpt\",\"extra\":\"keep-me\"}}\n\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Hi\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"upstream-gpt\",\"extra\":\"keep-me\"}}\n\n"
+
+	codec := &OpenAIResponseCodec{}
+	resp := newResponse(http.StatusOK, streamBody, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-gpt") {
+		t.Errorf("stream output must not contain upstream model 'upstream-gpt', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+	if !strings.Contains(body, `"extra":"keep-me"`) {
+		t.Errorf("stream output must preserve nested extra fields, body=%s", body)
+	}
+}
+
+// TestWriteOpenAIChatStreamAsResponses_UsesRequestedModel verifies that an OpenAI Chat
+// upstream stream converted to Responses SSE uses RequestedModel in response.created and
+// response.completed events.
+func TestWriteOpenAIChatStreamAsResponses_UsesRequestedModel(t *testing.T) {
+	chatStreamBody := "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-gpt\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-gpt\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-gpt\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	codec := &OpenAIResponseCodec{}
+	resp := newResponse(http.StatusOK, chatStreamBody, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-gpt") {
+		t.Errorf("stream output must not contain upstream model 'upstream-gpt', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}
+
+// TestWriteOpenAIResponseStreamAsChatStream_UsesRequestedModel verifies that a Responses API
+// upstream stream converted to OpenAI Chat SSE uses RequestedModel in every chunk.
+func TestWriteOpenAIResponseStreamAsChatStream_UsesRequestedModel(t *testing.T) {
+	responsesStreamBody := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"upstream-gpt\"}}\n\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hi\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"upstream-gpt\"}}\n\n"
+
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, responsesStreamBody, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-gpt") {
+		t.Errorf("stream output must not contain upstream model 'upstream-gpt', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}
+
+// TestWriteAnthropicStreamAsResponsesStream_UsesRequestedModel verifies that an Anthropic
+// upstream stream converted to Responses SSE uses RequestedModel in response.created and
+// response.completed events.
+func TestWriteAnthropicStreamAsResponsesStream_UsesRequestedModel(t *testing.T) {
+	streamBody := "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"upstream-claude\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+
+	codec := &OpenAIResponseCodec{}
+	resp := newResponse(http.StatusOK, streamBody, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-claude") {
+		t.Errorf("stream output must not contain upstream model 'upstream-claude', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}
+
+// TestWriteResponsesStreamAsClaudeStream_UsesRequestedModel verifies that a Responses API
+// upstream stream converted to Anthropic SSE uses RequestedModel in the message_start event.
+func TestWriteResponsesStreamAsClaudeStream_UsesRequestedModel(t *testing.T) {
+	responsesStreamBody := "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"upstream-gpt\"}}\n\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hi\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"upstream-gpt\"}}\n\n"
+
+	codec := &AnthropicMessagesCodec{}
+	resp := newResponse(http.StatusOK, responsesStreamBody, nil)
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-gpt") {
+		t.Errorf("stream output must not contain upstream model 'upstream-gpt', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}
+
+// TestPassThroughOpenAIStream_UsesRequestedModel verifies that a direct OpenAI Chat stream
+// passthrough rewrites model in each chunk.
+func TestPassThroughOpenAIStream_UsesRequestedModel(t *testing.T) {
+	streamBody := "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-gpt\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-gpt\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, streamBody, map[string]string{"Content-Type": "text/event-stream"})
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-gpt") {
+		t.Errorf("stream output must not contain upstream model 'upstream-gpt', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}
+
+// TestPassThroughAnthropicStream_UsesRequestedModel verifies that a direct Anthropic stream
+// passthrough rewrites model in the message_start event.
+func TestPassThroughAnthropicStream_UsesRequestedModel(t *testing.T) {
+	streamBody := "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"upstream-claude\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+
+	codec := &AnthropicMessagesCodec{}
+	resp := newResponse(http.StatusOK, streamBody, map[string]string{"Content-Type": "text/event-stream"})
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "my-alias"}
+
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "upstream-claude") {
+		t.Errorf("stream output must not contain upstream model 'upstream-claude', body=%s", body)
+	}
+	if !strings.Contains(body, "my-alias") {
+		t.Errorf("stream output must contain requested model 'my-alias', body=%s", body)
+	}
+}
+
+// ============================================================================
+// 新增 Response -> Chat 对齐测试（test-first）
+// ============================================================================
+
+// TestConvertOpenAIResponseToChat_MapsUsageDetails 验证 usage details 映射：
+// input_tokens_details.cached_tokens/image_tokens/audio_tokens -> PromptTokensDetails
+// completion_tokens_details.reasoning_tokens -> CompletionTokensDetails.ReasoningTokens
+func TestConvertOpenAIResponseToChat_MapsUsageDetails(t *testing.T) {
+	body := `{"id":"resp-usage","object":"response","created_at":1234,"model":"gpt-4o","status":"completed","output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":0,"input_tokens_details":{"cached_tokens":30,"image_tokens":10,"audio_tokens":5},"completion_tokens_details":{"reasoning_tokens":20}}}`
+
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ChatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v, body=%s", err, w.Body.String())
+	}
+
+	// 基础 usage 映射
+	if out.Usage.PromptTokens != 100 {
+		t.Fatalf("PromptTokens = %d, want 100", out.Usage.PromptTokens)
+	}
+	if out.Usage.CompletionTokens != 50 {
+		t.Fatalf("CompletionTokens = %d, want 50", out.Usage.CompletionTokens)
+	}
+	// TotalTokens 为 0 时采用总和兜底
+	if out.Usage.TotalTokens != 150 {
+		t.Fatalf("TotalTokens = %d, want 150", out.Usage.TotalTokens)
+	}
+
+	// Usage details 映射
+	if out.Usage.PromptTokensDetails == nil {
+		t.Fatal("PromptTokensDetails should not be nil")
+	}
+	if out.Usage.PromptTokensDetails.CachedTokens != 30 {
+		t.Fatalf("PromptTokensDetails.CachedTokens = %d, want 30", out.Usage.PromptTokensDetails.CachedTokens)
+	}
+	if out.Usage.PromptTokensDetails.ImageTokens != 10 {
+		t.Fatalf("PromptTokensDetails.ImageTokens = %d, want 10", out.Usage.PromptTokensDetails.ImageTokens)
+	}
+	if out.Usage.PromptTokensDetails.AudioTokens != 5 {
+		t.Fatalf("PromptTokensDetails.AudioTokens = %d, want 5", out.Usage.PromptTokensDetails.AudioTokens)
+	}
+
+	if out.Usage.CompletionTokensDetails == nil {
+		t.Fatal("CompletionTokensDetails should not be nil")
+	}
+	if out.Usage.CompletionTokensDetails.ReasoningTokens != 20 {
+		t.Fatalf("CompletionTokensDetails.ReasoningTokens = %d, want 20", out.Usage.CompletionTokensDetails.ReasoningTokens)
+	}
+}
+
+// TestConvertOpenAIResponseToChat_FiltersMessageRoleAndFallsBackToAnyText 验证两段文本提取：
+// 第一段：只取 output[].type=="message" 且 role 为空或 assistant 的文本；
+// 第一段没拿到任何文本时，第二段 fallback 遍历全部 output 的 content[].text。
+func TestConvertOpenAIResponseToChat_FiltersMessageRoleAndFallsBackToAnyText(t *testing.T) {
+	t.Run("message role filter excludes non-assistant roles", func(t *testing.T) {
+		// role="system" 的 message 应该被过滤掉
+		body := `{"id":"resp-1","object":"response","created_at":1234,"model":"gpt-4o","status":"completed","output":[{"type":"message","id":"msg-1","status":"completed","role":"system","content":[{"type":"output_text","text":"system text"}]},{"type":"message","id":"msg-2","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`
+
+		codec := &OpenAIChatCodec{}
+		resp := newResponse(http.StatusOK, body, nil)
+		ctx, w := newTestContext()
+
+		if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{}); err != nil {
+			t.Fatalf("WriteResponse error: %v", err)
+		}
+
+		var out dto.ChatCompletionResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		// 应该只包含 assistant message 的文本，不包含 system message 的文本
+		if out.Choices[0].Message.Content != "Hello" {
+			t.Fatalf("content = %q, want Hello", out.Choices[0].Message.Content)
+		}
+	})
+
+	t.Run("fallback to any output text when no assistant message found", func(t *testing.T) {
+		// 没有 assistant message，应该 fallback 到所有 output 的 text
+		body := `{"id":"resp-2","object":"response","created_at":1234,"model":"gpt-4o","status":"completed","output":[{"type":"reasoning","id":"rs-1","content":[{"type":"output_text","text":"think step"}]},{"type":"message","id":"msg-1","status":"completed","role":"system","content":[{"type":"output_text","text":"system text"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`
+
+		codec := &OpenAIChatCodec{}
+		resp := newResponse(http.StatusOK, body, nil)
+		ctx, w := newTestContext()
+
+		if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{}); err != nil {
+			t.Fatalf("WriteResponse error: %v", err)
+		}
+
+		var out dto.ChatCompletionResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		// fallback 应该包含所有 output content 的 text
+		if out.Choices[0].Message.Content != "think stepsystem text" {
+			t.Fatalf("fallback content = %q, want think stepsystem text", out.Choices[0].Message.Content)
+		}
+	})
+}
+
+// TestConvertOpenAIResponseToChat_UsesToolCallsFinishReasonEvenWithText 验证：
+// 1. 文本和 tool call 共存时 finish_reason 仍然是 "tool_calls"
+// 2. 空 call_id 回退到 item.id
+// 3. 空 name 的 tool call 跳过
+func TestConvertOpenAIResponseToChat_UsesToolCallsFinishReasonEvenWithText(t *testing.T) {
+	t.Run("tool calls finish reason wins over text", func(t *testing.T) {
+		// 有 message 文本 + function_call，finish_reason 应该为 tool_calls
+		body := `{"id":"resp-3","object":"response","created_at":1234,"model":"gpt-4o","status":"completed","output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Let me check the weather."}]},{"type":"function_call","id":"fc-1","call_id":"call-1","name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`
+
+		codec := &OpenAIChatCodec{}
+		resp := newResponse(http.StatusOK, body, nil)
+		ctx, w := newTestContext()
+
+		if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{}); err != nil {
+			t.Fatalf("WriteResponse error: %v", err)
+		}
+
+		var out dto.ChatCompletionResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+
+		// 文本应该存在
+		if out.Choices[0].Message.Content != "Let me check the weather." {
+			t.Fatalf("content = %q, want Let me check the weather.", out.Choices[0].Message.Content)
+		}
+		// 但 finish_reason 应该为 tool_calls（因为存在 tool call）
+		if out.Choices[0].FinishReason == nil || *out.Choices[0].FinishReason != "tool_calls" {
+			t.Fatalf("finish_reason = %v, want tool_calls", out.Choices[0].FinishReason)
+		}
+
+		// tool call 存在
+		if len(out.Choices[0].Message.ToolCalls) != 1 {
+			t.Fatalf("len(tool_calls) = %d, want 1", len(out.Choices[0].Message.ToolCalls))
+		}
+		if out.Choices[0].Message.ToolCalls[0].Function.Name != "get_weather" {
+			t.Fatalf("tool_call name = %q, want get_weather", out.Choices[0].Message.ToolCalls[0].Function.Name)
+		}
+	})
+
+	t.Run("empty call_id falls back to item id", func(t *testing.T) {
+		// call_id 为空，应该用 item.id 作为 tool call id
+		body := `{"id":"resp-4","object":"response","created_at":1234,"model":"gpt-4o","status":"completed","output":[{"type":"function_call","id":"fc-1","call_id":"","name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`
+
+		codec := &OpenAIChatCodec{}
+		resp := newResponse(http.StatusOK, body, nil)
+		ctx, w := newTestContext()
+
+		if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{}); err != nil {
+			t.Fatalf("WriteResponse error: %v", err)
+		}
+
+		var out dto.ChatCompletionResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+
+		if len(out.Choices[0].Message.ToolCalls) != 1 {
+			t.Fatalf("len(tool_calls) = %d, want 1", len(out.Choices[0].Message.ToolCalls))
+		}
+		// call_id 为空时回退到 item.id: "fc-1"
+		if out.Choices[0].Message.ToolCalls[0].ID != "fc-1" {
+			t.Fatalf("tool_call id = %q, want fc-1 (fallback to item id)", out.Choices[0].Message.ToolCalls[0].ID)
+		}
+	})
+
+	t.Run("empty name tool call is skipped", func(t *testing.T) {
+		// name 为空的 function_call 应该跳过
+		body := `{"id":"resp-5","object":"response","created_at":1234,"model":"gpt-4o","status":"completed","output":[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"","arguments":"{\"city\":\"Beijing\"}"}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`
+
+		codec := &OpenAIChatCodec{}
+		resp := newResponse(http.StatusOK, body, nil)
+		ctx, w := newTestContext()
+
+		if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{}); err != nil {
+			t.Fatalf("WriteResponse error: %v", err)
+		}
+
+		var out dto.ChatCompletionResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+
+		// 空 name 的 tool call 应该被跳过，没有 tool calls
+		if len(out.Choices[0].Message.ToolCalls) != 0 {
+			t.Fatalf("len(tool_calls) = %d, want 0 (empty name should be skipped)", len(out.Choices[0].Message.ToolCalls))
+		}
+		// finish_reason 应该为 stop（因为没有有效 tool call）
+		if out.Choices[0].FinishReason == nil || *out.Choices[0].FinishReason != "stop" {
+			t.Fatalf("finish_reason = %v, want stop", out.Choices[0].FinishReason)
+		}
+	})
+}
+
+func TestConvertOpenAIResponseToChat_PreservesRefusalWhenNoOutputText(t *testing.T) {
+	body := `{"id":"resp-refusal","object":"response","created_at":1234,"model":"gpt-4o","status":"completed","output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant","content":[{"type":"refusal","text":"cannot comply"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`
+
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, body, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	var out dto.ChatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if out.Choices[0].Message.Content != "cannot comply" {
+		t.Fatalf("content = %q, want cannot comply", out.Choices[0].Message.Content)
 	}
 }

@@ -9,50 +9,104 @@ type Format string
 
 const (
 	FormatOpenAIChat        Format = "openai.chat"
-	FormatOpenAIResponse    Format = "openai.response"
+	FormatOpenAIResponse    Format = "openai.responses"
 	FormatAnthropicMessages Format = "anthropic.messages"
+	FormatOllamaChat        Format = "ollama.chat"
 )
 
 func NormalizeProviderFormat(protocol string) (Format, error) {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case "openai", string(FormatOpenAIChat):
+	case string(FormatOpenAIChat):
 		return FormatOpenAIChat, nil
 	case string(FormatOpenAIResponse):
 		return FormatOpenAIResponse, nil
-	case "anthropic", string(FormatAnthropicMessages):
+	case string(FormatAnthropicMessages):
 		return FormatAnthropicMessages, nil
+	case string(FormatOllamaChat):
+		return FormatOllamaChat, nil
 	default:
 		return "", fmt.Errorf("unknown provider protocol: %s", protocol)
 	}
 }
 
-// SelectFormatForInbound chooses the outbound format for a provider that may
-// advertise multiple protocols (e.g. "openai/anthropic").
-func SelectFormatForInbound(providerProtocol string, inbound Format) (Format, error) {
-	parts := strings.Split(strings.TrimSpace(providerProtocol), "/")
-	if len(parts) == 1 {
-		return NormalizeProviderFormat(parts[0])
-	}
-
-	formats := make([]Format, 0, len(parts))
-	for _, part := range parts {
+func NormalizeProtocols(protocols []string) ([]Format, error) {
+	formats := make([]Format, 0, len(protocols))
+	for _, part := range protocols {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
 		format, err := NormalizeProviderFormat(part)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		formats = append(formats, format)
 	}
-	for _, format := range formats {
-		if format == inbound {
-			return inbound, nil
+	if len(formats) == 0 {
+		return nil, fmt.Errorf("no valid protocols provided")
+	}
+	return formats, nil
+}
+
+func ConversionCost(inbound, outbound Format) (int, error) {
+	if inbound == outbound {
+		return 0, nil
+	}
+
+	matrix := map[Format]map[Format]int{
+		FormatOpenAIChat: {
+			FormatAnthropicMessages: 2,
+			FormatOpenAIResponse:    3,
+			FormatOllamaChat:        1,
+		},
+		FormatAnthropicMessages: {
+			FormatOpenAIChat:     3,
+			FormatOpenAIResponse: 6,
+			FormatOllamaChat:     4,
+		},
+		FormatOpenAIResponse: {
+			FormatOpenAIChat:        3,
+			FormatAnthropicMessages: 6,
+			FormatOllamaChat:        4,
+		},
+	}
+
+	if row, ok := matrix[inbound]; ok {
+		if cost, ok := row[outbound]; ok {
+			return cost, nil
 		}
 	}
-	if len(formats) > 0 {
-		return formats[0], nil
+
+	return 0, fmt.Errorf("unsupported conversion cost: %s -> %s", inbound, outbound)
+}
+
+func SelectBestFormat(supported []Format, inbound Format) (Format, string, int, error) {
+	if len(supported) == 0 {
+		return "", "", 0, fmt.Errorf("no supported outbound format")
 	}
-	return "", fmt.Errorf("unknown provider protocol: %s", providerProtocol)
+
+	for _, format := range supported {
+		if format == inbound {
+			return inbound, "passthrough", 0, nil
+		}
+	}
+
+	best := supported[0]
+	bestCost, err := ConversionCost(inbound, best)
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	for _, format := range supported[1:] {
+		cost, costErr := ConversionCost(inbound, format)
+		if costErr != nil {
+			return "", "", 0, costErr
+		}
+		if cost < bestCost {
+			best = format
+			bestCost = cost
+		}
+	}
+
+	return best, "lowest_cost", bestCost, nil
 }

@@ -488,6 +488,34 @@ func TestConvertClaudeToOpenAI_WithTools(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeToOpenAI_WithJSONUnmarshaledToolsSkipsWebSearch(t *testing.T) {
+	req := &dto.ClaudeRequest{
+		Model:     "claude-3",
+		MaxTokens: 100,
+		Messages:  []dto.ClaudeMessage{{Role: "user", Content: "What's the weather?"}},
+		Tools: []any{
+			map[string]any{
+				"type":         "function",
+				"name":         "get_weather",
+				"description":  "Get current weather",
+				"input_schema": map[string]any{"type": "object"},
+			},
+			map[string]any{
+				"type": "web_search_20250305",
+				"name": "web_search",
+			},
+		},
+	}
+
+	got := ConvertClaudeToOpenAI(req, "gpt-4o")
+	if len(got.Tools) != 1 {
+		t.Fatalf("tools count = %d, want 1", len(got.Tools))
+	}
+	if got.Tools[0].Function.Name != "get_weather" {
+		t.Fatalf("tool name = %q, want get_weather", got.Tools[0].Function.Name)
+	}
+}
+
 func TestConvertClaudeToOpenAI_ToolChoice_Auto(t *testing.T) {
 	req := &dto.ClaudeRequest{
 		Model:      "claude-3",
@@ -564,13 +592,18 @@ func TestConvertOpenAIToClaudeV2_WithTools(t *testing.T) {
 		},
 	}
 	got := ConvertOpenAIToClaudeV2(req, "claude-3-5-sonnet")
-	if len(got.Tools) != 1 {
-		t.Fatalf("tools count = %d, want 1", len(got.Tools))
+	tools, ok := got.Tools.([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools count = %d, want 1, got = %v", len(tools), got.Tools)
 	}
-	if got.Tools[0].Name != "get_weather" {
-		t.Errorf("tool name = %q, want get_weather", got.Tools[0].Name)
+	t0, ok := tools[0].(dto.ClaudeTool)
+	if !ok {
+		t.Fatalf("tool is not ClaudeTool, got %T", tools[0])
 	}
-	if got.Tools[0].Description != "Get weather" {
-		t.Errorf("tool description = %q, want 'Get weather'", got.Tools[0].Description)
+	if t0.Name != "get_weather" {
+		t.Errorf("tool name = %q, want get_weather", t0.Name)
+	}
+	if t0.Description != "Get weather" {
+		t.Errorf("tool description = %q, want 'Get weather'", t0.Description)
 	}
 }

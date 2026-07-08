@@ -2,28 +2,31 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
-	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/health"
 	"github.com/Marstheway/oh-my-api/internal/provider"
 	"github.com/Marstheway/oh-my-api/internal/ratelimit"
 )
 
 type ConcurrentStrategy struct {
-	client    *provider.Client
-	ratelimit *ratelimit.Manager
-	health    *health.Checker
+	client            *provider.Client
+	ratelimit         *ratelimit.Manager
+	health            *health.Checker
+	prefillTimeout    time.Duration
+	streamIdleTimeout time.Duration
 }
 
-func NewConcurrentStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker) *ConcurrentStrategy {
+func NewConcurrentStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker, prefillTimeout time.Duration, streamIdleTimeout time.Duration) *ConcurrentStrategy {
 	return &ConcurrentStrategy{
-		client:    client,
-		ratelimit: rl,
-		health:    h,
+		client:            client,
+		ratelimit:         rl,
+		health:            h,
+		prefillTimeout:    prefillTimeout,
+		streamIdleTimeout: streamIdleTimeout,
 	}
 }
 
@@ -32,89 +35,93 @@ func (s *ConcurrentStrategy) Execute(ctx context.Context, tasks []Task) (*Result
 		return nil, ErrNoTasks
 	}
 
+	now := time.Now().Local()
+
 	if len(tasks) == 1 {
 		t := tasks[0]
+		if isProviderDisabledAt(t, now) {
+			return nil, ErrNoProviderAvailable
+		}
 		if err := s.ratelimit.Wait(ctx, t.ProviderName, t.UpstreamModel); err != nil {
 			s.health.ReportFailure(health.MakeHealthKey(t.ProviderName, t.OutboundProtocol))
 			return nil, &RateLimitError{Provider: t.ProviderName, Err: err}
 		}
-		resp, err := s.client.Do(t.ProviderName, t.Request)
-		if err != nil {
-			s.health.ReportFailure(health.MakeHealthKey(t.ProviderName, t.OutboundProtocol))
-			return nil, err
-		}
-		// 上报健康状态
-		if resp.StatusCode >= 500 {
-			s.health.ReportFailure(health.MakeHealthKey(t.ProviderName, t.OutboundProtocol))
-		} else if resp.StatusCode < 400 {
-			s.health.ReportSuccess(health.MakeHealthKey(t.ProviderName, t.OutboundProtocol))
-		}
-		return s.parseResponse(resp, t.ProviderName, t.UpstreamModel, t.Provider.Protocol)
+		return s.executeTask(t)
 	}
 
-	return s.race(ctx, tasks)
+	return s.race(ctx, tasks, now)
 }
 
 func (s *ConcurrentStrategy) parseResponse(resp *http.Response, providerName, upstreamModel, protocol string) (*Result, error) {
-	return parseResponse(resp, providerName, upstreamModel, protocol)
+	return parseResponse(resp, providerName, upstreamModel, protocol, s.prefillTimeout, s.streamIdleTimeout)
 }
 
-// parseResponse 解析 HTTP 响应，提取 usage 信息（包级函数，供其他策略复用）
-func parseResponse(resp *http.Response, providerName, upstreamModel, protocol string) (*Result, error) {
-	body, err := io.ReadAll(resp.Body)
+func isStreamResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	return strings.HasPrefix(contentType, "text/event-stream")
+}
+
+func (s *ConcurrentStrategy) executeTask(task Task) (*Result, error) {
+	start := time.Now()
+	resp, err := s.client.Do(task.ProviderName, task.Request)
 	if err != nil {
-		resp.Body.Close()
+		recordAttemptMetric("concurrent", task, nil, err, time.Since(start))
+		s.health.ReportFailure(health.MakeHealthKey(task.ProviderName, task.OutboundProtocol))
 		return nil, err
 	}
-	resp.Body.Close()
 
-	resp.Body = io.NopCloser(strings.NewReader(string(body)))
-
-	result := &Result{
-		Response:      resp,
-		Winner:        providerName,
-		UpstreamModel: upstreamModel,
+	healthKey := health.MakeHealthKey(task.ProviderName, task.OutboundProtocol)
+	result, err := s.parseResponse(resp, task.ProviderName, task.UpstreamModel, responseProtocol(task))
+	if err != nil {
+		recordAttemptMetric("concurrent", task, nil, err, time.Since(start))
+		s.health.ReportFailure(healthKey)
+		return nil, err
 	}
 
-	if resp.StatusCode >= 400 {
+	// 统一应用 TokenHub 错误码分类（仅对硬失败重分级）
+	applyTokenHubClassification(result, resp, task.Request)
+
+	recordAttemptMetric("concurrent", task, result, nil, time.Since(start))
+
+	applyHealthAction(s.health, healthKey, result)
+	if result.HealthActionInfo.Action != HealthActionNone {
 		return result, nil
 	}
 
-	var usage *UsageInfo
-
-	if strings.Contains(protocol, "anthropic") {
-		var claudeResp dto.ClaudeResponse
-		if err := json.Unmarshal(body, &claudeResp); err == nil {
-			usage = &UsageInfo{
-				PromptTokens:     claudeResp.Usage.InputTokens,
-				CompletionTokens: claudeResp.Usage.OutputTokens,
-				TotalTokens:      claudeResp.Usage.InputTokens + claudeResp.Usage.OutputTokens,
-			}
-			if claudeResp.StopReason != nil {
-				usage.FinishReason = *claudeResp.StopReason
-			}
-		}
-	} else {
-		var openaiResp dto.ChatCompletionResponse
-		if err := json.Unmarshal(body, &openaiResp); err == nil {
-			usage = &UsageInfo{
-				PromptTokens:     openaiResp.Usage.PromptTokens,
-				CompletionTokens: openaiResp.Usage.CompletionTokens,
-				TotalTokens:      openaiResp.Usage.TotalTokens,
-			}
-			if len(openaiResp.Choices) > 0 && openaiResp.Choices[0].FinishReason != nil {
-				usage.FinishReason = *openaiResp.Choices[0].FinishReason
-			}
+	switch result.FailureKind {
+	case FailureKindSuccess:
+		s.health.ReportSuccess(healthKey)
+	case FailureKindHard:
+		if result.Response != nil && result.Response.StatusCode >= http.StatusInternalServerError {
+			s.health.ReportFailure(healthKey)
 		}
 	}
 
-	result.Usage = usage
 	return result, nil
 }
 
-func (s *ConcurrentStrategy) race(ctx context.Context, tasks []Task) (*Result, error) {
+func closeResultBody(result *Result) {
+	if result == nil || result.Response == nil || result.Response.Body == nil {
+		return
+	}
+	result.Response.Body.Close()
+}
+
+func (s *ConcurrentStrategy) race(ctx context.Context, tasks []Task, now time.Time) (*Result, error) {
+	// concurrent 不按健康状态过滤——即使 provider 被标记为 unhealthy 也应参与竞速。
+	// 仅当全部候选均被禁用时段过滤，且尚未发起任何上游请求时，返回无可用 provider。
+	if allProvidersDisabled(tasks, now) {
+		return nil, ErrNoProviderAvailable
+	}
+
 	var available []Task
 	for _, t := range tasks {
+		if isProviderDisabledAt(t, now) {
+			continue
+		}
 		if s.ratelimit.Allow(t.ProviderName, t.UpstreamModel) {
 			available = append(available, t)
 		}
@@ -127,75 +134,103 @@ func (s *ConcurrentStrategy) race(ctx context.Context, tasks []Task) (*Result, e
 	defer cancel()
 
 	type outcome struct {
-		resp    *http.Response
-		err     error
-		taskIdx int
+		result *Result
+		err    error
 	}
 	ch := make(chan outcome, len(available))
 
-	for i, t := range available {
-		go func(idx int, task Task) {
-			resp, err := s.client.Do(task.ProviderName, task.Request)
+	for _, t := range available {
+		go func(task Task) {
+			// Clone request and bind raceCtx to ensure cancel propagates to upstream request
+			clonedReq := cloneRequest(task.Request, raceCtx)
+			task.Request = clonedReq
+
+			result, err := s.executeTask(task)
+			// executeTask has already recorded attempt metric, no need to record again
 			select {
-			case ch <- outcome{resp: resp, err: err, taskIdx: idx}:
+			case ch <- outcome{result: result, err: err}:
 			case <-raceCtx.Done():
-				if resp != nil {
-					resp.Body.Close()
+				// raceCtx canceled but executeTask has already recorded the attempt
+				// Close response body if needed
+				if err == nil && result != nil {
+					closeResultBody(result)
 				}
 			}
-		}(i, t)
+		}(t)
 	}
 
-	var firstErr error
-	var firstErrResp *http.Response
-	var firstErrTaskIdx int
+	var lastHardResult *Result
+	var lastHardErr error
+	var lastSoftResult *Result
 	remaining := len(available)
 
 	for remaining > 0 {
 		select {
 		case o := <-ch:
 			remaining--
-			task := available[o.taskIdx]
-			// 上报健康状态
-			healthKey := health.MakeHealthKey(task.ProviderName, task.OutboundProtocol)
-			if o.err != nil {
-				s.health.ReportFailure(healthKey)
-			} else if o.resp.StatusCode >= 500 {
-				s.health.ReportFailure(healthKey)
-			} else if o.resp.StatusCode < 400 {
-				s.health.ReportSuccess(healthKey)
+
+			if o.err == nil && o.result != nil && o.result.FailureKind == FailureKindSuccess {
+				cancel()
+				closeResultBody(lastHardResult)
+				closeResultBody(lastSoftResult)
+				return o.result, nil
 			}
 
-			if o.err == nil && o.resp.StatusCode < 400 {
-				cancel()
-				return s.parseResponse(o.resp, task.ProviderName, task.UpstreamModel, task.Provider.Protocol)
-			}
 			if o.err != nil {
-				firstErr = o.err
+				lastHardErr = o.err
+				continue
 			}
-			if o.resp != nil {
-				if firstErrResp == nil {
-					firstErrResp = o.resp
-					firstErrTaskIdx = o.taskIdx
-				} else {
-					o.resp.Body.Close()
-				}
+			if o.result == nil {
+				continue
+			}
+
+			switch o.result.FailureKind {
+			case FailureKindSoft:
+				slog.Warn("content_filter_soft_failure",
+					"provider", o.result.Winner,
+					"upstream_identity", o.result.Winner+"/"+o.result.UpstreamModel,
+					"reason", o.result.FailureReason,
+				)
+				closeResultBody(lastSoftResult)
+				lastSoftResult = o.result
+			default:
+				closeResultBody(lastHardResult)
+				lastHardResult = o.result
 			}
 		case <-ctx.Done():
 			cancel()
-			if firstErr != nil {
-				return nil, firstErr
+			closeResultBody(lastHardResult)
+			closeResultBody(lastSoftResult)
+			if lastHardErr != nil {
+				return nil, lastHardErr
 			}
 			return nil, ctx.Err()
 		}
 	}
 
-	if firstErrResp != nil {
-		task := available[firstErrTaskIdx]
-		return s.parseResponse(firstErrResp, "", task.UpstreamModel, task.Provider.Protocol)
+	if lastHardResult != nil {
+		closeResultBody(lastSoftResult)
+		return lastHardResult, nil
 	}
-	if firstErr != nil {
-		return nil, firstErr
+	if lastHardErr != nil {
+		closeResultBody(lastSoftResult)
+		return nil, lastHardErr
+	}
+	if lastSoftResult != nil {
+		return lastSoftResult, nil
 	}
 	return nil, ErrAllProvidersFailed
+}
+
+// cloneRequest clones an HTTP request with a new context
+func cloneRequest(req *http.Request, ctx context.Context) *http.Request {
+	clonedReq := req.Clone(ctx)
+	// Preserve the original body if it exists
+	if req.Body != nil && req.GetBody != nil {
+		body, err := req.GetBody()
+		if err == nil {
+			clonedReq.Body = body
+		}
+	}
+	return clonedReq
 }

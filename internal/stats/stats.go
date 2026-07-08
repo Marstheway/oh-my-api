@@ -22,10 +22,10 @@ type DailyStats struct {
 }
 
 type TotalStats struct {
-	InputTokens   int64
-	OutputTokens  int64
-	RequestCount  int64
-	LatencyMs     int64
+	InputTokens  int64
+	OutputTokens int64
+	RequestCount int64
+	LatencyMs    int64
 }
 
 type KeyStats struct {
@@ -66,7 +66,7 @@ type Querier interface {
 }
 
 var (
-	db      *sql.DB
+	db       *sql.DB
 	recorder Recorder
 	querier  Querier
 )

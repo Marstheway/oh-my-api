@@ -1,22 +1,19 @@
 package handler
 
 import (
-	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/Marstheway/oh-my-api/internal/adaptor"
 	"github.com/Marstheway/oh-my-api/internal/codec"
-	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	errs "github.com/Marstheway/oh-my-api/internal/errors"
 	"github.com/Marstheway/oh-my-api/internal/metrics"
-	"github.com/Marstheway/oh-my-api/internal/scheduler"
 	"github.com/Marstheway/oh-my-api/internal/token"
+	"github.com/gin-gonic/gin"
 )
 
 func Messages(c *gin.Context) {
@@ -41,89 +38,68 @@ func Messages(c *gin.Context) {
 		return
 	}
 
-	c.Set("model", req.Model)
+	originalModel := req.Model
+	c.Set("model", originalModel)
 
-	inputTokens := token.CountRequestTokens(req)
+	// Smart route：解码请求后、resolver.Resolve 之前
+	effectiveModel := originalModel
+	if resolver.SmartRouteEnabled() {
+		sri := resolver.GetSmartRouteIndex()
+		obs := ObserveTurnAnthropicMessages(req)
+		srResult := SmartRoute(c.Request.Context(), originalModel, obs, sri)
+		effectiveModel = srResult.EffectiveModel
 
-	result, err := resolver.Resolve(req.Model)
+		// 记录 smart route 日志
+		slog.Info("smart route",
+			"enabled", true,
+			"original_model", originalModel,
+			"decision", srResult.Decision,
+			"decision_path", srResult.DecisionPath,
+			"effective_model", effectiveModel,
+			"fallback_reason", srResult.FallbackReason,
+		)
+	}
+
+	result, err := resolver.Resolve(effectiveModel)
 	if err != nil {
 		errs.WriteError(c, errs.ProtocolAnthropic, http.StatusNotFound,
-			errs.ErrModelNotFound, fmt.Sprintf("model not found: %s", req.Model))
+			errs.ErrModelNotFound, fmt.Sprintf("model not found: %s", effectiveModel))
 		return
 	}
 
-	dests := make([]string, len(result.Tasks))
-	for i, t := range result.Tasks {
-		dests[i] = t.ProviderName + "/" + t.UpstreamModel
-	}
+	dests := collectPlanDests(result.Plan)
 	slog.Info("request",
 		"key", c.GetString("key_name"),
-		"protocol", "anthropic",
+		"protocol", "anthropic.messages",
 		"model", req.Model,
 		"scheduler", result.Mode,
-		"dest", strings.Join(dests, ","),
+		"dest", strings.Join(dests, " | "),
 	)
 
 	metrics.IncConcurrent()
-
 	start := time.Now()
 
-	tasks := make([]scheduler.Task, len(result.Tasks))
-	for i, t := range result.Tasks {
-		outboundStr := t.Provider.GetOutboundProtocol("anthropic")
-		outboundFormat, fmtErr := codec.SelectFormatForInbound(outboundStr, codec.FormatAnthropicMessages)
-		if fmtErr != nil {
-			outboundFormat, fmtErr = codec.SelectFormatForInbound(t.Provider.Protocol, codec.FormatAnthropicMessages)
-		}
-		if fmtErr != nil {
-			errs.WriteError(c, errs.ProtocolAnthropic, http.StatusInternalServerError,
-				errs.ErrInternal, "unknown outbound format: "+outboundStr)
-			return
-		}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
 
-		bodyBytes, encErr := inboundCodec.EncodeRequest(outboundFormat, req, t.UpstreamModel)
-		if encErr != nil {
-			handleCodecError(c, errs.ProtocolAnthropic, "encode_request", encErr)
-			return
-		}
-
-		var ada adaptor.Adaptor
-		var adaProtocol adaptor.Protocol
-		switch outboundFormat {
-		case codec.FormatAnthropicMessages:
-			ada = adaptor.GetAdaptor("anthropic")
-			adaProtocol = adaptor.ProtocolAnthropic
-		case codec.FormatOpenAIResponse:
-			ada = adaptor.GetAdaptor("openai")
-			adaProtocol = adaptor.ProtocolOpenAIResponse
-		default:
-			ada = adaptor.GetAdaptor("openai")
-			adaProtocol = adaptor.ProtocolOpenAI
-		}
-
-		upstreamReq := ada.BuildRequest(c.Request.Context(), &t.Provider, t.UpstreamModel, bytes.NewReader(bodyBytes), adaProtocol)
-		tasks[i] = scheduler.Task{
-			ProviderName:  t.ProviderName,
-			Provider:      t.Provider,
-			UpstreamModel: t.UpstreamModel,
-			OutboundProtocol: string(outboundFormat),
-			Weight:        t.Weight,
-			Priority:      t.Priority,
-			Request:       upstreamReq,
-		}
+	rootNode, matErr := materializePlan(ctx, result.Plan, codec.FormatAnthropicMessages, inboundCodec, req, result.ModelGroup)
+	if matErr != nil {
+		metrics.DecConcurrent()
+		handleCodecError(c, errs.ProtocolAnthropic, "encode_request", matErr)
+		return
 	}
 
-	resp, err := sched.Execute(c.Request.Context(), result.Mode, result.Timeout, tasks)
+	resp, schedErr := sched.ExecuteNode(ctx, rootNode)
 	metrics.DecConcurrent()
-	if err != nil {
-		recordRequestMetrics(c, "anthropic.messages", "anthropic", result.ModelGroup, "", "", "error", time.Since(start))
-		handleUpstreamError(c, errs.ProtocolAnthropic, err)
+	if schedErr != nil {
+		recordRequestMetrics(c, "anthropic.messages", "anthropic.messages", result.ModelGroup, "", "", "error", time.Since(start), 0)
+		handleUpstreamError(c, errs.ProtocolAnthropic, schedErr)
 		return
 	}
 	defer resp.Response.Body.Close()
 
 	if resp.Response.StatusCode >= 400 {
-		recordRequestMetrics(c, "anthropic.messages", "anthropic", result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", time.Since(start))
+		recordRequestMetrics(c, "anthropic.messages", "anthropic.messages", result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", time.Since(start), 0)
 		handleUpstreamResponseError(c, errs.ProtocolAnthropic, resp.Winner, resp.Response)
 		return
 	}
@@ -131,35 +107,40 @@ func Messages(c *gin.Context) {
 	c.Set("provider", resp.Winner)
 
 	latency := time.Since(start)
+	outboundFormat, reason, cost := findWinnerOutbound(result.Plan, resp.Winner, resp.UpstreamModel, codec.FormatAnthropicMessages)
 
 	slog.Info("response",
 		"status", resp.Response.StatusCode,
-		"protocol", "anthropic",
+		"protocol", "anthropic.messages",
+		"stream", req.Stream,
 		"latency", fmt.Sprintf("%.2fs", latency.Seconds()),
 		"model", resp.Winner+"/"+resp.UpstreamModel,
+		"inbound_format", string(codec.FormatAnthropicMessages),
+		"outbound_selected", string(outboundFormat),
+		"selection_reason", reason,
+		"conversion_cost", cost,
+		"candidate_count", func() int {
+			if result.Plan == nil {
+				return 0
+			}
+			return len(result.Plan.Leaves) + len(result.Plan.Children)
+		}(),
 	)
 
-	var winnerProvider config.ProviderConfig
-	for _, t := range result.Tasks {
-		if t.ProviderName == resp.Winner {
-			winnerProvider = t.Provider
-			break
-		}
-	}
-	outboundStr := winnerProvider.GetOutboundProtocol("anthropic")
-	outboundFormat, fmtErr := codec.SelectFormatForInbound(outboundStr, codec.FormatAnthropicMessages)
-	if fmtErr != nil {
-		outboundFormat, _ = codec.SelectFormatForInbound(winnerProvider.Protocol, codec.FormatAnthropicMessages)
+	counter := token.NewStreamCounterFor(resp.UpstreamModel, token.CountRequestTokensFor(resp.UpstreamModel, req))
+
+	rmc := codec.ResponseModelContext{
+		RequestedModel:      req.Model,
+		ModelGroup:          result.ModelGroup,
+		WinnerProvider:      resp.Winner,
+		WinnerUpstreamModel: resp.UpstreamModel,
 	}
 
-	counter := token.NewStreamCounter(inputTokens)
-	counter.SetStartTime(start)
-
-	if writeErr := inboundCodec.WriteResponse(c, outboundFormat, resp.Response, req.Stream, counter); writeErr != nil {
+	if writeErr := inboundCodec.WriteResponse(c, outboundFormat, resp.Response, req.Stream, counter, rmc); writeErr != nil {
 		handleCodecError(c, errs.ProtocolAnthropic, "write_response", writeErr)
 		return
 	}
 
-	recordRequestMetrics(c, "anthropic.messages", "anthropic", result.ModelGroup, resp.Winner, resp.UpstreamModel, "success", latency)
-	recordStats(c, resp.Winner, resp.UpstreamModel, counter.GetInputTokens(), counter.GetOutputTokens(), counter.GetLatency())
+	recordRequestMetrics(c, "anthropic.messages", "anthropic.messages", result.ModelGroup, resp.Winner, resp.UpstreamModel, "success", latency, resp.StreamTTFT)
+	recordStats(c, resp.Winner, resp.UpstreamModel, counter.GetInputTokens(), counter.GetOutputTokens(), latency)
 }

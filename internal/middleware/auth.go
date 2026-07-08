@@ -5,14 +5,18 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/errors"
+	"github.com/gin-gonic/gin"
 )
 
-func Auth(cfg *config.Config) gin.HandlerFunc {
-	validKeys := cfg.Inbound.Auth.Keys
+// KeyProvider 提供 auth keys 的可刷新源。
+// runtimeconfig.Manager 实现此接口，使 Apply 后新增/删除的 key 立即生效。
+type KeyProvider interface {
+	ActiveKeys() []config.KeyConfig
+}
 
+func Auth(keyProvider KeyProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		key := extractAPIKey(c)
 		if key == "" {
@@ -20,7 +24,8 @@ func Auth(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		name := findKeyName(key, validKeys)
+		// 每次请求从 keyProvider 取最新 keys（Apply 后立即生效）
+		name := findKeyName(key, keyProvider.ActiveKeys())
 		if name == "" {
 			unauthorized(c)
 			return

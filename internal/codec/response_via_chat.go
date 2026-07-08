@@ -80,11 +80,11 @@ func readAnthropicStreamToObject(body io.Reader, counter TokenCounter) (*dto.Cla
 						}
 					}
 				case "input_json_delta":
-					if currentToolBlock != nil {
+					if currentToolBlock != nil && event.Delta.PartialJSON != nil {
 						if acc, ok := currentToolBlock.Input.(string); ok {
-							currentToolBlock.Input = acc + event.Delta.PartialJSON
+							currentToolBlock.Input = acc + *event.Delta.PartialJSON
 						} else {
-							currentToolBlock.Input = event.Delta.PartialJSON
+							currentToolBlock.Input = *event.Delta.PartialJSON
 						}
 					}
 				}
@@ -135,8 +135,8 @@ func readResponsesStreamToObject(body io.Reader, counter TokenCounter) (*dto.Res
 	}
 
 	var textBuilder strings.Builder
-	toolArgs := make(map[string]string)     // item_id -> accumulated arguments
-	toolCallIDs := make(map[string]string)  // item_id -> call_id
+	toolArgs := make(map[string]string)      // item_id -> accumulated arguments
+	toolCallIDs := make(map[string]string)   // item_id -> call_id
 	toolCallNames := make(map[string]string) // item_id -> name
 
 	reader := bufio.NewReader(body)
@@ -229,9 +229,9 @@ func readResponsesStreamToObject(body io.Reader, counter TokenCounter) (*dto.Res
 		case "response.completed":
 			if len(event.Response) > 0 {
 				var r struct {
-					ID     string             `json:"id"`
-					Model  string             `json:"model"`
-					Status string             `json:"status"`
+					ID     string              `json:"id"`
+					Model  string              `json:"model"`
+					Status string              `json:"status"`
 					Usage  *dto.ResponsesUsage `json:"usage"`
 				}
 				if jsonErr := json.Unmarshal(event.Response, &r); jsonErr == nil {
@@ -295,7 +295,7 @@ func readResponsesStreamToObject(body io.Reader, counter TokenCounter) (*dto.Res
 }
 
 // writeClaudeObjectAsStream 将 ClaudeResponse 对象以 Anthropic SSE 格式写给客户端。
-func writeClaudeObjectAsStream(c *gin.Context, claudeResp *dto.ClaudeResponse, counter TokenCounter) error {
+func writeClaudeObjectAsStream(c *gin.Context, claudeResp *dto.ClaudeResponse, counter TokenCounter, requestedModel string) error {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
@@ -327,6 +327,11 @@ func writeClaudeObjectAsStream(c *gin.Context, claudeResp *dto.ClaudeResponse, c
 		stopReason = *claudeResp.StopReason
 	}
 
+	model := claudeResp.Model
+	if requestedModel != "" {
+		model = requestedModel
+	}
+
 	// message_start
 	if err := writeEvent(dto.ClaudeStreamEvent{
 		Type: "message_start",
@@ -334,7 +339,7 @@ func writeClaudeObjectAsStream(c *gin.Context, claudeResp *dto.ClaudeResponse, c
 			ID:    claudeResp.ID,
 			Type:  "message",
 			Role:  "assistant",
-			Model: claudeResp.Model,
+			Model: model,
 			Usage: claudeResp.Usage,
 		},
 	}); err != nil {
@@ -395,10 +400,11 @@ func writeClaudeObjectAsStream(c *gin.Context, claudeResp *dto.ClaudeResponse, c
 			}
 			// content_block_delta (input_json_delta)
 			if len(argsJSON) > 2 { // 非空 JSON（不只是 {}）
+				partialJSON := string(argsJSON)
 				if err := writeEvent(dto.ClaudeStreamEvent{
 					Type:  "content_block_delta",
 					Index: contentIndex,
-					Delta: &dto.ClaudeDelta{Type: "input_json_delta", PartialJSON: string(argsJSON)},
+					Delta: &dto.ClaudeDelta{Type: "input_json_delta", PartialJSON: &partialJSON},
 				}); err != nil {
 					return err
 				}
@@ -431,14 +437,13 @@ func writeClaudeObjectAsStream(c *gin.Context, claudeResp *dto.ClaudeResponse, c
 		if sc, ok := counter.(*token.StreamCounter); ok {
 			sc.ComputeOutputTokens()
 		}
-		counter.SetLatency()
 	}
 
 	return nil
 }
 
 // writeResponsesObjectAsStream 将 ResponsesResponse 对象以 Responses API SSE 格式写给客户端。
-func writeResponsesObjectAsStream(c *gin.Context, responsesResp *dto.ResponsesResponse, counter TokenCounter) error {
+func writeResponsesObjectAsStream(c *gin.Context, responsesResp *dto.ResponsesResponse, counter TokenCounter, requestedModel string) error {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
@@ -453,6 +458,9 @@ func writeResponsesObjectAsStream(c *gin.Context, responsesResp *dto.ResponsesRe
 		chatID = fmt.Sprintf("resp-%d", time.Now().UnixNano())
 	}
 	model := responsesResp.Model
+	if requestedModel != "" {
+		model = requestedModel
+	}
 
 	writeEvent := func(v any) error {
 		data, err := json.Marshal(v)
@@ -664,7 +672,6 @@ func writeResponsesObjectAsStream(c *gin.Context, responsesResp *dto.ResponsesRe
 		if sc, ok := counter.(*token.StreamCounter); ok {
 			sc.ComputeOutputTokens()
 		}
-		counter.SetLatency()
 	}
 
 	return nil

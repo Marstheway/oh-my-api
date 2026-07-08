@@ -108,8 +108,10 @@ func ConvertClaudeStreamEventToOpenAI(responseID, model string, event *dto.Claud
 			return chunk
 		case "input_json_delta":
 			chunk.Choices[0].Index = event.Index
-			chunk.Choices[0].Delta.ToolCalls = []dto.ToolCall{
-				{Function: dto.ToolCallFunc{Arguments: event.Delta.PartialJSON}},
+			if event.Delta.PartialJSON != nil {
+				chunk.Choices[0].Delta.ToolCalls = []dto.ToolCall{
+					{Function: dto.ToolCallFunc{Arguments: *event.Delta.PartialJSON}},
+				}
 			}
 			return chunk
 		case "thinking_delta":

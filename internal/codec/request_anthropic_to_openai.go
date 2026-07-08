@@ -2,6 +2,7 @@ package codec
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
 )
@@ -14,6 +15,7 @@ func convertAnthropicToOpenAIRequest(req *dto.ClaudeRequest, upstreamModel strin
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 		Stop:        req.StopSequences,
+		TopK:        req.TopK,
 	}
 
 	if req.System != nil {
@@ -30,14 +32,52 @@ func convertAnthropicToOpenAIRequest(req *dto.ClaudeRequest, upstreamModel strin
 		out.Messages = append(out.Messages, convertClaudeMessageToOpenAI(msg)...)
 	}
 
-	if len(req.Tools) > 0 {
-		for _, t := range req.Tools {
+	switch tools := req.Tools.(type) {
+	case []any:
+		for _, t := range tools {
+			switch tool := t.(type) {
+			case dto.ClaudeTool:
+				out.Tools = append(out.Tools, dto.Tool{
+					Type: "function",
+					Function: dto.ToolFunction{
+						Name:        tool.Name,
+						Description: tool.Description,
+						Parameters:  tool.InputSchema,
+					},
+				})
+			case *dto.ClaudeTool:
+				out.Tools = append(out.Tools, dto.Tool{
+					Type: "function",
+					Function: dto.ToolFunction{
+						Name:        tool.Name,
+						Description: tool.Description,
+						Parameters:  tool.InputSchema,
+					},
+				})
+			case map[string]any:
+				// JSON-unmarshaled form
+				name, _ := tool["name"].(string)
+				desc, _ := tool["description"].(string)
+				if name != "" && tool["type"] != "web_search_20250305" {
+					out.Tools = append(out.Tools, dto.Tool{
+						Type: "function",
+						Function: dto.ToolFunction{
+							Name:        name,
+							Description: desc,
+							Parameters:  tool["input_schema"],
+						},
+					})
+				}
+			}
+		}
+	case []dto.ClaudeTool:
+		for _, tool := range tools {
 			out.Tools = append(out.Tools, dto.Tool{
 				Type: "function",
 				Function: dto.ToolFunction{
-					Name:        t.Name,
-					Description: t.Description,
-					Parameters:  t.InputSchema,
+					Name:        tool.Name,
+					Description: tool.Description,
+					Parameters:  tool.InputSchema,
 				},
 			})
 		}
@@ -47,7 +87,58 @@ func convertAnthropicToOpenAIRequest(req *dto.ClaudeRequest, upstreamModel strin
 		out.ToolChoice = convertClaudeToolChoiceToOpenAI(req.ToolChoice)
 	}
 
+	// ServiceTier: string -> json.RawMessage
+	if req.ServiceTier != "" {
+		out.ServiceTier = json.RawMessage(`"` + req.ServiceTier + `"`)
+	}
+
+	// Metadata 和 Claude 特有字段处理
+	out.Metadata = buildOpenAIMetadataFromClaude(req)
+
 	return out
+}
+
+// buildOpenAIMetadataFromClaude 构建包含 Claude 特有字段的 Metadata
+func buildOpenAIMetadataFromClaude(req *dto.ClaudeRequest) json.RawMessage {
+	meta := make(map[string]any)
+
+	// 如果原始请求已有 Metadata，先解析到 meta
+	if len(req.Metadata) > 0 {
+		if err := json.Unmarshal(req.Metadata, &meta); err != nil {
+			// 解析失败时忽略，重新开始
+			meta = make(map[string]any)
+		}
+	}
+
+	// Thinking 存入 _thinking
+	if req.Thinking != nil {
+		thinkingMap := map[string]any{
+			"type": req.Thinking.Type,
+		}
+		if req.Thinking.BudgetTokens != nil {
+			thinkingMap["budget_tokens"] = *req.Thinking.BudgetTokens
+		}
+		if req.Thinking.Display != "" {
+			thinkingMap["display"] = req.Thinking.Display
+		}
+		meta["_thinking"] = thinkingMap
+	}
+
+	// InferenceGeo 存入 _inference_geo
+	if req.InferenceGeo != "" {
+		meta["_inference_geo"] = req.InferenceGeo
+	}
+
+	// 如果 meta 为空，返回 nil
+	if len(meta) == 0 {
+		return nil
+	}
+
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(data)
 }
 
 func convertClaudeMessageToOpenAI(msg dto.ClaudeMessage) []dto.Message {
@@ -60,88 +151,223 @@ func convertClaudeMessageToOpenAI(msg dto.ClaudeMessage) []dto.Message {
 		return []dto.Message{{Role: role, Content: str}}
 	}
 
-	blocks, ok := msg.Content.([]any)
-	if !ok {
+	// 统一转换为 []dto.ContentBlock 处理
+	var blocks []dto.ContentBlock
+	switch v := msg.Content.(type) {
+	case []dto.ContentBlock:
+		blocks = v
+	case []any:
+		blocks = convertMapSliceToContentBlocks(v)
+	default:
 		return []dto.Message{{Role: role, Content: msg.Content}}
 	}
 
-	textContent := ""
-	toolCalls := make([]dto.ToolCall, 0)
-	toolMessages := make([]dto.Message, 0)
+	return convertClaudeContentBlocksToOpenAI(role, blocks)
+}
 
-	for _, item := range blocks {
+// convertMapSliceToContentBlocks 将 []any (map[string]any) 转换为 []dto.ContentBlock
+func convertMapSliceToContentBlocks(items []any) []dto.ContentBlock {
+	blocks := make([]dto.ContentBlock, 0, len(items))
+	for _, item := range items {
 		m, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-
-		typ, _ := m["type"].(string)
-		if typ == "" {
-			if _, hasText := m["text"]; hasText {
-				typ = "text"
+		block := dto.ContentBlock{}
+		if typ, _ := m["type"].(string); typ != "" {
+			block.Type = typ
+		} else if _, hasText := m["text"]; hasText {
+			block.Type = "text"
+		}
+		block.Text, _ = m["text"].(string)
+		block.ID, _ = m["id"].(string)
+		block.Name, _ = m["name"].(string)
+		if input, ok := m["input"]; ok {
+			block.Input = input
+		}
+		block.ToolUseID, _ = m["tool_use_id"].(string)
+		if content, ok := m["content"]; ok {
+			block.Content = content
+		}
+		if source, ok := m["source"].(map[string]any); ok {
+			block.Source = convertMapToMessageSource(source)
+		}
+		// Handle thinking block fields
+		if block.Type == "thinking" {
+			if thinking, ok := m["thinking"].(string); ok {
+				block.Thinking = &thinking
+			}
+			if sig, ok := m["signature"].(string); ok {
+				block.Signature = sig
 			}
 		}
+		blocks = append(blocks, block)
+	}
+	return blocks
+}
 
-		switch typ {
+// convertMapToMessageSource 将 map[string]any 转换为 dto.MessageSource
+func convertMapToMessageSource(m map[string]any) *dto.MessageSource {
+	return &dto.MessageSource{
+		Type:      m["type"].(string),
+		MediaType: m["media_type"].(string),
+		Data:      m["data"].(string),
+		Url:       m["url"].(string),
+	}
+}
+
+// convertClaudeContentBlocksToOpenAI converts []dto.ContentBlock to OpenAI format
+func convertClaudeContentBlocksToOpenAI(role string, blocks []dto.ContentBlock) []dto.Message {
+	var state messageConversionState
+
+	for _, block := range blocks {
+		switch block.Type {
+		case "thinking":
+			// Accumulate thinking content into reasoning_content
+			if block.Thinking != nil && *block.Thinking != "" {
+				state.reasoningContent += *block.Thinking
+			}
 		case "text", "input_text":
-			if t, _ := m["text"].(string); t != "" {
-				textContent += t
+			if block.Text != "" {
+				state.contentParts = append(state.contentParts, block)
+				state.textContent += block.Text
+			}
+		case "image":
+			if media := convertClaudeImageContentBlockToOpenAI(block); media != nil {
+				state.contentParts = append(state.contentParts, media)
+				state.hasMediaContent = true
+			}
+		case "document":
+			if media := convertClaudeDocumentContentBlockToOpenAI(block); media != nil {
+				state.contentParts = append(state.contentParts, media)
+				state.hasMediaContent = true
 			}
 		case "tool_use":
-			if role != "assistant" {
-				continue
+			if role == "assistant" {
+				state.toolCalls = append(state.toolCalls, dto.ToolCall{
+					ID:   block.ID,
+					Type: "function",
+					Function: dto.ToolCallFunc{
+						Name:      block.Name,
+						Arguments: marshalInput(block.Input),
+					},
+				})
 			}
-			id, _ := m["id"].(string)
-			name, _ := m["name"].(string)
-			args := "{}"
-			if rawInput, exists := m["input"]; exists {
-				if b, err := json.Marshal(rawInput); err == nil {
-					args = string(b)
-				}
-			}
-			toolCalls = append(toolCalls, dto.ToolCall{
-				ID:   id,
-				Type: "function",
-				Function: dto.ToolCallFunc{
-					Name:      name,
-					Arguments: args,
-				},
-			})
 		case "tool_result":
-			if role != "user" {
-				continue
+			if role == "user" {
+				state.toolMessages = append(state.toolMessages, dto.Message{
+					Role:       "tool",
+					ToolCallID: block.ToolUseID,
+					Content:    toolResultContentToString(block.Content),
+				})
 			}
-			toolUseID, _ := m["tool_use_id"].(string)
-			output := toolResultContentToString(m["content"])
-			toolMessages = append(toolMessages, dto.Message{
-				Role:       "tool",
-				ToolCallID: toolUseID,
-				Content:    output,
-			})
 		}
 	}
 
-	result := make([]dto.Message, 0, 1+len(toolMessages))
+	return state.buildMessages(role)
+}
+
+// messageConversionState 收集消息转换过程中的状态
+type messageConversionState struct {
+	textContent       string
+	reasoningContent  string
+	toolCalls        []dto.ToolCall
+	toolMessages     []dto.Message
+	contentParts     []any
+	hasMediaContent  bool
+}
+
+// buildMessages 根据收集的状态构建最终的消息列表
+func (s *messageConversionState) buildMessages(role string) []dto.Message {
+	result := make([]dto.Message, 0, 1+len(s.toolMessages))
+
 	if role == "assistant" {
-		if textContent != "" || len(toolCalls) > 0 {
-			result = append(result, dto.Message{
+		if s.textContent != "" || len(s.toolCalls) > 0 || s.hasMediaContent || s.reasoningContent != "" {
+			var content any = s.textContent
+			if s.hasMediaContent {
+				content = s.contentParts
+			}
+			msg := dto.Message{
 				Role:      "assistant",
-				Content:   textContent,
-				ToolCalls: toolCalls,
-			})
+				Content:   content,
+				ToolCalls: s.toolCalls,
+			}
+			// Preserve reasoning_content if present
+			if s.reasoningContent != "" {
+				msg.ReasoningContent = &s.reasoningContent
+			}
+			result = append(result, msg)
 		}
 		return result
 	}
 
-	if textContent != "" {
-		result = append(result, dto.Message{Role: role, Content: textContent})
+	// User role
+	if s.hasMediaContent || len(s.toolMessages) > 0 || len(s.contentParts) > 1 {
+		result = append(result, dto.Message{Role: role, Content: s.contentParts})
+	} else if s.textContent != "" {
+		result = append(result, dto.Message{Role: role, Content: s.textContent})
 	}
-	result = append(result, toolMessages...)
+	result = append(result, s.toolMessages...)
 
 	if len(result) == 0 {
 		result = append(result, dto.Message{Role: role, Content: ""})
 	}
 	return result
+}
+
+// marshalInput 将 input 序列化为 JSON 字符串
+func marshalInput(input any) string {
+	if input == nil {
+		return "{}"
+	}
+	b, err := json.Marshal(input)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// convertClaudeImageContentBlockToOpenAI converts dto.ContentBlock image to MediaContent
+func convertClaudeImageContentBlockToOpenAI(block dto.ContentBlock) *dto.MediaContent {
+	if block.Source == nil {
+		return nil
+	}
+
+	var imageUrl string
+	switch block.Source.Type {
+	case "base64":
+		if block.Source.MediaType != "" && block.Source.Data != "" {
+			imageUrl = fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
+		}
+	case "url":
+		imageUrl = block.Source.Url
+	}
+
+	if imageUrl == "" {
+		return nil
+	}
+
+	return &dto.MediaContent{
+		Type:     "image_url",
+		ImageUrl: dto.MessageImageUrl{Url: imageUrl},
+	}
+}
+
+// convertClaudeDocumentContentBlockToOpenAI converts dto.ContentBlock document to MediaContent
+func convertClaudeDocumentContentBlockToOpenAI(block dto.ContentBlock) *dto.MediaContent {
+	if block.Source == nil || block.Source.Type != "base64" {
+		return nil
+	}
+
+	if block.Source.MediaType == "" || block.Source.Data == "" {
+		return nil
+	}
+
+	fileData := fmt.Sprintf("data:%s;base64,%s", block.Source.MediaType, block.Source.Data)
+	return &dto.MediaContent{
+		Type: "file",
+		File: dto.MessageFile{FileData: fileData},
+	}
 }
 
 func toolResultContentToString(content any) string {
