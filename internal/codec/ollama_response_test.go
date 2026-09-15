@@ -17,8 +17,8 @@ import (
 
 func TestOllamaChatResponse_TextOnly(t *testing.T) {
 	input := dto.OllamaChatResponse{
-		Model:     "llama3",
-		Done:      true,
+		Model:      "llama3",
+		Done:       true,
 		DoneReason: "stop",
 		Message: dto.OllamaChatResponseMessage{
 			Role:    "assistant",

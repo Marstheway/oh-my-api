@@ -94,10 +94,10 @@ func setupEmbeddingsTestHandler(qpm int) (*gin.Engine, *httptest.Server, string)
 		panic(err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -258,10 +258,10 @@ func TestEmbeddings_ProviderDoesNotSupportEmbedding(t *testing.T) {
 		panic(err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -313,10 +313,10 @@ func TestEmbeddings_InvalidEmbeddingEndpointConfiguration(t *testing.T) {
 		panic(err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -382,10 +382,10 @@ func TestEmbeddings_UpstreamErrorResponse(t *testing.T) {
 		panic(err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -459,10 +459,10 @@ func TestEmbeddings_MismatchedEmbeddingCount(t *testing.T) {
 		panic(err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -528,10 +528,10 @@ func TestEmbeddings_NullEmbeddingItem(t *testing.T) {
 		panic(err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -608,10 +608,10 @@ func TestEmbeddings_UsesRequestedAliasModel(t *testing.T) {
 		t.Fatalf("failed to init stats: %v", err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -677,6 +677,134 @@ func TestEmbeddings_MultipleInputs(t *testing.T) {
 	}
 }
 
+// TestEmbeddings_RulesQPMApplies 验证 embeddings 走同一套调度层规则：
+// 命中 upstream-model 的 qpm rule 后，Task 带上 model qpm；model 桶被第一次请求耗尽后，
+// 第二次请求在 Wait 期限内拿不到令牌 → 429 all providers rate limited。
+func TestEmbeddings_RulesQPMApplies(t *testing.T) {
+	router, ollamaSrv, tmpDir := setupEmbeddingsTestHandler(0)
+	defer ollamaSrv.Close()
+	defer os.RemoveAll(tmpDir)
+
+	qpm := 1
+	cfg.Rules = []config.RuleConfig{{
+		Match: config.RuleMatch{
+			UpstreamModel: &config.RuleCondition{Op: "equals", Value: "ollama-provider/embedding-model"},
+		},
+		Action: config.RuleAction{QPM: &qpm},
+	}}
+	defer func() { cfg.Rules = nil }()
+
+	// 缩短请求超时：model 桶 qpm=1 的 refill 周期为 60s，Wait 必然超时后走 429。
+	oldTimeout := timeout
+	timeout = 2 * time.Second
+	defer func() { timeout = oldTimeout }()
+
+	body := dto.EmbeddingRequest{Model: "embedding-model", Input: "hello"}
+	jsonBody, _ := json.Marshal(body)
+
+	// 第一次：model 桶建立并消费唯一 token，成功。
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/embeddings", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first embedding status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+
+	// 第二次：model 桶耗尽，Wait 超时 → 429。
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/v1/embeddings", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("second embedding status = %d, want 429 (model qpm bucket exhausted)", w.Code)
+	}
+}
+
+// TestEmbeddings_RulesDisableTimeRangeSkips 验证 embeddings 命中 disable_time_range rule 时
+// 叶子被跳过 → 全灭返回 503 no provider available。
+func TestEmbeddings_RulesDisableTimeRangeSkips(t *testing.T) {
+	router, ollamaSrv, tmpDir := setupEmbeddingsTestHandler(0)
+	defer ollamaSrv.Close()
+	defer os.RemoveAll(tmpDir)
+
+	cfg.Rules = []config.RuleConfig{{
+		Match: config.RuleMatch{
+			UpstreamModel: &config.RuleCondition{Op: "equals", Value: "ollama-provider/embedding-model"},
+		},
+		Action: config.RuleAction{DisableTimeRange: []string{"00:00-24:00"}},
+	}}
+	defer func() { cfg.Rules = nil }()
+
+	body := dto.EmbeddingRequest{Model: "embedding-model", Input: "hello"}
+	jsonBody, _ := json.Marshal(body)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/embeddings", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("embedding with all-disabled leaf status = %d, want 503, body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEmbeddings_RulesEnableTimeRangeSkipsOutsideWindow 验证 embeddings 命中 enable_time_range
+// 但当前时间不在窗口内时同样 503。
+func TestEmbeddings_RulesEnableTimeRangeSkipsOutsideWindow(t *testing.T) {
+	router, ollamaSrv, tmpDir := setupEmbeddingsTestHandler(0)
+	defer ollamaSrv.Close()
+	defer os.RemoveAll(tmpDir)
+
+	now := time.Now()
+	// 未来窗口 [now+1h, now+2h)：请求时当前时间必然不在窗口内。
+	enable := now.Add(1*time.Hour).Format("15:04") + "-" + now.Add(2*time.Hour).Format("15:04")
+	cfg.Rules = []config.RuleConfig{{
+		Match: config.RuleMatch{
+			UpstreamModel: &config.RuleCondition{Op: "equals", Value: "ollama-provider/embedding-model"},
+		},
+		Action: config.RuleAction{EnableTimeRange: []string{enable}},
+	}}
+	defer func() { cfg.Rules = nil }()
+
+	body := dto.EmbeddingRequest{Model: "embedding-model", Input: "hello"}
+	jsonBody, _ := json.Marshal(body)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/embeddings", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("embedding outside enable window status = %d, want 503, body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEmbeddings_RulesThinkingIgnored 验证 protocol/effort/thinking 不改变 embedding 请求：
+// 命中 thinking rule 的 embedding 请求照常成功（embeddings 只消费调度层 action）。
+func TestEmbeddings_RulesThinkingIgnored(t *testing.T) {
+	router, ollamaSrv, tmpDir := setupEmbeddingsTestHandler(0)
+	defer ollamaSrv.Close()
+	defer os.RemoveAll(tmpDir)
+
+	cfg.Rules = []config.RuleConfig{{
+		Match: config.RuleMatch{
+			UpstreamModel: &config.RuleCondition{Op: "equals", Value: "ollama-provider/embedding-model"},
+		},
+		Action: config.RuleAction{Thinking: "off"},
+	}}
+	defer func() { cfg.Rules = nil }()
+
+	body := dto.EmbeddingRequest{Model: "embedding-model", Input: "hello"}
+	jsonBody, _ := json.Marshal(body)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/embeddings", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("embedding with thinking rule status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+}
+
 // TestEmbeddings_RequestedAliasSurvivesWinnerChange 验证：当 embedding 请求通过别名路由时，
 // 即使 failover 切换到不同 provider/upstream_model，响应中的 model 字段仍为别名。
 func TestEmbeddings_RequestedAliasSurvivesWinnerChange(t *testing.T) {
@@ -730,8 +858,8 @@ func TestEmbeddings_RequestedAliasSurvivesWinnerChange(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "embed-backend",
-				Mode:    "failover",
+				Name:     "embed-backend",
+				Mode:     "failover",
 				Exposure: exposurePtr(falseVal),
 				Models: config.ModelEntries{
 					{Model: "primary-ollama/nomic-embed-primary", Weight: 1},
@@ -754,10 +882,10 @@ func TestEmbeddings_RequestedAliasSurvivesWinnerChange(t *testing.T) {
 		t.Fatalf("failed to init stats: %v", err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -808,6 +936,181 @@ func setupEmbeddingOllamaSrv(t *testing.T) *httptest.Server {
 	}))
 }
 
+// ============================================================================
+// openai.embeddings 协议集成测试
+// ============================================================================
+
+// setupOpenAIEmbeddingHandler 建立 OpenAI 格式的 /v1/embeddings 上游，返回 router 与记录请求路径的 server。
+func setupOpenAIEmbeddingHandler(t *testing.T, endpoint string, endpointPath *string) *gin.Engine {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if endpointPath != nil {
+			*endpointPath = r.URL.Path
+		}
+		var req struct {
+			Model string          `json:"model"`
+			Input json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"invalid request"}}`))
+			return
+		}
+		var inputCount int
+		if len(req.Input) > 0 && req.Input[0] == '"' {
+			inputCount = 1
+		} else {
+			var arr []json.RawMessage
+			_ = json.Unmarshal(req.Input, &arr)
+			inputCount = len(arr)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		data := make([]map[string]any, inputCount)
+		for i := 0; i < inputCount; i++ {
+			data[i] = map[string]any{
+				"object":    "embedding",
+				"index":     i,
+				"embedding": make([]float64, 4),
+			}
+		}
+		resp := map[string]any{
+			"object": "list",
+			"data":   data,
+			"model":  req.Model,
+			"usage": map[string]int{
+				"prompt_tokens":     7,
+				"completion_tokens": 0,
+				"total_tokens":      7,
+			},
+		}
+		w.Write(mustMarshal(resp))
+	}))
+	t.Cleanup(srv.Close)
+
+	providerName := "openai-embed-provider"
+	providers := map[string]config.ProviderConfig{
+		providerName: {
+			// endpoint 参数（"" / "/v1" / "/v1/embeddings"）作为路径后缀拼到 server URL 上
+			Endpoint:  srv.URL + endpoint,
+			APIKey:    "test-key",
+			Protocols: []string{"openai.embeddings"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+	}
+
+	cfg = &config.Config{
+		Providers: config.ProvidersConfig{Items: providers},
+		ModelGroups: []config.ModelGroupConfig{
+			{Name: "embedding-model", Models: config.ModelEntries{{Model: providerName + "/embedding-model", Weight: 1}}},
+		},
+	}
+
+	var err error
+	resolver, err = model.NewResolver(cfg)
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	if err := stats.Init(dbPath); err != nil {
+		t.Fatalf("stats.Init: %v", err)
+	}
+
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
+	rlManager := ratelimit.NewManager(providers)
+	healthChecker := health.NewChecker(3, 30*time.Second)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
+
+	router := gin.New()
+	router.POST("/v1/embeddings", Embeddings)
+	return router
+}
+
+func postEmbeddingRequest(router *gin.Engine, body dto.EmbeddingRequest) *httptest.ResponseRecorder {
+	jsonBody, _ := json.Marshal(body)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/embeddings", bytes.NewReader(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	return w
+}
+
+func TestEmbeddings_OpenAIProtocol_Success(t *testing.T) {
+	var upstreamPath string
+	router := setupOpenAIEmbeddingHandler(t, "", &upstreamPath)
+
+	w := postEmbeddingRequest(router, dto.EmbeddingRequest{
+		Model: "embedding-model",
+		Input: "Hello, world!",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/embeddings" {
+		t.Errorf("upstream path = %q, want /v1/embeddings", upstreamPath)
+	}
+
+	var resp dto.EmbeddingResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp.Object != "list" {
+		t.Errorf("object = %s, want list", resp.Object)
+	}
+	if resp.Model != "embedding-model" {
+		t.Errorf("model = %s, want embedding-model", resp.Model)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("data count = %d, want 1", len(resp.Data))
+	}
+	if resp.Usage.PromptTokens != 7 || resp.Usage.TotalTokens != 7 {
+		t.Errorf("usage = %+v, want prompt/total 7", resp.Usage)
+	}
+}
+
+func TestEmbeddings_OpenAIProtocol_EndpointWithV1Base(t *testing.T) {
+	// endpoint 以 /v1 结尾（与 chat 共用 base）时，应只补 /embeddings，不产生 /v1/v1/embeddings
+	var upstreamPath string
+	router := setupOpenAIEmbeddingHandler(t, "/v1", &upstreamPath)
+
+	w := postEmbeddingRequest(router, dto.EmbeddingRequest{
+		Model: "embedding-model",
+		Input: []any{"a", "b"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/embeddings" {
+		t.Errorf("upstream path = %q, want /v1/embeddings (not /v1/v1/embeddings)", upstreamPath)
+	}
+	var resp dto.EmbeddingResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if len(resp.Data) != 2 {
+		t.Errorf("data count = %d, want 2", len(resp.Data))
+	}
+}
+
+func TestEmbeddings_OpenAIProtocol_EndpointFullPath(t *testing.T) {
+	// endpoint 已是完整 /v1/embeddings，原样使用
+	var upstreamPath string
+	router := setupOpenAIEmbeddingHandler(t, "/v1/embeddings", &upstreamPath)
+
+	w := postEmbeddingRequest(router, dto.EmbeddingRequest{
+		Model: "embedding-model",
+		Input: "hi",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/embeddings" {
+		t.Errorf("upstream path = %q, want /v1/embeddings", upstreamPath)
+	}
+}
+
 // TestEmbeddings_NestedChildGroupRejected 验证：embedding group 引用了子 group → 应返回错误。
 func TestEmbeddings_NestedChildGroupRejected(t *testing.T) {
 	ollamaSrv := setupEmbeddingOllamaSrv(t)
@@ -832,9 +1135,9 @@ func TestEmbeddings_NestedChildGroupRejected(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "embed-leaf",
+				Name:     "embed-leaf",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "ollama-provider/nomic-embed", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "ollama-provider/nomic-embed", Weight: 1}},
 			},
 			{
 				// 顶层 group 引用子 group，不是纯叶子
@@ -856,10 +1159,10 @@ func TestEmbeddings_NestedChildGroupRejected(t *testing.T) {
 		t.Fatalf("failed to init stats: %v", err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -905,9 +1208,9 @@ func TestEmbeddings_AliasToLeafGroupSucceeds(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "leaf-embed",
+				Name:     "leaf-embed",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "ollama-provider/nomic-embed", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "ollama-provider/nomic-embed", Weight: 1}},
 			},
 		},
 		Redirect: config.RedirectConfigs{
@@ -924,10 +1227,10 @@ func TestEmbeddings_AliasToLeafGroupSucceeds(t *testing.T) {
 		t.Fatalf("failed to init stats: %v", err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)
@@ -1001,10 +1304,10 @@ func TestEmbeddings_InternalModelReturns404(t *testing.T) {
 		t.Fatalf("stats init: %v", err)
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/embeddings", Embeddings)

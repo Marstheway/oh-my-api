@@ -331,6 +331,130 @@ model_groups:
 	}
 }
 
+func TestModelGroupConfigSticky(t *testing.T) {
+	tests := []struct {
+		name           string
+		yaml           string
+		expectedSticky []struct {
+			enabled     bool
+			idleTimeout string
+		}
+	}{
+		{
+			name: "no sticky config",
+			yaml: `
+model_groups:
+  - name: "test"
+    mode: "load-balance"
+    models:
+      - "openai/gpt-4"
+`,
+			expectedSticky: []struct {
+				enabled     bool
+				idleTimeout string
+			}{{enabled: false, idleTimeout: ""}},
+		},
+		{
+			name: "sticky enabled with custom timeout",
+			yaml: `
+model_groups:
+  - name: "test"
+    mode: "load-balance"
+    sticky:
+      enabled: true
+      idle_timeout: "15m"
+    models:
+      - "openai/gpt-4"
+`,
+			expectedSticky: []struct {
+				enabled     bool
+				idleTimeout string
+			}{{enabled: true, idleTimeout: "15m"}},
+		},
+		{
+			name: "sticky enabled with default timeout",
+			yaml: `
+model_groups:
+  - name: "test"
+    mode: "load-balance"
+    sticky:
+      enabled: true
+    models:
+      - "openai/gpt-4"
+`,
+			expectedSticky: []struct {
+				enabled     bool
+				idleTimeout string
+			}{{enabled: true, idleTimeout: ""}},
+		},
+		{
+			name: "sticky disabled explicitly",
+			yaml: `
+model_groups:
+  - name: "test"
+    mode: "load-balance"
+    sticky:
+      enabled: false
+    models:
+      - "openai/gpt-4"
+`,
+			expectedSticky: []struct {
+				enabled     bool
+				idleTimeout string
+			}{{enabled: false, idleTimeout: ""}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.yaml")
+			fullYaml := `
+server:
+  listen: ":18000"
+inbound:
+  auth:
+    keys:
+      - name: "test"
+        key: "sk-test"
+providers:
+  openai:
+    endpoint: "https://api.openai.com/v1"
+    api_key: "sk-xxx"
+    protocols: ["openai.chat"]
+` + tt.yaml
+			if err := os.WriteFile(configPath, []byte(fullYaml), 0644); err != nil {
+				t.Fatalf("failed to write config file: %v", err)
+			}
+
+			cfg, err := Load(configPath)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if len(cfg.ModelGroups) != len(tt.expectedSticky) {
+				t.Fatalf("expected %d model groups, got %d", len(tt.expectedSticky), len(cfg.ModelGroups))
+			}
+
+			for i, expected := range tt.expectedSticky {
+				sticky := cfg.ModelGroups[i].Sticky
+				if sticky == nil {
+					if expected.enabled {
+						t.Errorf("group %d: expected sticky enabled, got nil", i)
+					}
+					continue
+				}
+				if sticky.Enabled != expected.enabled {
+					t.Errorf("group %d: expected enabled %v, got %v", i, expected.enabled, sticky.Enabled)
+				}
+				if sticky.IdleTimeout != expected.idleTimeout {
+					t.Errorf("group %d: expected idle_timeout %q, got %q", i, expected.idleTimeout, sticky.IdleTimeout)
+				}
+			}
+		})
+	}
+}
+
 func TestProviderConfig_GetEndpoint(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -409,134 +533,6 @@ func TestProviderConfig_GetEndpoint(t *testing.T) {
 			got := tt.provider.GetEndpoint(tt.inbound)
 			if got != tt.want {
 				t.Errorf("GetEndpoint(%q) = %q, want %q", tt.inbound, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestProviderConfig_GetOutboundProtocol(t *testing.T) {
-	tests := []struct {
-		name     string
-		provider ProviderConfig
-		inbound  string
-		want     string
-	}{
-		{
-			name: "endpoints match anthropic returns anthropic",
-			provider: ProviderConfig{
-				Protocols: []string{"openai.chat"},
-				Endpoints: []EndpointConfig{
-					{URL: "https://anthropic.api.com", Protocols: []string{"anthropic.messages"}},
-					{URL: "https://openai.api.com", Protocols: []string{"openai.chat"}},
-				},
-			},
-			inbound: "anthropic.messages",
-			want:    "anthropic.messages",
-		},
-		{
-			name: "endpoints match openai returns openai",
-			provider: ProviderConfig{
-				Protocols: []string{"anthropic.messages"},
-				Endpoints: []EndpointConfig{
-					{URL: "https://anthropic.api.com", Protocols: []string{"anthropic.messages"}},
-					{URL: "https://openai.api.com", Protocols: []string{"openai.chat"}},
-				},
-			},
-			inbound: "openai.chat",
-			want:    "openai.chat",
-		},
-		{
-			name: "endpoints no match fallback to first endpoint protocol",
-			provider: ProviderConfig{
-				Protocols: []string{"openai.chat"},
-				Endpoints: []EndpointConfig{
-					{URL: "https://anthropic.api.com", Protocols: []string{"anthropic.messages"}},
-				},
-			},
-			inbound: "openai.chat",
-			want:    "anthropic.messages",
-		},
-		{
-			name: "empty endpoints fallback to default protocol",
-			provider: ProviderConfig{
-				Protocols: []string{"openai.chat"},
-				Endpoints: []EndpointConfig{},
-			},
-			inbound: "anthropic.messages",
-			want:    "openai.chat",
-		},
-		{
-			name: "endpoints no match fallback to first endpoint protocol",
-			provider: ProviderConfig{
-				Protocols: []string{"openai.chat"},
-				Endpoints: []EndpointConfig{
-					{URL: "https://anthropic.api.com", Protocols: []string{"anthropic.messages"}},
-					{URL: "https://openai.api.com", Protocols: []string{"openai.chat"}},
-				},
-			},
-			inbound: "openai.responses",
-			want:    "openai.chat",
-		},
-		{
-			name: "endpoints present without top-level protocol still works",
-			provider: ProviderConfig{
-				Endpoints: []EndpointConfig{
-					{URL: "https://anthropic.api.com", Protocols: []string{"anthropic.messages"}},
-					{URL: "https://openai.api.com", Protocols: []string{"openai.chat"}},
-				},
-			},
-			inbound: "openai.responses",
-			want:    "openai.chat",
-		},
-		{
-			name: "no endpoints use default protocol",
-			provider: ProviderConfig{
-				Protocols: []string{"anthropic.messages"},
-			},
-			inbound: "openai.chat",
-			want:    "anthropic.messages",
-		},
-		// 单协议转换测试
-		{
-			name: "multi-protocol A->A: inbound anthropic returns anthropic",
-			provider: ProviderConfig{
-				Protocols: []string{"openai.chat", "anthropic.messages"},
-			},
-			inbound: "anthropic.messages",
-			want:    "anthropic.messages",
-		},
-		{
-			name: "multi-protocol O->O: inbound openai returns openai",
-			provider: ProviderConfig{
-				Protocols: []string{"openai.chat", "anthropic.messages"},
-			},
-			inbound: "openai.chat",
-			want:    "openai.chat",
-		},
-		// 单协议转换测试
-		{
-			name: "single-protocol A->O: inbound anthropic fallback to openai",
-			provider: ProviderConfig{
-				Protocols: []string{"openai.chat"},
-			},
-			inbound: "anthropic.messages",
-			want:    "openai.chat",
-		},
-		{
-			name: "single-protocol O->A: inbound openai fallback to anthropic",
-			provider: ProviderConfig{
-				Protocols: []string{"anthropic.messages"},
-			},
-			inbound: "openai.chat",
-			want:    "anthropic.messages",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.provider.GetOutboundProtocol(tt.inbound)
-			if got != tt.want {
-				t.Errorf("GetOutboundProtocol(%q) = %q, want %q", tt.inbound, got, tt.want)
 			}
 		})
 	}
@@ -639,15 +635,12 @@ func TestProviderConfig_SelectOutboundFormat(t *testing.T) {
 	}
 }
 
-func TestProviderConfig_SelectOutboundFormatForModel(t *testing.T) {
+func TestProviderConfig_SelectOutboundFormat_PassthroughViaEndpoints(t *testing.T) {
 	provider := ProviderConfig{
 		Protocols: []string{"openai.chat", "anthropic.messages"},
 		Endpoints: []EndpointConfig{
 			{URL: "https://anthropic.example.com", Protocols: []string{"anthropic.messages"}},
 			{URL: "https://openai.example.com", Protocols: []string{"openai.chat"}},
-		},
-		UpstreamModels: []UpstreamModelConfig{
-			{Model: "minimax-m3", AllowedProtocols: []string{"anthropic.messages"}},
 		},
 	}
 
@@ -656,43 +649,12 @@ func TestProviderConfig_SelectOutboundFormatForModel(t *testing.T) {
 		t.Fatalf("normalize inbound failed: %v", err)
 	}
 
-	got, reason, cost, err := provider.SelectOutboundFormatForModel(inbound, "minimax-m3")
+	got, reason, cost, err := provider.SelectOutboundFormat(inbound)
 	if err != nil {
-		t.Fatalf("SelectOutboundFormatForModel returned error: %v", err)
+		t.Fatalf("SelectOutboundFormat returned error: %v", err)
 	}
-	if got != codec.FormatAnthropicMessages {
-		t.Fatalf("format=%q want=%q", got, codec.FormatAnthropicMessages)
-	}
-	if reason != "lowest_cost" {
-		t.Fatalf("reason=%q want=%q", reason, "lowest_cost")
-	}
-	if cost != 2 {
-		t.Fatalf("cost=%d want=%d", cost, 2)
-	}
-}
-
-func TestProviderConfig_SelectOutboundFormatForModel_IgnoresUnreachableAllowedProtocol(t *testing.T) {
-	provider := ProviderConfig{
-		Protocols: []string{"openai.chat", "anthropic.messages"},
-		Endpoints: []EndpointConfig{
-			{URL: "https://anthropic.example.com", Protocols: []string{"anthropic.messages"}},
-		},
-		UpstreamModels: []UpstreamModelConfig{
-			{Model: "glm-5.2", AllowedProtocols: []string{"openai.chat"}},
-		},
-	}
-
-	inbound, err := codec.NormalizeProviderFormat("anthropic.messages")
-	if err != nil {
-		t.Fatalf("normalize inbound failed: %v", err)
-	}
-
-	got, reason, cost, err := provider.SelectOutboundFormatForModel(inbound, "glm-5.2")
-	if err != nil {
-		t.Fatalf("SelectOutboundFormatForModel returned error: %v", err)
-	}
-	if got != codec.FormatAnthropicMessages {
-		t.Fatalf("format=%q want=%q", got, codec.FormatAnthropicMessages)
+	if got != codec.FormatOpenAIChat {
+		t.Fatalf("format=%q want=%q", got, codec.FormatOpenAIChat)
 	}
 	if reason != "passthrough" {
 		t.Fatalf("reason=%q want=%q", reason, "passthrough")
@@ -702,49 +664,12 @@ func TestProviderConfig_SelectOutboundFormatForModel_IgnoresUnreachableAllowedPr
 	}
 }
 
-func TestProviderConfig_SelectOutboundFormatForModel_DefaultProtocols(t *testing.T) {
+// 未配置模型级约束时，在多个可达协议中按最低转换成本选择。
+func TestProviderConfig_SelectOutboundFormat_PicksLowestCost(t *testing.T) {
 	provider := ProviderConfig{
-		Protocols:         []string{"openai.chat", "anthropic.messages"},
-		DefaultProtocols: []string{"openai.chat"},
+		Protocols: []string{"openai.chat", "anthropic.messages"},
 		Endpoints: []EndpointConfig{
 			{URL: "https://anthropic.example.com", Protocols: []string{"anthropic.messages"}},
-			{URL: "https://openai.example.com", Protocols: []string{"openai.chat"}},
-		},
-		UpstreamModels: []UpstreamModelConfig{
-			{Model: "gpt-4o"}, // 没有 allowed_protocols，继承 default_protocols: ["openai"]
-		},
-	}
-
-	inbound, err := codec.NormalizeProviderFormat("anthropic.messages")
-	if err != nil {
-		t.Fatalf("normalize inbound failed: %v", err)
-	}
-
-	got, reason, cost, err := provider.SelectOutboundFormatForModel(inbound, "gpt-4o")
-	if err != nil {
-		t.Fatalf("SelectOutboundFormatForModel returned error: %v", err)
-	}
-	if got != codec.FormatOpenAIChat {
-		t.Fatalf("format=%q want=%q", got, codec.FormatOpenAIChat)
-	}
-	if reason != "lowest_cost" {
-		t.Fatalf("reason=%q want=%q", reason, "lowest_cost")
-	}
-	if cost != 3 {
-		t.Fatalf("cost=%d want=%d", cost, 3)
-	}
-}
-
-func TestProviderConfig_SelectOutboundFormatForModel_AllowedOverridesDefault(t *testing.T) {
-	provider := ProviderConfig{
-		Protocols:         []string{"openai.chat", "anthropic.messages"},
-		DefaultProtocols: []string{"openai.chat"},
-		Endpoints: []EndpointConfig{
-			{URL: "https://anthropic.example.com", Protocols: []string{"anthropic.messages"}},
-			{URL: "https://openai.example.com", Protocols: []string{"openai.chat"}},
-		},
-		UpstreamModels: []UpstreamModelConfig{
-			{Model: "minimax-m3", AllowedProtocols: []string{"anthropic.messages"}}, // 覆写 default
 		},
 	}
 
@@ -753,9 +678,9 @@ func TestProviderConfig_SelectOutboundFormatForModel_AllowedOverridesDefault(t *
 		t.Fatalf("normalize inbound failed: %v", err)
 	}
 
-	got, reason, cost, err := provider.SelectOutboundFormatForModel(inbound, "minimax-m3")
+	got, reason, cost, err := provider.SelectOutboundFormat(inbound)
 	if err != nil {
-		t.Fatalf("SelectOutboundFormatForModel returned error: %v", err)
+		t.Fatalf("SelectOutboundFormat returned error: %v", err)
 	}
 	if got != codec.FormatAnthropicMessages {
 		t.Fatalf("format=%q want=%q", got, codec.FormatAnthropicMessages)
@@ -763,156 +688,38 @@ func TestProviderConfig_SelectOutboundFormatForModel_AllowedOverridesDefault(t *
 	if reason != "lowest_cost" {
 		t.Fatalf("reason=%q want=%q", reason, "lowest_cost")
 	}
-	if cost != 2 {
-		t.Fatalf("cost=%d want=%d", cost, 2)
+	if cost <= 0 {
+		t.Fatalf("cost=%d want > 0", cost)
 	}
 }
 
-func TestValidateForServe_RejectsDefaultProtocolsInvalidFormat(t *testing.T) {
-	cfg := &Config{
-		Inbound: InboundConfig{
-			Auth: AuthConfig{Keys: []KeyConfig{{Name: "default", Key: "k"}}},
+// 未登记模型保持无限制（入站直通）。
+func TestProviderConfig_SelectOutboundFormat_UnlistedWithoutDefault_Passthrough(t *testing.T) {
+	provider := ProviderConfig{
+		Protocols: []string{"openai.chat", "openai.responses"},
+		Endpoints: []EndpointConfig{
+			{URL: "https://example.com/chat/completions", Protocols: []string{"openai.chat"}},
+			{URL: "https://example.com/responses", Protocols: []string{"openai.responses"}},
 		},
-		Providers: ProvidersConfig{Items: map[string]ProviderConfig{
-			"mixed": {
-				Endpoint:         "https://api.example.com",
-				APIKey:           "sk-test",
-				Protocols:         []string{"openai.chat", "anthropic.messages"},
-				DefaultProtocols: []string{"unknown_format"},
-			},
-		}},
-		ModelGroups: []ModelGroupConfig{{Name: "glm", Model: "mixed/glm-5.2"}},
 	}
 
-	_, err := ValidateForServe(cfg)
-	if err == nil {
-		t.Fatal("expected validation error")
+	inbound, err := codec.NormalizeProviderFormat("openai.responses")
+	if err != nil {
+		t.Fatalf("normalize inbound failed: %v", err)
 	}
 
-	verr, ok := err.(ValidationError)
-	if !ok {
-		t.Fatalf("error type = %T, want ValidationError", err)
+	got, reason, cost, err := provider.SelectOutboundFormat(inbound)
+	if err != nil {
+		t.Fatalf("SelectOutboundFormat returned error: %v", err)
 	}
-	if len(verr.Issues) == 0 {
-		t.Fatal("expected at least one validation issue")
+	if got != codec.FormatOpenAIResponse {
+		t.Fatalf("format=%q want=%q", got, codec.FormatOpenAIResponse)
 	}
-	if verr.Issues[0].Path != "providers.mixed.default_protocols[0]" {
-		t.Fatalf("path=%q", verr.Issues[0].Path)
+	if reason != "passthrough" {
+		t.Fatalf("reason=%q want=%q", reason, "passthrough")
 	}
-}
-
-func TestValidateForServe_RejectsDefaultProtocolsNotReachable(t *testing.T) {
-	cfg := &Config{
-		Inbound: InboundConfig{
-			Auth: AuthConfig{Keys: []KeyConfig{{Name: "default", Key: "k"}}},
-		},
-		Providers: ProvidersConfig{Items: map[string]ProviderConfig{
-			"mixed": {
-				Endpoint: "https://api.example.com",
-				APIKey:   "sk-test",
-				Protocols: []string{"openai.chat", "anthropic.messages"},
-				Endpoints: []EndpointConfig{
-					{URL: "https://anthropic.example.com", Protocols: []string{"anthropic.messages"}},
-				},
-				DefaultProtocols: []string{"openai.chat"},
-			},
-		}},
-		ModelGroups: []ModelGroupConfig{{Name: "glm", Model: "mixed/glm-5.2"}},
-	}
-
-	_, err := ValidateForServe(cfg)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-
-	verr, ok := err.(ValidationError)
-	if !ok {
-		t.Fatalf("error type = %T, want ValidationError", err)
-	}
-	if len(verr.Issues) == 0 {
-		t.Fatal("expected at least one validation issue")
-	}
-	if verr.Issues[0].Path != "providers.mixed.default_protocols[0]" {
-		t.Fatalf("path=%q", verr.Issues[0].Path)
-	}
-	if verr.Issues[0].Message != `protocol "openai.chat" is not reachable by this provider endpoints` {
-		t.Fatalf("message=%q", verr.Issues[0].Message)
-	}
-}
-
-func TestValidateForServe_RejectsUpstreamModelAllowedProtocolOutsideProvider(t *testing.T) {
-	cfg := &Config{
-		Inbound: InboundConfig{
-			Auth: AuthConfig{Keys: []KeyConfig{{Name: "default", Key: "k"}}},
-		},
-		Providers: ProvidersConfig{Items: map[string]ProviderConfig{
-			"mixed": {
-				Endpoint: "https://api.example.com",
-				APIKey:   "sk-test",
-				Protocols: []string{"openai.chat"},
-				UpstreamModels: []UpstreamModelConfig{
-					{Model: "glm-5.2", AllowedProtocols: []string{"anthropic.messages"}},
-				},
-			},
-		}},
-		ModelGroups: []ModelGroupConfig{{Name: "glm", Model: "mixed/glm-5.2"}},
-	}
-
-	_, err := ValidateForServe(cfg)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-
-	verr, ok := err.(ValidationError)
-	if !ok {
-		t.Fatalf("error type = %T, want ValidationError", err)
-	}
-	if len(verr.Issues) == 0 {
-		t.Fatal("expected at least one validation issue")
-	}
-	if verr.Issues[0].Path != "providers.mixed.upstream_model[0].allowed_protocols[0]" {
-		t.Fatalf("path=%q", verr.Issues[0].Path)
-	}
-}
-
-func TestValidateForServe_RejectsUpstreamModelAllowedProtocolNotReachableByEndpoints(t *testing.T) {
-	cfg := &Config{
-		Inbound: InboundConfig{
-			Auth: AuthConfig{Keys: []KeyConfig{{Name: "default", Key: "k"}}},
-		},
-		Providers: ProvidersConfig{Items: map[string]ProviderConfig{
-			"mixed": {
-				Endpoint: "https://api.example.com",
-				APIKey:   "sk-test",
-				Protocols: []string{"openai.chat", "anthropic.messages"},
-				Endpoints: []EndpointConfig{
-					{URL: "https://anthropic.example.com", Protocols: []string{"anthropic.messages"}},
-				},
-				UpstreamModels: []UpstreamModelConfig{
-					{Model: "glm-5.2", AllowedProtocols: []string{"openai.chat"}},
-				},
-			},
-		}},
-		ModelGroups: []ModelGroupConfig{{Name: "glm", Model: "mixed/glm-5.2"}},
-	}
-
-	_, err := ValidateForServe(cfg)
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-
-	verr, ok := err.(ValidationError)
-	if !ok {
-		t.Fatalf("error type = %T, want ValidationError", err)
-	}
-	if len(verr.Issues) == 0 {
-		t.Fatal("expected at least one validation issue")
-	}
-	if verr.Issues[0].Path != "providers.mixed.upstream_model[0].allowed_protocols[0]" {
-		t.Fatalf("path=%q", verr.Issues[0].Path)
-	}
-	if verr.Issues[0].Message != "protocol \"openai.chat\" is not reachable by this provider endpoints" {
-		t.Fatalf("message=%q", verr.Issues[0].Message)
+	if cost != 0 {
+		t.Fatalf("cost=%d want=0", cost)
 	}
 }
 
@@ -926,7 +733,15 @@ func TestProviderConfig_SupportsEmbeddingProtocol(t *testing.T) {
 			name: "top-level protocol ollama.embed",
 			provider: ProviderConfig{
 				Protocols: []string{"ollama.embed"},
-				Endpoint: "http://localhost:11434",
+				Endpoint:  "http://localhost:11434",
+			},
+			want: true,
+		},
+		{
+			name: "top-level protocol openai.embeddings",
+			provider: ProviderConfig{
+				Protocols: []string{"openai.embeddings"},
+				Endpoint:  "http://localhost:18080",
 			},
 			want: true,
 		},
@@ -941,10 +756,20 @@ func TestProviderConfig_SupportsEmbeddingProtocol(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "endpoints with openai.embeddings protocol",
+			provider: ProviderConfig{
+				Endpoint: "http://localhost:18080",
+				Endpoints: []EndpointConfig{
+					{URL: "http://localhost:18080", Protocols: []string{"openai.embeddings"}},
+				},
+			},
+			want: true,
+		},
+		{
 			name: "top-level protocol is openai",
 			provider: ProviderConfig{
 				Protocols: []string{"openai.chat"},
-				Endpoint: "https://api.openai.com/v1",
+				Endpoint:  "https://api.openai.com/v1",
 			},
 			want: false,
 		},
@@ -977,58 +802,6 @@ func TestProviderConfig_SupportsEmbeddingProtocol(t *testing.T) {
 	}
 }
 
-func TestProviderConfig_SupportsOllamaChatProtocol(t *testing.T) {
-	tests := []struct {
-		name     string
-		provider ProviderConfig
-		want     bool
-	}{
-		{
-			name:     "top-level protocol ollama.chat",
-			provider: ProviderConfig{Protocols: []string{"ollama.chat"}, Endpoint: "http://localhost:11434"},
-			want:     true,
-		},
-		{
-			name: "endpoint-level protocol ollama.chat",
-			provider: ProviderConfig{
-				Endpoints: []EndpointConfig{
-					{URL: "http://localhost:11434", Protocols: []string{"ollama.chat"}},
-				},
-			},
-			want: true,
-		},
-		{
-			name:     "openai protocol is not ollama.chat",
-			provider: ProviderConfig{Protocols: []string{"openai.chat"}, Endpoint: "https://api.openai.com/v1"},
-			want:     false,
-		},
-		{
-			name:     "top-level mixed protocol still reports ollama.chat support",
-			provider: ProviderConfig{Protocols: []string{"openai.chat", "ollama.chat"}, Endpoint: "http://localhost:11434"},
-			want:     true,
-		},
-		{
-			name:     "ollama.embed is not ollama.chat",
-			provider: ProviderConfig{Protocols: []string{"ollama.embed"}, Endpoint: "http://localhost:11434"},
-			want:     false,
-		},
-		{
-			name:     "no protocol",
-			provider: ProviderConfig{Endpoint: "http://localhost:11434"},
-			want:     false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.provider.SupportsOllamaChatProtocol()
-			if got != tt.want {
-				t.Errorf("SupportsOllamaChatProtocol() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestProviderConfig_GetEndpoint_OllamaChat(t *testing.T) {
 	provider := ProviderConfig{
 		Endpoint: "http://default:11434",
@@ -1041,68 +814,6 @@ func TestProviderConfig_GetEndpoint_OllamaChat(t *testing.T) {
 	want := "http://ollama-chat:11434"
 	if got != want {
 		t.Errorf("GetEndpoint(ollama.chat) = %q, want %q", got, want)
-	}
-}
-
-func TestProviderConfig_GetEmbeddingEndpoint(t *testing.T) {
-	tests := []struct {
-		name     string
-		provider ProviderConfig
-		want     string
-	}{
-		{
-			name: "first endpoints with ollama.embed protocol",
-			provider: ProviderConfig{
-				Endpoint: "http://default:11434",
-				Endpoints: []EndpointConfig{
-					{URL: "http://endpoint1:11434", Protocols: []string{"ollama.embed"}},
-					{URL: "http://endpoint2:11434", Protocols: []string{"ollama.embed"}},
-				},
-			},
-			want: "http://endpoint1:11434",
-		},
-		{
-			name: "fallback to endpoint field when no ollama.embed in endpoints",
-			provider: ProviderConfig{
-				Endpoint: "http://default:11434",
-				Endpoints: []EndpointConfig{
-					{URL: "http://other:11434", Protocols: []string{"anthropic.messages"}},
-				},
-			},
-			want: "http://default:11434",
-		},
-		{
-			name: "endpoint field when endpoints empty",
-			provider: ProviderConfig{
-				Endpoint:  "http://default:11434",
-				Endpoints: []EndpointConfig{},
-			},
-			want: "http://default:11434",
-		},
-		{
-			name: "top-level endpoint field no endpoints",
-			provider: ProviderConfig{
-				Endpoint: "http://default:11434",
-			},
-			want: "http://default:11434",
-		},
-		{
-			name: "empty when no valid endpoint",
-			provider: ProviderConfig{
-				Endpoint:  "",
-				Endpoints: []EndpointConfig{},
-			},
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.provider.GetEmbeddingEndpoint()
-			if got != tt.want {
-				t.Errorf("GetEmbeddingEndpoint() = %q, want %q", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -1177,7 +888,6 @@ providers:
 		})
 	}
 }
-
 
 func TestParseTimeRange(t *testing.T) {
 	tests := []struct {
@@ -1413,6 +1123,8 @@ func TestIsInDisabledTimeRange(t *testing.T) {
 	}
 }
 
+// TestProviderConfig_DisabledTimeRangesYAML 验证 providers.*.disabled_time_ranges 被硬拒绝：
+// 时段已迁移到 top-level rules 的 action，Load 失败并点名路径，且不提示 migrate-rules。
 func TestProviderConfig_DisabledTimeRangesYAML(t *testing.T) {
 	yaml := `
 server:
@@ -1442,23 +1154,15 @@ model_groups:
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	cfg, err := Load(configPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected load error for providers.openai.disabled_time_ranges")
 	}
-
-	pc := cfg.Providers.Items["openai"]
-	if len(pc.DisabledTimeRanges) != 3 {
-		t.Fatalf("expected 3 disabled_time_ranges, got %d: %v", len(pc.DisabledTimeRanges), pc.DisabledTimeRanges)
+	if !strings.Contains(err.Error(), "providers.openai.disabled_time_ranges") {
+		t.Fatalf("error = %q, want providers.openai.disabled_time_ranges path", err.Error())
 	}
-	if pc.DisabledTimeRanges[0] != "09:00-12:00" {
-		t.Errorf("range[0] = %q, want %q", pc.DisabledTimeRanges[0], "09:00-12:00")
-	}
-	if pc.DisabledTimeRanges[1] != "14:00-18:00" {
-		t.Errorf("range[1] = %q, want %q", pc.DisabledTimeRanges[1], "14:00-18:00")
-	}
-	if pc.DisabledTimeRanges[2] != "23:00-02:00" {
-		t.Errorf("range[2] = %q, want %q", pc.DisabledTimeRanges[2], "23:00-02:00")
+	if strings.Contains(err.Error(), "migrate-rules") {
+		t.Fatalf("error = %q, must not suggest migrate-rules for disabled_time_ranges", err.Error())
 	}
 }
 
@@ -1810,6 +1514,253 @@ redirect:
 				if got != tt.wantExpos[idx] {
 					t.Errorf("redirect[%d] exposure = %q, want %q", i, got, tt.wantExpos[idx])
 				}
+			}
+		})
+	}
+}
+
+// ========== Remote Bridge YAML 加载测试 ==========
+
+func TestRemoteBridgeYAMLLoading(t *testing.T) {
+	yaml := `
+server:
+  listen: ":18000"
+inbound:
+  auth:
+    keys:
+      - name: "test"
+        key: "sk-test"
+providers:
+  xai-bridge:
+    endpoint: "http://bridge.local:8080"
+    api_key: ""
+    protocols: ["openai.responses"]
+    remote_bridge:
+      enabled: true
+      provider: "xai-oauth"
+      token: "secret-bridge-token"
+model_groups:
+  - name: "grok"
+    model: "xai-bridge/grok"
+`
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(yaml), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	pc := cfg.Providers.Items["xai-bridge"]
+	if pc.RemoteBridge == nil {
+		t.Fatal("expected RemoteBridge to be non-nil")
+	}
+	if !pc.RemoteBridge.Enabled {
+		t.Error("expected RemoteBridge.Enabled to be true")
+	}
+	if pc.RemoteBridge.Provider != "xai-oauth" {
+		t.Errorf("expected provider 'xai-oauth', got %q", pc.RemoteBridge.Provider)
+	}
+	if pc.RemoteBridge.Token != "secret-bridge-token" {
+		t.Errorf("expected token 'secret-bridge-token', got %q", pc.RemoteBridge.Token)
+	}
+	if pc.APIKey != "" {
+		t.Errorf("expected empty api_key, got %q", pc.APIKey)
+	}
+}
+
+func TestRemoteBridgeYAMLOmittedBlock(t *testing.T) {
+	// 没有配置 remote_bridge 块的普通 provider，RemoteBridge 应为 nil
+	yaml := `
+server:
+  listen: ":18000"
+inbound:
+  auth:
+    keys:
+      - name: "test"
+        key: "sk-test"
+providers:
+  openai:
+    endpoint: "https://api.openai.com/v1"
+    api_key: "sk-xxx"
+    protocols: ["openai.chat"]
+model_groups:
+  - name: "gpt-4"
+    model: "openai/gpt-4"
+`
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(yaml), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	pc := cfg.Providers.Items["openai"]
+	if pc.RemoteBridge != nil {
+		t.Errorf("expected RemoteBridge to be nil for normal provider, got %+v", pc.RemoteBridge)
+	}
+}
+
+// ========== OpenAI Embeddings Protocol Tests ==========
+
+func TestProviderConfig_GetEmbeddingProtocol(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider ProviderConfig
+		want     string
+		wantErr  bool
+	}{
+		{
+			name: "single ollama.embed protocol",
+			provider: ProviderConfig{
+				Protocols: []string{"ollama.embed"},
+				Endpoint:  "http://localhost:11434",
+			},
+			want:    "ollama.embed",
+			wantErr: false,
+		},
+		{
+			name: "single openai.embeddings protocol",
+			provider: ProviderConfig{
+				Protocols: []string{"openai.embeddings"},
+				Endpoint:  "http://localhost:18080",
+			},
+			want:    "openai.embeddings",
+			wantErr: false,
+		},
+		{
+			name: "endpoint with openai.embeddings",
+			provider: ProviderConfig{
+				Endpoint: "http://localhost:18080",
+				Endpoints: []EndpointConfig{
+					{URL: "http://localhost:18080", Protocols: []string{"openai.embeddings"}},
+				},
+			},
+			want:    "openai.embeddings",
+			wantErr: false,
+		},
+		{
+			name: "no embedding protocol",
+			provider: ProviderConfig{
+				Protocols: []string{"openai.chat"},
+				Endpoint:  "https://api.openai.com/v1",
+			},
+			want:    "",
+			wantErr: true,
+		},
+		{
+			name: "multiple embedding protocols",
+			provider: ProviderConfig{
+				Protocols: []string{"ollama.embed", "openai.embeddings"},
+				Endpoint:  "http://localhost:11434",
+			},
+			want:    "",
+			wantErr: true,
+		},
+		{
+			name: "case insensitive protocol matching",
+			provider: ProviderConfig{
+				Protocols: []string{"OpenAI.Embeddings"},
+				Endpoint:  "http://localhost:18080",
+			},
+			want:    "openai.embeddings",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.provider.GetEmbeddingProtocol()
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("GetEmbeddingProtocol() expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("GetEmbeddingProtocol() unexpected error: %v", err)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("GetEmbeddingProtocol() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProviderConfig_GetEmbeddingEndpointByProtocol(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider ProviderConfig
+		protocol string
+		want     string
+	}{
+		{
+			name: "endpoint with openai.embeddings",
+			provider: ProviderConfig{
+				Endpoint: "http://default:18080",
+				Endpoints: []EndpointConfig{
+					{URL: "http://openai-embed:18080", Protocols: []string{"openai.embeddings"}},
+				},
+			},
+			protocol: "openai.embeddings",
+			want:     "http://openai-embed:18080",
+		},
+		{
+			name: "fallback to endpoint field",
+			provider: ProviderConfig{
+				Endpoint: "http://localhost:18080",
+			},
+			protocol: "openai.embeddings",
+			want:     "http://localhost:18080",
+		},
+		{
+			name: "endpoint with ollama.embed",
+			provider: ProviderConfig{
+				Endpoint: "http://default:11434",
+				Endpoints: []EndpointConfig{
+					{URL: "http://ollama:11434", Protocols: []string{"ollama.embed"}},
+				},
+			},
+			protocol: "ollama.embed",
+			want:     "http://ollama:11434",
+		},
+		{
+			name: "empty when no matching endpoint",
+			provider: ProviderConfig{
+				Endpoints: []EndpointConfig{
+					{URL: "http://other:11434", Protocols: []string{"openai.chat"}},
+				},
+			},
+			protocol: "openai.embeddings",
+			want:     "",
+		},
+		{
+			name: "case insensitive matching",
+			provider: ProviderConfig{
+				Endpoints: []EndpointConfig{
+					{URL: "http://embed:18080", Protocols: []string{"OpenAI.Embeddings"}},
+				},
+			},
+			protocol: "openai.embeddings",
+			want:     "http://embed:18080",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.provider.GetEmbeddingEndpointByProtocol(tt.protocol)
+			if got != tt.want {
+				t.Errorf("GetEmbeddingEndpointByProtocol(%q) = %q, want %q", tt.protocol, got, tt.want)
 			}
 		})
 	}

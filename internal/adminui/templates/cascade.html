@@ -1,0 +1,128 @@
+{{ define "title" }}Cascade{{ end }}
+
+{{ define "styles" }}
+  .cascade-card {
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    padding: 18px 20px;
+    margin-bottom: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .cascade-card-title {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .cascade-url {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--accent);
+    word-break: break-all;
+  }
+
+  .cascade-internal { opacity: 0.55; }
+{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <div class="page-title">Cascade</div>
+    <div class="page-subtitle">Connect this gateway to another oh-my-api instance over WSS</div>
+  </div>
+</div>
+
+{{ template "draft-bar" }}
+
+<div class="cascade-card">
+  <div class="cascade-card-title">Role</div>
+  <div id="cascadeModeWrap"></div>
+  <span class="form-hint">Hub accepts an outbound WSS connection from a spoke; Spoke dials a hub. The two roles are mutually exclusive.</span>
+</div>
+
+<div id="hubSection" style="display:none">
+  <div class="cascade-card">
+    <div class="cascade-card-title">Hub Configuration</div>
+    <div class="form-group">
+      <label class="form-label">Provider Name <span class="required">*</span></label>
+      <input class="form-input" id="hubProviderName" type="text" placeholder="corp-dev">
+      <span class="form-hint">Must be a new provider name. Existing HTTP providers cannot be converted into a hub.</span>
+      <span class="form-error" id="hubProviderNameErr"></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Shared Token <span class="required">*</span></label>
+      <input class="form-input" id="hubToken" type="text" autocomplete="new-password">
+      <span class="form-hint">Shared secret used to authenticate the spoke connection.</span>
+      <span class="form-error" id="hubTokenErr"></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Protocols</label>
+      <div class="chips" id="hubProtocols"></div>
+      <span class="form-hint">Cascade providers have no HTTP endpoint and use a WebSocket session. The three inbound protocols are fixed.</span>
+    </div>
+  </div>
+</div>
+
+<div id="spokeSection" style="display:none">
+  <div class="cascade-card">
+    <div class="cascade-card-title">Spoke Configuration</div>
+    <div class="form-group">
+      <label class="form-label">Hub Origin <span class="required">*</span></label>
+      <input class="form-input" id="spokeHub" type="text" placeholder="https://api.example.com" oninput="updateSpokeConnUrl()">
+      <span class="form-hint">Origin only (http/https, host[:port]); no ws(s)://, path, query, fragment, or userinfo.</span>
+      <span class="form-error" id="spokeHubErr"></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Shared Token <span class="required">*</span></label>
+      <input class="form-input" id="spokeToken" type="text" autocomplete="new-password">
+      <span class="form-hint">Shared secret used to authenticate the spoke connection.</span>
+      <span class="form-error" id="spokeTokenErr"></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Peer Provider <span class="required">*</span></label>
+      <select class="form-select" id="spokePeer" data-dropdown>
+        <option value="">Select provider...</option>
+      </select>
+      <span class="form-hint">Existing provider skipped during cascade jobs to prevent loops.</span>
+      <span class="form-error" id="spokePeerErr"></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Connection URL</label>
+      <div class="cascade-url" id="spokeConnUrl">—</div>
+      <span class="form-hint">Derived from the hub origin.</span>
+    </div>
+  </div>
+</div>
+
+<div id="publishedSection" style="display:none">
+  <div class="cascade-card">
+    <div class="cascade-card-title">Published Models</div>
+    <div class="form-hint">All public and hidden model groups and redirects are synced to the hub with their names and context length. Internal entries are not published, and hub-side groups/redirects are not auto-created.</div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+      <input type="checkbox" id="showInternalModels" onchange="renderPublishedModels()"> Show excluded internal models
+    </label>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Model Name</th>
+          <th>Type</th>
+          <th>Exposure</th>
+          <th>Context Length</th>
+        </tr></thead>
+        <tbody id="publishedTableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script src="/admin/static/cascade.js"></script>
+{{ end }}

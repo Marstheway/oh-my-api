@@ -1,0 +1,190 @@
+/* 协议徽章前景色（背景/边框由 color-mix 自动推导） */
+  :root {
+    --proto-openai: #0d9488;
+    --proto-anthropic: #b45309;
+    --proto-responses: #0d9488;
+    /* legacy: ollama.* Admin UI 已停止更新、逐步淘汰，仅保留已有配置展示色 */
+    --proto-ollama: #be185d;
+  }
+  :root[data-theme="dark"] {
+    --proto-openai: #34d399;
+    --proto-anthropic: #fbbf24;
+    --proto-responses: #34d399;
+    --proto-ollama: #f472b6;
+  }
+
+  /* ═══ Provider Grid ═══ */
+  .provider-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap: 1px;
+    background: var(--border-default);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+
+  .provider-card {
+    background: var(--bg-surface);
+    padding: 20px;
+    display: flex; flex-direction: column;
+    gap: 10px;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    position: relative;
+  }
+
+  .provider-card:hover { background: var(--bg-hover); }
+  .provider-card:hover .card-actions { opacity: 1; }
+
+  .card-header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 12px;
+  }
+
+  .card-title {
+    font-family: var(--font-mono); font-size: 15px; font-weight: 500;
+    color: var(--text-primary);
+    word-break: break-word;
+  }
+
+  .card-actions {
+    display: flex; gap: 2px; opacity: 0;
+    transition: opacity var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .card-info-row {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .card-info-row .label { color: var(--text-secondary); min-width: 60px; }
+
+  .card-meta {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin-top: 4px;
+    min-height: 26px;
+    align-content: flex-start;
+  }
+
+  /* ═══ Protocol Badges ═══ */
+  .protocol-badge-openai { background: color-mix(in srgb, var(--proto-openai) 12%, transparent); color: var(--proto-openai); border: 1px solid color-mix(in srgb, var(--proto-openai) 25%, transparent); }
+  .protocol-badge-anthropic { background: color-mix(in srgb, var(--proto-anthropic) 12%, transparent); color: var(--proto-anthropic); border: 1px solid color-mix(in srgb, var(--proto-anthropic) 25%, transparent); }
+  .protocol-badge-responses { background: color-mix(in srgb, var(--proto-responses) 12%, transparent); color: var(--proto-responses); border: 1px solid color-mix(in srgb, var(--proto-responses) 25%, transparent); }
+  /* legacy ollama.* badge — display only for existing configs */
+  .protocol-badge-ollama { background: color-mix(in srgb, var(--proto-ollama) 12%, transparent); color: var(--proto-ollama); border: 1px solid color-mix(in srgb, var(--proto-ollama) 25%, transparent); }
+
+
+
+  /* ═══ Table Editor ═══ */
+  .table-editor {
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+  }
+
+  .table-editor-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-default);
+    background: var(--bg-elevated);
+  }
+
+  .table-editor-header span {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+    flex: 1;
+  }
+
+  .table-editor-header .w-protocols { flex: 1 1 280px; min-width: 200px; }
+  .table-editor-header .w-auto { flex: 0 0 auto; min-width: 0; width: 28px; }
+
+  .table-editor-row {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border-default);
+  }
+
+  .table-editor-row:last-child { border-bottom: none; }
+
+  .table-editor-row .form-input { flex: 1; padding: 5px 8px; }
+  .table-editor-row .btn-icon.w-auto { flex: 0 0 auto; width: 28px; height: 24px; }
+
+  .endpoint-protocol-chips {
+    flex: 1 1 280px;
+    min-width: 200px;
+    padding: 2px 0;
+  }
+  .section-badge {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--text-muted);
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
+    border-radius: 999px;
+    padding: 1px 8px;
+    margin-left: 6px;
+  }
+  .form-section-label {
+    font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px;
+    margin: 4px 0 8px;
+  }
+
+  .table-editor-add {
+    padding: 6px 10px;
+    background: var(--bg-surface);
+  }
+
+  /* ═══ Collapsible Panel ═══ */
+  .collapse-toggle {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 0; cursor: pointer;
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
+    transition: color var(--transition-fast);
+    border: none; background: none;
+    width: 100%;
+  }
+
+  .collapse-toggle:hover { color: var(--text-primary); }
+
+  .collapse-icon {
+    width: 12px; height: 12px;
+    transition: transform var(--transition-fast);
+  }
+
+  .collapse-toggle.collapsed .collapse-icon { transform: rotate(-90deg); }
+
+  .collapse-content {
+    display: flex; flex-direction: column; gap: 12px;
+    overflow: hidden; max-height: 2000px;
+    transition: max-height var(--transition-normal);
+  }
+
+  .collapse-toggle.collapsed + .collapse-content {
+    max-height: 0;
+  }
+
+  /* ═══ Form Section ═══ */
+  .form-section {
+    border-top: 1px solid var(--border-default);
+    padding-top: 16px;
+    margin-top: 4px;
+  }
+
+  .form-section-title {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 500;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;
+    margin-bottom: 12px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+
+  /* ═══ Modal Width Override ═══ */
+  .modal { max-width: 960px; }
+
+  /* ═══ Responsive ═══ */
+  @media (max-width: 768px) {
+    .provider-grid { grid-template-columns: 1fr; }
+    .form-row { flex-direction: column; }
+  }

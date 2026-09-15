@@ -37,10 +37,10 @@ func TestFailoverStrategy_SingleProvider_Success(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -90,10 +90,10 @@ func TestFailoverStrategy_FirstFail_SecondSuccess(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, failSrv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
@@ -142,10 +142,10 @@ func TestFailoverStrategy_AllFail(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
@@ -199,7 +199,7 @@ func TestFailoverStrategy_SkipUnhealthy(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 
@@ -208,7 +208,7 @@ func TestFailoverStrategy_SkipUnhealthy(t *testing.T) {
 	h.ReportFailure(health.MakeHealthKey("unhealthy", ""))
 	h.ReportFailure(health.MakeHealthKey("unhealthy", ""))
 
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, unhealthySrv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, healthySrv.URL, nil)
@@ -246,7 +246,7 @@ func TestFailoverStrategy_ForceTryWhenAllUnhealthy(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 
@@ -255,7 +255,7 @@ func TestFailoverStrategy_ForceTryWhenAllUnhealthy(t *testing.T) {
 	h.ReportFailure(health.MakeHealthKey("test", ""))
 	h.ReportFailure(health.MakeHealthKey("test", ""))
 
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -300,10 +300,10 @@ func TestFailoverStrategy_ProtocolGranularityIsolation(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	respKey := health.MakeHealthKey("token-hub", "openai.response")
 	h.ReportFailure(respKey)
@@ -342,10 +342,10 @@ func TestFailoverStrategy_ProbeReadFailureMarksProviderUnhealthy(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(1, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	_, err := strategy.Execute(context.Background(), []Task{{
@@ -403,10 +403,10 @@ func TestFailoverStrategy_PrefillTimeoutRetriesNextProvider(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 50*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 50*time.Millisecond, 0, 0)
 
 	slowReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, slowSrv.URL, nil)
 	fastReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, fastSrv.URL, nil)
@@ -432,6 +432,183 @@ func TestFailoverStrategy_PrefillTimeoutRetriesNextProvider(t *testing.T) {
 	}
 }
 
+// TestFailoverStrategy_StreamHeaderHangRetriesNextProvider 复现现网：
+// 第一家 accept 后永不回 header → 旧逻辑卡满 server.timeout；现应在 prefill 预算内切到第二家。
+func TestFailoverStrategy_StreamHeaderHangRetriesNextProvider(t *testing.T) {
+	hangStarted := make(chan struct{}, 1)
+	hangSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case hangStarted <- struct{}{}:
+		default:
+		}
+		// 永不写响应头：模拟 opencode-go 一类假死
+		<-r.Context().Done()
+	}))
+	defer hangSrv.Close()
+
+	fastBody := "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n" +
+		"data: [DONE]\n\n"
+	fastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fastBody))
+	}))
+	defer fastSrv.Close()
+
+	providers := map[string]config.ProviderConfig{
+		"hang": {
+			Endpoint:  hangSrv.URL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+		"fast": {
+			Endpoint:  fastSrv.URL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+	}
+
+	// Client.Timeout 故意很大，证明不是靠全局 timeout 救命
+	client := provider.NewClient(providers, 30*time.Second, 0, 0)
+	rl := ratelimit.NewManager(providers)
+	h := health.NewChecker(3, 30*time.Second)
+	prefill := 80 * time.Millisecond
+	strategy := NewFailoverStrategy(client, rl, h, prefill, 0, 0)
+
+	hangReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, hangSrv.URL, nil)
+	fastReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, fastSrv.URL, nil)
+
+	start := time.Now()
+	result, err := strategy.Execute(context.Background(), []Task{
+		{ProviderName: "hang", Provider: providers["hang"], UpstreamModel: "model", Stream: true, Request: hangReq},
+		{ProviderName: "fast", Provider: providers["fast"], UpstreamModel: "model", Stream: true, Request: fastReq},
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	defer result.Response.Body.Close()
+
+	if result.Winner != "fast" {
+		t.Fatalf("Winner = %q, want fast", result.Winner)
+	}
+	// 应远小于 Client.Timeout(30s)；给一点调度余量
+	if elapsed > 2*time.Second {
+		t.Fatalf("failover took %v, want roughly prefill budget (~%v), not global timeout", elapsed, prefill)
+	}
+	if elapsed < prefill/2 {
+		t.Fatalf("failover took %v, suspiciously faster than prefill %v (hang may not have been attempted)", elapsed, prefill)
+	}
+	select {
+	case <-hangStarted:
+	default:
+		t.Fatal("hang provider was never contacted")
+	}
+}
+
+// TestFailoverStrategy_NonStreamHangRetriesNextProvider 非流式 header hang 应在 non_stream_timeout 内切下一家，
+// 且不得把 context.DeadlineExceeded 误判为整单 abort。
+func TestFailoverStrategy_NonStreamHangRetriesNextProvider(t *testing.T) {
+	hangSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer hangSrv.Close()
+
+	fastBody := `{"id":"fast","choices":[{"message":{"role":"assistant","content":"ok"}}]}`
+	fastSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fastBody))
+	}))
+	defer fastSrv.Close()
+
+	providers := map[string]config.ProviderConfig{
+		"hang": {
+			Endpoint:  hangSrv.URL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+		"fast": {
+			Endpoint:  fastSrv.URL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+	}
+
+	client := provider.NewClient(providers, 30*time.Second, 0, 0)
+	rl := ratelimit.NewManager(providers)
+	h := health.NewChecker(3, 30*time.Second)
+	nonStream := 80 * time.Millisecond
+	// prefill 故意很短：若误用 prefill 会误杀；本 case Stream=false 应走 nonStream
+	strategy := NewFailoverStrategy(client, rl, h, 10*time.Millisecond, 0, nonStream)
+
+	hangReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, hangSrv.URL, nil)
+	fastReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, fastSrv.URL, nil)
+
+	start := time.Now()
+	result, err := strategy.Execute(context.Background(), []Task{
+		{ProviderName: "hang", Provider: providers["hang"], UpstreamModel: "model", Stream: false, Request: hangReq},
+		{ProviderName: "fast", Provider: providers["fast"], UpstreamModel: "model", Stream: false, Request: fastReq},
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Execute failed: %v (must not abort whole failover on attempt timeout)", err)
+	}
+	defer result.Response.Body.Close()
+
+	if result.Winner != "fast" {
+		t.Fatalf("Winner = %q, want fast", result.Winner)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("failover took %v, want roughly non_stream budget (~%v)", elapsed, nonStream)
+	}
+	if elapsed < nonStream/2 {
+		t.Fatalf("failover took %v, want at least ~%v spent on hang provider", elapsed, nonStream)
+	}
+}
+
+// TestFailoverStrategy_NonStreamSlowOK 非流式慢于 prefill 但仍小于 non_stream 时应成功，不能被 30s 档误杀。
+func TestFailoverStrategy_NonStreamSlowOK(t *testing.T) {
+	delay := 60 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(delay)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"slow-ok"}`))
+	}))
+	defer srv.Close()
+
+	providers := map[string]config.ProviderConfig{
+		"slow": {
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+	}
+	client := provider.NewClient(providers, 30*time.Second, 0, 0)
+	rl := ratelimit.NewManager(providers)
+	h := health.NewChecker(3, 30*time.Second)
+	// prefill 极短；non_stream 足够覆盖 delay
+	strategy := NewFailoverStrategy(client, rl, h, 10*time.Millisecond, 0, 200*time.Millisecond)
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
+	result, err := strategy.Execute(context.Background(), []Task{
+		{ProviderName: "slow", Provider: providers["slow"], UpstreamModel: "model", Stream: false, Request: req},
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	defer result.Response.Body.Close()
+	if result.Winner != "slow" {
+		t.Fatalf("Winner = %q, want slow", result.Winner)
+	}
+}
+
 // TestFailoverStrategy_Timeout 超时中断
 func TestFailoverStrategy_Timeout(t *testing.T) {
 	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -451,10 +628,10 @@ func TestFailoverStrategy_Timeout(t *testing.T) {
 	}
 
 	// 使用较短的超时
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, slowSrv.URL, nil)
 	tasks := []Task{
@@ -486,10 +663,10 @@ func TestFailoverStrategy_ContextCancel(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, slowSrv.URL, nil)
 	tasks := []Task{
@@ -510,10 +687,10 @@ func TestFailoverStrategy_ContextCancel(t *testing.T) {
 // TestFailoverStrategy_NoTasks 空 tasks 返回 ErrNoTasks
 func TestFailoverStrategy_NoTasks(t *testing.T) {
 	providers := map[string]config.ProviderConfig{}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	_, err := strategy.Execute(context.Background(), nil)
 	if err != ErrNoTasks {
@@ -554,13 +731,13 @@ func TestFailoverStrategy_RateLimitSkip(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	// 消耗限流令牌
-	rl.Allow("rateLimited", "model")
+	rl.Allow("rateLimited", "model", 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, rateLimitedSrv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
@@ -617,10 +794,10 @@ func TestFailover_LogsProviderUpstreamPair(t *testing.T) {
 	slog.SetDefault(logger)
 	defer slog.SetDefault(old)
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, failSrv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
@@ -688,10 +865,10 @@ func TestFailoverStrategy_ContentFilterRetriesToSecondSuccess(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	softReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv.URL, nil)
 	successReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
@@ -778,10 +955,10 @@ func TestFailoverStrategy_StreamSoftFailureClosesAbandonedBodyOnSuccess(t *testi
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -853,10 +1030,10 @@ func TestFailoverStrategy_SoftFailureReturnsLaterHardFailureAndKeepsHealth(t *te
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	softReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv.URL, nil)
 	hardReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, hardSrv.URL, nil)
@@ -913,13 +1090,13 @@ func TestFailoverStrategy_SoftFailureWithRateLimitedFallbackReturnsSoft(t *testi
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	for i := 0; i < 10; i++ {
-		if !rl.Allow("rate-limited", "model") {
+		if !rl.Allow("rate-limited", "model", 0) {
 			t.Fatalf("failed to exhaust rate-limit token at iteration %d", i)
 		}
 	}
@@ -976,10 +1153,10 @@ func TestFailoverStrategy_SoftFailureReturnsLastSoftFailureResponse(t *testing.T
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv1.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv2.URL, nil)
@@ -1024,10 +1201,10 @@ func TestFailoverStrategy_SoftFailureDoesNotResetOrIncreaseHealthCount(t *testin
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 	healthKey := health.MakeHealthKey("soft-neutral", "")
 
 	h.ReportFailure(healthKey)
@@ -1098,13 +1275,13 @@ func TestFailoverStrategy_SoftFailurePhaseTwoDoesNotRetryExecutedProvider(t *tes
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 	h.ReportFailure(health.MakeHealthKey("forced", ""))
 	h.ReportFailure(health.MakeHealthKey("forced", ""))
 	h.ReportFailure(health.MakeHealthKey("forced", ""))
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	softReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv.URL, nil)
 	forcedReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, forcedSrv.URL, nil)
@@ -1161,10 +1338,10 @@ func TestFailoverStrategy_AttemptMetrics_402ThenSuccess(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, failSrv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
@@ -1186,7 +1363,7 @@ func TestFailoverStrategy_AttemptMetrics_402ThenSuccess(t *testing.T) {
 
 	// 验证第一个 provider 的 402 硬失败 attempt 指标
 	failCount := testutil.ToFloat64(metrics.GetProviderAttemptTotal().WithLabelValues(
-		"failover", "fail", "fail-model", "", "openai", "hard_failure", failureReasonTokenHubQuota, "402",
+		"failover", "fail", "fail-model", "", "openai", "hard_failure", failureReasonQuotaExceeded, "402",
 	))
 	if failCount != 1 {
 		t.Errorf("expected 1 hard_failure attempt for fail provider, got %f", failCount)
@@ -1220,10 +1397,10 @@ func TestFailoverStrategy_AttemptMetrics_SoftFailure(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv.URL, nil)
 	tasks := []Task{
@@ -1249,13 +1426,13 @@ func TestFailoverStrategy_AttemptMetrics_SoftFailure(t *testing.T) {
 	}
 }
 
-// TestFailoverStrategy_TokenHubQuotaError_ClassifyAndMarkUnhealthy 验证 TokenHub 额度错误
-// 被正确分类为 hard_failure+tokenhub_quota_exceeded 并标记 provider 为 1 小时不健康
-func TestFailoverStrategy_TokenHubQuotaError_ClassifyAndMarkUnhealthy(t *testing.T) {
+// TestFailoverStrategy_TencentQuotaError_ClassifyAndMarkUnhealthy 验证腾讯云额度错误
+// 被正确分类为 hard_failure+quota_exceeded 并标记 provider 不健康
+func TestFailoverStrategy_TencentQuotaError_ClassifyAndMarkUnhealthy(t *testing.T) {
 	h := health.NewChecker(3, 30*time.Second)
 	healthKey := health.MakeHealthKey("token-hub", "openai")
 
-	// 构造一个模拟 TokenHub 额度错误的响应
+	// 构造一个模拟腾讯云额度错误的响应
 	resp := newSchedulerHTTPResponse(http.StatusBadRequest, "application/json",
 		`{"error":{"code":"401007","message":"quota exceeded"}}`)
 	resp.Request = &http.Request{
@@ -1266,24 +1443,21 @@ func TestFailoverStrategy_TokenHubQuotaError_ClassifyAndMarkUnhealthy(t *testing
 		URL: mustParseURL("https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions"),
 	}
 
-	// 模拟策略内部的处理流程：parseResponse -> applyTokenHubClassification -> applyHealthAction
-	result, err := parseResponse(resp, "token-hub", "model", "openai", 500*time.Millisecond, 0)
+	// 模拟策略内部的处理流程：parseResponse -> applyProviderErrorClassification -> applyHealthAction
+	result, err := parseResponse(resp, "token-hub", "model", "openai", 500*time.Millisecond, 0, time.Now())
 	if err != nil {
 		t.Fatalf("parseResponse failed: %v", err)
 	}
-	applyTokenHubClassification(result, resp, taskReq)
+	applyProviderErrorClassification(result, resp, taskReq)
 
 	if result.FailureKind != FailureKindHard {
 		t.Fatalf("FailureKind = %q, want %q", result.FailureKind, FailureKindHard)
 	}
-	if result.FailureReason != failureReasonTokenHubQuota {
-		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonTokenHubQuota)
+	if result.FailureReason != failureReasonQuotaExceeded {
+		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonQuotaExceeded)
 	}
-	if result.HealthActionInfo.Action != HealthActionMarkUnhealthy {
-		t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionMarkUnhealthy)
-	}
-	if result.HealthActionInfo.CooldownOverride != quotaCooldown {
-		t.Fatalf("CooldownOverride = %v, want %v", result.HealthActionInfo.CooldownOverride, quotaCooldown)
+	if result.HealthActionInfo.Action != HealthActionMarkUnhealthyQuota {
+		t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionMarkUnhealthyQuota)
 	}
 
 	// 应用健康操作
@@ -1295,9 +1469,9 @@ func TestFailoverStrategy_TokenHubQuotaError_ClassifyAndMarkUnhealthy(t *testing
 	}
 }
 
-// TestFailoverStrategy_TokenHubQuotaError_FailoverToNext 验证 failover 模式下 TokenHub 返回
+// TestFailoverStrategy_TencentQuotaError_FailoverToNext 验证 failover 模式下腾讯云返回
 // 额度错误后，策略尝试下一个 provider
-func TestFailoverStrategy_TokenHubQuotaError_FailoverToNext(t *testing.T) {
+func TestFailoverStrategy_TencentQuotaError_FailoverToNext(t *testing.T) {
 	successSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"id":"success","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
@@ -1319,15 +1493,15 @@ func TestFailoverStrategy_TokenHubQuotaError_FailoverToNext(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 
-	// 预先标记 token-hub 为 1 小时不健康，模拟 TokenHub 额度错误后的状态
+	// 预先标记 token-hub 为不健康，模拟腾讯云额度错误后的状态
 	healthKey := health.MakeHealthKey("token-hub", "openai")
-	h.MarkUnhealthyFor(healthKey, quotaCooldown)
+	h.MarkUnhealthyFor(healthKey, quotaBaseCooldown)
 
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
 	tasks := []Task{
@@ -1349,11 +1523,11 @@ func TestFailoverStrategy_TokenHubQuotaError_FailoverToNext(t *testing.T) {
 	}
 }
 
-// tokenHubErrorTransport 返回一个 TokenHub 额度错误响应，resp.Request 为 nil
+// tencentQuotaErrorTransport 返回一个腾讯云额度错误响应，resp.Request 为 nil
 // 迫使 makeRequestTarget 回退到 task.Request.URL 做 host 识别
-type tokenHubErrorTransport struct{}
+type tencentQuotaErrorTransport struct{}
 
-func (t *tokenHubErrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *tencentQuotaErrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: http.StatusUnauthorized,
 		Status:     "401 Unauthorized",
@@ -1363,10 +1537,10 @@ func (t *tokenHubErrorTransport) RoundTrip(req *http.Request) (*http.Response, e
 	}, nil
 }
 
-// TestFailoverStrategy_TokenHubQuotaError_URLRecognitionAndFailover 验证 failover 模式下
-// 通过 task.Request.URL host 识别 TokenHub + 私有错误码分类 + 触发 1 小时不健康的完整链路。
-// 本测试走策略 Execute 全路径，覆盖 makeRequestTarget → isTokenHubTarget → applyTokenHubClassification → applyHealthAction。
-func TestFailoverStrategy_TokenHubQuotaError_URLRecognitionAndFailover(t *testing.T) {
+// TestFailoverStrategy_TencentQuotaError_URLRecognitionAndFailover 验证 failover 模式下
+// 通过 task.Request.URL host 识别腾讯云推理 API + 私有错误码分类 + 触发指数退避不健康的完整链路。
+// 本测试走策略 Execute 全路径，覆盖 makeRequestTarget → isTencentTarget → applyProviderErrorClassification → applyHealthAction。
+func TestFailoverStrategy_TencentQuotaError_URLRecognitionAndFailover(t *testing.T) {
 	successSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"id":"success","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
@@ -1388,20 +1562,20 @@ func TestFailoverStrategy_TokenHubQuotaError_URLRecognitionAndFailover(t *testin
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
-	client.SetTransport("token-hub", &tokenHubErrorTransport{})
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
+	client.SetTransport("token-hub", &tencentQuotaErrorTransport{})
 
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
-	// task.Request.URL 指向 TokenHub host，makeRequestTarget 通过 resp.Request==nil 回退时使用它
-	tokenHubReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
+	// task.Request.URL 指向腾讯云推理 API host，makeRequestTarget 通过 resp.Request==nil 回退时使用它
+	tencentQuotaReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost,
 		"https://api.lkeap.cloud.tencent.com/v1/chat/completions", nil)
 	fallbackReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
 
 	tasks := []Task{
-		{ProviderName: "token-hub", Provider: providers["token-hub"], OutboundProtocol: "openai", UpstreamModel: "model", Request: tokenHubReq},
+		{ProviderName: "token-hub", Provider: providers["token-hub"], OutboundProtocol: "openai", UpstreamModel: "model", Request: tencentQuotaReq},
 		{ProviderName: "fallback-prov", Provider: providers["fallback-prov"], OutboundProtocol: "openai", UpstreamModel: "model", Request: fallbackReq},
 	}
 
@@ -1421,7 +1595,7 @@ func TestFailoverStrategy_TokenHubQuotaError_URLRecognitionAndFailover(t *testin
 	// 验证 token-hub 因额度错误被标记为不健康
 	healthKey := health.MakeHealthKey("token-hub", "openai")
 	if h.IsHealthy(healthKey) {
-		t.Fatal("token-hub should be marked unhealthy via MarkUnhealthyFor after TokenHub quota error")
+		t.Fatal("token-hub should be marked unhealthy via MarkUnhealthyEscalating after Tencent quota error")
 	}
 }
 
@@ -1442,11 +1616,10 @@ func TestFailoverStrategy_SkipDisabledProvider(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-prov": {
-			Endpoint:           disabledSrv.URL,
-			APIKey:             "test-key",
+			Endpoint:  disabledSrv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"}, // 全天禁用
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 		"enabled-prov": {
 			Endpoint:  successSrv.URL,
@@ -1456,16 +1629,16 @@ func TestFailoverStrategy_SkipDisabledProvider(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	disabledReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, disabledSrv.URL, nil)
 	successReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
 
 	tasks := []Task{
-		{ProviderName: "disabled-prov", Provider: providers["disabled-prov"], UpstreamModel: "model", Request: disabledReq},
+		{ProviderName: "disabled-prov", Provider: providers["disabled-prov"], UpstreamModel: "model", Request: disabledReq, DisableTimeRange: []string{"00:00-24:00"}}, // 全天禁用
 		{ProviderName: "enabled-prov", Provider: providers["enabled-prov"], UpstreamModel: "model", Request: successReq},
 	}
 
@@ -1491,36 +1664,132 @@ func TestFailoverStrategy_AllDisabledReturnsError(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-1": {
-			Endpoint:           srv.URL,
-			APIKey:             "test-key",
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 		"disabled-2": {
-			Endpoint:           srv.URL,
-			APIKey:             "test-key",
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 
 	tasks := []Task{
-		{ProviderName: "disabled-1", Provider: providers["disabled-1"], UpstreamModel: "model", Request: req1},
-		{ProviderName: "disabled-2", Provider: providers["disabled-2"], UpstreamModel: "model", Request: req2},
+		{ProviderName: "disabled-1", Provider: providers["disabled-1"], UpstreamModel: "model", Request: req1, DisableTimeRange: []string{"00:00-24:00"}},
+		{ProviderName: "disabled-2", Provider: providers["disabled-2"], UpstreamModel: "model", Request: req2, DisableTimeRange: []string{"00:00-24:00"}},
 	}
 
 	_, err := strategy.Execute(context.Background(), tasks)
 	if err != ErrNoProviderAvailable {
 		t.Errorf("error = %v, want %v", err, ErrNoProviderAvailable)
+	}
+}
+
+// futureEnableWindow 返回当前时间之后 [now+1h, now+2h) 的 HH:MM-HH:MM 窗口，
+// 保证调度器读取时钟时当前时间必然在窗口之外。
+func futureEnableWindow() string {
+	now := time.Now()
+	return now.Add(1*time.Hour).Format("15:04") + "-" + now.Add(2*time.Hour).Format("15:04")
+}
+
+// TestFailoverStrategy_SkipOutsideEnableWindow 验证 enable 窗口外的 leaf 被跳过，
+// fallback 到其它候选。
+func TestFailoverStrategy_SkipOutsideEnableWindow(t *testing.T) {
+	blockedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("leaf outside enable window must not be called")
+	}))
+	defer blockedSrv.Close()
+
+	successSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"success"}`))
+	}))
+	defer successSrv.Close()
+
+	providers := map[string]config.ProviderConfig{
+		"outside-window": {
+			Endpoint:  blockedSrv.URL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+		"always-open": {
+			Endpoint:  successSrv.URL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+	}
+
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
+	rl := ratelimit.NewManager(providers)
+	h := health.NewChecker(3, 30*time.Second)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
+
+	blockedReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, blockedSrv.URL, nil)
+	successReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
+
+	tasks := []Task{
+		{ProviderName: "outside-window", Provider: providers["outside-window"], UpstreamModel: "model", Request: blockedReq, EnableTimeRange: []string{futureEnableWindow()}},
+		{ProviderName: "always-open", Provider: providers["always-open"], UpstreamModel: "model", Request: successReq},
+	}
+
+	result, err := strategy.Execute(context.Background(), tasks)
+	if err != nil {
+		t.Fatalf("Execute should succeed by skipping outside-enable-window leaf: %v", err)
+	}
+	defer result.Response.Body.Close()
+
+	if result.Winner != "always-open" {
+		t.Errorf("winner = %q, want %q", result.Winner, "always-open")
+	}
+}
+
+// TestFailoverStrategy_InsideEnableWindowSucceeds 验证 enable 窗口内的 leaf 正常参与调度并成功。
+func TestFailoverStrategy_InsideEnableWindowSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"success"}`))
+	}))
+	defer srv.Close()
+
+	providers := map[string]config.ProviderConfig{
+		"all-day": {
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+	}
+
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
+	rl := ratelimit.NewManager(providers)
+	h := health.NewChecker(3, 30*time.Second)
+	strategy := NewFailoverStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
+	tasks := []Task{
+		{ProviderName: "all-day", Provider: providers["all-day"], UpstreamModel: "model", Request: req, EnableTimeRange: []string{"00:00-24:00"}},
+	}
+
+	result, err := strategy.Execute(context.Background(), tasks)
+	if err != nil {
+		t.Fatalf("Execute should succeed inside enable window: %v", err)
+	}
+	defer result.Response.Body.Close()
+
+	if result.Winner != "all-day" {
+		t.Errorf("winner = %q, want %q", result.Winner, "all-day")
 	}
 }

@@ -13,7 +13,7 @@ const (
 	sampleExpiryDuration = 30 * time.Minute
 )
 
-// ttftSample 表示一次流式成功请求的 TTFT 样本
+// ttftSample 表示一次流式成功请求的端到端 TTFT 样本
 type ttftSample struct {
 	ttftMs    float64
 	timestamp time.Time
@@ -27,6 +27,7 @@ type candidateWindow struct {
 
 // LatencyTracker 维护候选 provider/upstream_model 的 TTFT 样本窗口，
 // 提供统计读取接口，支持并发读写。
+// TTFT 表示单次上游尝试从发起 HTTP 请求到收到首个 SSE 事件的端到端延迟。
 type LatencyTracker struct {
 	mu      sync.RWMutex
 	windows map[string]*candidateWindow
@@ -62,7 +63,8 @@ func NewLatencyTracker() *LatencyTracker {
 	}
 }
 
-// RecordSuccess 记录一次流式成功请求的 TTFT（单位 ms）。
+// RecordSuccess 记录一次流式成功请求的端到端 TTFT（单位 ms）。
+// TTFT 表示单次上游尝试从发起 HTTP 请求到收到首个 SSE 事件的耗时。
 func (t *LatencyTracker) RecordSuccess(key string, ttftMs float64, now time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

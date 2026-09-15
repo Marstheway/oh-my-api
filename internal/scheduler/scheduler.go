@@ -32,17 +32,18 @@ type Scheduler struct {
 	health            *health.Checker
 	prefillTimeout    time.Duration
 	streamIdleTimeout time.Duration
+	nonStreamTimeout  time.Duration
 	failoverStrat     *FailoverStrategy
 	concurrentStrat   *ConcurrentStrategy
 	lbStrat           *LoadBalanceStrategy
 	adaptiveStrat     *AdaptiveStrategy
 }
 
-func New(rl *ratelimit.Manager, client *provider.Client, h *health.Checker, prefillTimeout time.Duration, streamIdleTimeout time.Duration) *Scheduler {
-	failover := NewFailoverStrategy(client, rl, h, prefillTimeout, streamIdleTimeout)
-	concurrent := NewConcurrentStrategy(client, rl, h, prefillTimeout, streamIdleTimeout)
-	lb := NewLoadBalanceStrategy(client, rl, h, prefillTimeout, streamIdleTimeout)
-	adaptive := NewAdaptiveStrategy(client, rl, h, prefillTimeout, streamIdleTimeout)
+func New(rl *ratelimit.Manager, client *provider.Client, h *health.Checker, prefillTimeout, streamIdleTimeout, nonStreamTimeout time.Duration) *Scheduler {
+	failover := NewFailoverStrategy(client, rl, h, prefillTimeout, streamIdleTimeout, nonStreamTimeout)
+	concurrent := NewConcurrentStrategy(client, rl, h, prefillTimeout, streamIdleTimeout, nonStreamTimeout)
+	lb := NewLoadBalanceStrategy(client, rl, h, prefillTimeout, streamIdleTimeout, nonStreamTimeout)
+	adaptive := NewAdaptiveStrategy(client, rl, h, prefillTimeout, streamIdleTimeout, nonStreamTimeout)
 
 	s := &Scheduler{
 		strategies:        make(map[string]Strategy),
@@ -51,6 +52,7 @@ func New(rl *ratelimit.Manager, client *provider.Client, h *health.Checker, pref
 		health:            h,
 		prefillTimeout:    prefillTimeout,
 		streamIdleTimeout: streamIdleTimeout,
+		nonStreamTimeout:  nonStreamTimeout,
 		failoverStrat:     failover,
 		concurrentStrat:   concurrent,
 		lbStrat:           lb,
@@ -72,9 +74,18 @@ func (s *Scheduler) Execute(ctx context.Context, mode string, tasks []Task) (*Re
 	return strategy.Execute(ctx, tasks)
 }
 
+// ExecuteWithSticky 执行调度，支持 sticky session（仅 load-balance 模式）。
+// groupName 和 sticky 仅在 mode 为 load-balance 时生效，其他模式忽略。
+func (s *Scheduler) ExecuteWithSticky(ctx context.Context, mode string, groupName string, sticky *StickyMeta, tasks []Task) (*Result, error) {
+	if mode != "load-balance" || sticky == nil || !sticky.Enabled {
+		return s.Execute(ctx, mode, tasks)
+	}
+	return s.lbStrat.ExecuteSticky(ctx, groupName, sticky, tasks)
+}
+
 func (s *Scheduler) Do(ctx context.Context, providerName string, req *http.Request) (*http.Response, error) {
 	healthKey := health.MakeHealthKey(providerName, "")
-	if err := s.ratelimit.Wait(ctx, providerName, ""); err != nil {
+	if err := s.ratelimit.Wait(ctx, providerName, "", 0); err != nil {
 		s.health.ReportFailure(healthKey)
 		return nil, &RateLimitError{Provider: providerName, Err: err}
 	}
@@ -94,7 +105,16 @@ func (s *Scheduler) Do(ctx context.Context, providerName string, req *http.Reque
 }
 
 func (s *Scheduler) Allow(providerName string) bool {
-	return s.ratelimit.Allow(providerName, "")
+	return s.ratelimit.Allow(providerName, "", 0)
+}
+
+// ReportStreamFailure 上报流式响应中断失败（如上游中途断流、流空闲超时）。
+// 连续失败达到 health.Checker 阈值后，对应 provider 会被摘除，后续请求自动换源。
+func (s *Scheduler) ReportStreamFailure(providerName, outboundProtocol string) {
+	if s == nil || s.health == nil {
+		return
+	}
+	s.health.ReportFailure(health.MakeHealthKey(providerName, outboundProtocol))
 }
 
 func IsRateLimitError(err error) bool {

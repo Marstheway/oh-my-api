@@ -127,9 +127,9 @@ func TestEmbeddingRequestParseInput_MapInput(t *testing.T) {
 
 func TestEmbeddingRequestEncodingFormatValidation(t *testing.T) {
 	tests := []struct {
-		name      string
-		format    string
-		isValid   bool
+		name    string
+		format  string
+		isValid bool
 	}{
 		{"empty string", "", true},
 		{"float", "float", true},

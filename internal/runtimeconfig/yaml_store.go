@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/Marstheway/oh-my-api/internal/config"
+	"github.com/Marstheway/oh-my-api/internal/yamlutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -32,18 +33,9 @@ func NewYamlStore(configPath string) (*YamlStore, error) {
 	}, nil
 }
 
-// findMappingNode 查找指定 key 的 mapping node
+// findMappingNode 查找指定 key 的 value node（mapping/sequence/scalar 均可）。
 func findMappingNode(node *yaml.Node, key string) (*yaml.Node, bool) {
-	if node.Kind != yaml.MappingNode {
-		return nil, false
-	}
-
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == key {
-			return node.Content[i+1], true
-		}
-	}
-	return nil, false
+	return yamlutil.MappingEntry(node, key)
 }
 
 // findSequenceNode 查找指定 key 的 sequence node
@@ -212,6 +204,85 @@ func (s *YamlStore) SyncFromConfig(cfg *config.Config) {
 		)
 		keysNode.Content = append(keysNode.Content, itemNode)
 	}
+
+	// 同步 rules（顶层 sequence；按 cfg.Rules 清空重建，空表写出空序列）
+	rulesNode, exists := findSequenceNode(s.rootNode.Content[0], "rules")
+	if !exists {
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Value: "rules"}
+		seqNode := &yaml.Node{Kind: yaml.SequenceNode}
+		s.rootNode.Content[0].Content = append(s.rootNode.Content[0].Content, keyNode, seqNode)
+		rulesNode = seqNode
+	}
+
+	rulesNode.Kind = yaml.SequenceNode
+	rulesNode.Content = rulesNode.Content[:0]
+	for _, rule := range cfg.Rules {
+		rulesNode.Content = append(rulesNode.Content, ruleToYamlNode(rule))
+	}
+
+	// 同步顶层 cascade（spoke 出站配置）
+	if cfg.Cascade != nil {
+		cascadeNode := spokeCascadeToYamlNode(cfg.Cascade)
+		setOrReplaceRootMapping(s.rootNode.Content[0], "cascade", cascadeNode)
+	} else {
+		yamlutil.RemoveMappingKey(s.rootNode.Content[0], "cascade")
+	}
+}
+
+// ruleToYamlNode 将 config.RuleConfig 编码为 YAML node。
+// 使用 yaml.Node.Encode 保证 match 键名保持 kebab-case（client-model / upstream-model），
+// 与 configmigrate.ruleToNode 等价。RuleConfig 仅含字符串/字符串切片/标量指针，
+// Encode 不可能失败，失败说明内部不变量被破坏，直接 panic 暴露问题。
+func ruleToYamlNode(rule config.RuleConfig) *yaml.Node {
+	var encoded yaml.Node
+	if err := encoded.Encode(rule); err != nil {
+		panic("ruleToYamlNode: encode rule: " + err.Error())
+	}
+	switch encoded.Kind {
+	case yaml.DocumentNode:
+		if len(encoded.Content) == 0 {
+			panic("ruleToYamlNode: empty document")
+		}
+		return encoded.Content[0]
+	case yaml.MappingNode:
+		return &encoded
+	default:
+		panic(fmt.Sprintf("ruleToYamlNode: unexpected yaml node kind %v", encoded.Kind))
+	}
+}
+
+func spokeCascadeToYamlNode(cfg *config.SpokeCascadeConfig) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode}
+	if cfg.Hub != "" {
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "hub"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: cfg.Hub},
+		)
+	}
+	if cfg.Token != "" {
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "token"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: cfg.Token},
+		)
+	}
+	if cfg.Peer != "" {
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "peer"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: cfg.Peer},
+		)
+	}
+	return node
+}
+
+func setOrReplaceRootMapping(root *yaml.Node, key string, value *yaml.Node) {
+	if existing, ok := findMappingNode(root, key); ok {
+		*existing = *value
+		return
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+		value,
+	)
 }
 
 // Save 保存到临时文件并原子替换正式文件
@@ -238,6 +309,9 @@ func (s *YamlStore) Save() error {
 
 // modelGroupToYamlNode 将 config.ModelGroupConfig 转换为 yaml.Node
 // models 只有 1 项且 weight=1 且 priority=0 时写回 model，否则写回 models
+//
+// ⚠️ ModelGroupConfig 新增字段时务必在本函数中添加对应序列化逻辑，
+// 否则 Apply 后字段不会写入 YAML 文件。同步更新穷举测试。
 func (s *YamlStore) modelGroupToYamlNode(cfg config.ModelGroupConfig) *yaml.Node {
 	node := &yaml.Node{Kind: yaml.MappingNode}
 
@@ -311,6 +385,25 @@ func (s *YamlStore) modelGroupToYamlNode(cfg config.ModelGroupConfig) *yaml.Node
 		node.Content = append(node.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: "model_metadata"},
 			metadataNode,
+		)
+	}
+
+	// sticky
+	if cfg.Sticky != nil {
+		stickyNode := &yaml.Node{Kind: yaml.MappingNode}
+		stickyNode.Content = append(stickyNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "enabled"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%t", cfg.Sticky.Enabled)},
+		)
+		if cfg.Sticky.IdleTimeout != "" {
+			stickyNode.Content = append(stickyNode.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "idle_timeout"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: cfg.Sticky.IdleTimeout},
+			)
+		}
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "sticky"},
+			stickyNode,
 		)
 	}
 
@@ -399,66 +492,53 @@ func (s *YamlStore) providerToYamlNodes(name string, cfg config.ProviderConfig) 
 		)
 	}
 
-	// upstream_models
-	if len(cfg.UpstreamModels) > 0 {
-		upstreamModelsNode := &yaml.Node{Kind: yaml.SequenceNode}
-		for _, um := range cfg.UpstreamModels {
-			umNode := &yaml.Node{Kind: yaml.MappingNode}
-			umNode.Content = append(umNode.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: "model"},
-				&yaml.Node{Kind: yaml.ScalarNode, Value: um.Model},
+	// remote_bridge
+	if cfg.RemoteBridge != nil {
+		bridgeNode := &yaml.Node{Kind: yaml.MappingNode}
+		bridgeNode.Content = append(bridgeNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "enabled"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%t", cfg.RemoteBridge.Enabled)},
+		)
+		if cfg.RemoteBridge.Local {
+			bridgeNode.Content = append(bridgeNode.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "local"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "true"},
 			)
-			if um.QPM > 0 {
-				umNode.Content = append(umNode.Content,
-					&yaml.Node{Kind: yaml.ScalarNode, Value: "qpm"},
-					&yaml.Node{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%d", um.QPM)},
-				)
-			}
-			if len(um.AllowedProtocols) > 0 {
-				allowedNode := &yaml.Node{Kind: yaml.SequenceNode}
-				for _, ap := range um.AllowedProtocols {
-					allowedNode.Content = append(allowedNode.Content,
-						&yaml.Node{Kind: yaml.ScalarNode, Value: ap},
-					)
-				}
-				umNode.Content = append(umNode.Content,
-					&yaml.Node{Kind: yaml.ScalarNode, Value: "allowed_protocols"},
-					allowedNode,
-				)
-			}
-			upstreamModelsNode.Content = append(upstreamModelsNode.Content, umNode)
+		}
+		if cfg.RemoteBridge.Provider != "" {
+			bridgeNode.Content = append(bridgeNode.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "provider"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: cfg.RemoteBridge.Provider},
+			)
+		}
+		if cfg.RemoteBridge.Token != "" {
+			bridgeNode.Content = append(bridgeNode.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "token"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: cfg.RemoteBridge.Token},
+			)
 		}
 		valueNode.Content = append(valueNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "upstream_model"},
-			upstreamModelsNode,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "remote_bridge"},
+			bridgeNode,
 		)
 	}
 
-	// default_protocols
-	if len(cfg.DefaultProtocols) > 0 {
-		defaultProtocolsNode := &yaml.Node{Kind: yaml.SequenceNode}
-		for _, dp := range cfg.DefaultProtocols {
-			defaultProtocolsNode.Content = append(defaultProtocolsNode.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: dp},
-			)
-		}
-		valueNode.Content = append(valueNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "default_protocols"},
-			defaultProtocolsNode,
+	// cascade
+	if cfg.Cascade != nil {
+		cascadeNode := &yaml.Node{Kind: yaml.MappingNode}
+		cascadeNode.Content = append(cascadeNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "enabled"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%t", cfg.Cascade.Enabled)},
 		)
-	}
-
-	// disabled_time_ranges
-	if len(cfg.DisabledTimeRanges) > 0 {
-		disabledNode := &yaml.Node{Kind: yaml.SequenceNode}
-		for _, dr := range cfg.DisabledTimeRanges {
-			disabledNode.Content = append(disabledNode.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: dr},
+		if cfg.Cascade.Token != "" {
+			cascadeNode.Content = append(cascadeNode.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "token"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: cfg.Cascade.Token},
 			)
 		}
 		valueNode.Content = append(valueNode.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Value: "disabled_time_ranges"},
-			disabledNode,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "cascade"},
+			cascadeNode,
 		)
 	}
 
@@ -494,18 +574,6 @@ func (s *YamlStore) NormalizeProviderProtocols(resolve func(string) string) bool
 			}
 		}
 
-		// default_protocols
-		if node, ok := findMappingNode(providerValue, "default_protocols"); ok && node.Kind == yaml.SequenceNode {
-			for _, item := range node.Content {
-				if item.Kind == yaml.ScalarNode {
-					if full := resolve(item.Value); full != item.Value {
-						item.Value = full
-						changed = true
-					}
-				}
-			}
-		}
-
 		// endpoints[].protocol
 		if node, ok := findMappingNode(providerValue, "endpoints"); ok && node.Kind == yaml.SequenceNode {
 			for _, epNode := range node.Content {
@@ -520,28 +588,21 @@ func (s *YamlStore) NormalizeProviderProtocols(resolve func(string) string) bool
 				}
 			}
 		}
-
-		// upstream_model[].allowed_protocols
-		if node, ok := findMappingNode(providerValue, "upstream_model"); ok && node.Kind == yaml.SequenceNode {
-			for _, umNode := range node.Content {
-				if umNode.Kind != yaml.MappingNode {
-					continue
-				}
-				if apNode, ok := findMappingNode(umNode, "allowed_protocols"); ok && apNode.Kind == yaml.SequenceNode {
-					for _, item := range apNode.Content {
-						if item.Kind == yaml.ScalarNode {
-							if full := resolve(item.Value); full != item.Value {
-								item.Value = full
-								changed = true
-							}
-						}
-					}
-				}
-			}
-		}
 	}
 
 	return changed
+}
+
+// RejectDeprecatedFields scans the on-disk YAML AST for removed fields,
+// including the path-level cascade.offer hard rejection.
+func (s *YamlStore) RejectDeprecatedFields() error {
+	if err := config.RejectDeprecatedConfigKeys(s.rootNode); err != nil {
+		return err
+	}
+	if err := config.RejectDeprecatedProviderKeys(s.rootNode); err != nil {
+		return err
+	}
+	return config.RejectDeprecatedCascadeKeys(s.rootNode)
 }
 
 // GetConfigPath 返回配置文件路径
@@ -599,6 +660,7 @@ var _ interface {
 	SyncFromConfig(cfg *config.Config)
 	Save() error
 	GetConfigPath() string
+	RejectDeprecatedFields() error
 } = (*YamlStore)(nil)
 
 // LoadConfig 从文件加载 config

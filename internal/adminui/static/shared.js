@@ -114,10 +114,152 @@ function showToast(message, type) {
 // ══════ HTML 转义 ══════
 
 function escapeHtml(str) {
+  if (str == null) return '';
   const div = document.createElement('div');
-  div.textContent = str;
+  div.textContent = String(str);
   return div.innerHTML;
 }
+
+function escapeAttr(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// ══════ Enum Chips ══════
+// 固定枚举的点选组件，支持 single / multi。
+//
+// renderEnumChips({
+//   id, name, mode: 'single'|'multi', options, selected,
+//   allowEmpty, className, attrs
+// })
+// options: string[] 或 { value, label }[]
+// selected: single 为 string；multi 为 string[]
+//
+// 读取：getEnumChipsValue(root) / getEnumChipsValues(root)
+// 变更：监听 'enumchange'（detail: { value, values }）
+
+function normalizeEnumOptions(options) {
+  return (options || []).map((opt) => {
+    if (opt && typeof opt === 'object') {
+      const value = opt.value == null ? '' : String(opt.value);
+      const label = opt.label != null ? String(opt.label) : value;
+      return { value, label };
+    }
+    const value = opt == null ? '' : String(opt);
+    return { value, label: value };
+  });
+}
+
+function renderEnumChips(opts) {
+  opts = opts || {};
+  const mode = opts.mode === 'single' ? 'single' : 'multi';
+  const options = normalizeEnumOptions(opts.options);
+
+  let selectedSet;
+  if (mode === 'single') {
+    selectedSet = new Set([opts.selected == null ? '' : String(opts.selected)]);
+  } else {
+    const arr = Array.isArray(opts.selected)
+      ? opts.selected
+      : (opts.selected != null && opts.selected !== '' ? [opts.selected] : []);
+    selectedSet = new Set(arr.map(String));
+  }
+
+  const classes = ['enum-chips'];
+  if (opts.className) classes.push(opts.className);
+
+  const attrParts = [
+    `class="${escapeAttr(classes.join(' '))}"`,
+    'data-enum-chips',
+    `data-mode="${mode}"`,
+  ];
+  if (opts.id) attrParts.push(`id="${escapeAttr(opts.id)}"`);
+  if (opts.name) attrParts.push(`data-name="${escapeAttr(opts.name)}"`);
+  if (opts.allowEmpty) attrParts.push('data-allow-empty="true"');
+  if (opts.attrs && typeof opts.attrs === 'object') {
+    Object.keys(opts.attrs).forEach((key) => {
+      if (opts.attrs[key] == null) return;
+      attrParts.push(`${escapeAttr(key)}="${escapeAttr(String(opts.attrs[key]))}"`);
+    });
+  }
+
+  const chips = options.map((o) => {
+    const active = selectedSet.has(o.value) ? ' active' : '';
+    return `<span class="enum-chip${active}" data-value="${escapeAttr(o.value)}" role="button" tabindex="0">${escapeHtml(o.label)}</span>`;
+  }).join('');
+
+  return `<div ${attrParts.join(' ')}>${chips}</div>`;
+}
+
+function findEnumChips(root) {
+  if (!root) return null;
+  if (typeof root === 'string') {
+    return document.querySelector(root)
+      || document.querySelector(`[data-name="${root}"]`);
+  }
+  if (root.getAttribute && root.getAttribute('data-enum-chips') != null) {
+    return root;
+  }
+  return root.querySelector ? root.querySelector('[data-enum-chips]') : null;
+}
+
+/** multi：返回 string[]；也可用于 single（0~1 个元素） */
+function getEnumChipsValues(root) {
+  const el = findEnumChips(root);
+  if (!el) return [];
+  return Array.from(el.querySelectorAll('.enum-chip.active'))
+    .map((c) => (c.dataset.value != null ? c.dataset.value : ''));
+}
+
+/** single 便捷读取；无选中返回 '' */
+function getEnumChipsValue(root) {
+  const values = getEnumChipsValues(root);
+  return values.length ? values[0] : '';
+}
+
+(function initEnumChipsDelegation() {
+  function activateChip(chip) {
+    const group = chip.closest('[data-enum-chips]');
+    if (!group) return;
+
+    const mode = group.dataset.mode || 'multi';
+    if (mode === 'single') {
+      const wasActive = chip.classList.contains('active');
+      if (wasActive && group.dataset.allowEmpty === 'true') {
+        chip.classList.remove('active');
+      } else if (!wasActive) {
+        group.querySelectorAll('.enum-chip.active').forEach((c) => c.classList.remove('active'));
+        chip.classList.add('active');
+      }
+    } else {
+      chip.classList.toggle('active');
+    }
+
+    const values = getEnumChipsValues(group);
+    group.dispatchEvent(new CustomEvent('enumchange', {
+      bubbles: true,
+      detail: { value: values[0] || '', values },
+    }));
+  }
+
+  document.addEventListener('click', (e) => {
+    const chip = e.target.closest('.enum-chip');
+    if (!chip || !chip.closest('[data-enum-chips]')) return;
+    activateChip(chip);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const chip = e.target.closest('.enum-chip');
+    if (!chip || !chip.closest('[data-enum-chips]')) return;
+    e.preventDefault();
+    activateChip(chip);
+  });
+})();
 
 // ══════ Mobile Sidebar Toggle ══════
 
@@ -233,6 +375,7 @@ window.addEventListener('resize', () => {
 // ══════ Draft Bar ══════
 // 各页面需在脚本开头设置 window.draftBarConfig：
 //   hasChanges: () => boolean          — 判断是否有 pending changes
+//   onBeforeApply: async () => boolean — 可选；apply 前把尚未写入的本地表单 flush 进 draft，false 时中止 apply
 //   onApplySuccess: () => void         — apply 成功后更新 original state + 刷新 UI
 
 /**
@@ -257,6 +400,10 @@ function updateDraftBar() {
 async function applyDraft() {
   const cfg = window.draftBarConfig || {};
   try {
+    if (cfg.onBeforeApply) {
+      const ok = await cfg.onBeforeApply();
+      if (ok === false) return;
+    }
     await apiFetch('/admin/runtime-config/apply', { method: 'POST' });
     showToast('Configuration applied successfully.');
     if (cfg.onApplySuccess) {

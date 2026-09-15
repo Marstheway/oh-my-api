@@ -223,7 +223,7 @@ func ObserveTurnOpenAIResponse(req *dto.ResponsesRequest) *TurnObservation {
 		if item.Type == "message" {
 			text = extractResponsesContent(item.Content)
 		} else if item.Type == "function_call_output" {
-		// Output 字段是 json.RawMessage，需要解出字符串
+			// Output 字段是 json.RawMessage，需要解出字符串
 			if len(item.Output) > 0 {
 				var s string
 				if err := json.Unmarshal(item.Output, &s); err == nil {
@@ -436,7 +436,17 @@ func executeCheapJudgeInternal(ctx context.Context, req *dto.ChatCompletionReque
 		return "", fmt.Errorf("get codec: %w", err)
 	}
 
-	rootNode, matErr := materializePlan(ctx, resolveResult.Plan, codec.FormatOpenAIChat, inboundCodec, req, resolveResult.ModelGroup)
+	// Internal judge/scout traffic must not evaluate user-facing rules
+	// (client-model/key/upstream actions would otherwise leak onto operator traffic).
+	rootNode, matErr := materializePlan(ctx, resolveResult.Plan, materializeInput{
+		InboundFormat: codec.FormatOpenAIChat,
+		InboundCodec:  inboundCodec,
+		RawReq:        req,
+		ModelGroup:    resolveResult.ModelGroup,
+		ClientModel:   req.Model,
+		KeyName:       "",
+		Rules:         nil,
+	})
 	if matErr != nil {
 		return "", fmt.Errorf("materialize: %w", matErr)
 	}
@@ -469,20 +479,7 @@ func resolveInternalGroup(groupName string) (*model.ResolveResult, error) {
 	if resolver == nil {
 		return nil, model.ErrModelNotFound
 	}
-
-	plan, err := resolver.BuildPlanNodeForTest(groupName)
-	if err != nil {
-		return nil, err
-	}
-	if !plan.HasAnyLeafForTest() {
-		return nil, model.ErrNoValidProvider
-	}
-
-	return &model.ResolveResult{
-		Mode:       plan.Mode,
-		ModelGroup: groupName,
-		Plan:       plan,
-	}, nil
+	return resolver.ResolveInternal(groupName)
 }
 
 // parseJudgeResult 解析 judge 结果

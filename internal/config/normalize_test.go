@@ -32,14 +32,10 @@ func TestNormalizeProviderProtocolsInConfig(t *testing.T) {
 		Providers: ProvidersConfig{
 			Items: map[string]ProviderConfig{
 				"p1": {
-					Protocols:        []string{"openai", "openai.chat"},
-					DefaultProtocols: []string{"anthropic"},
+					Protocols: []string{"openai", "openai.chat"},
 					Endpoints: []EndpointConfig{
 						{URL: "https://a.com", Protocols: []string{"openai"}},
 						{URL: "https://b.com", Protocols: []string{"openai.chat"}},
-					},
-					UpstreamModels: []UpstreamModelConfig{
-						{Model: "m1", AllowedProtocols: []string{"anthropic", "openai"}},
 					},
 				},
 				"p2": {
@@ -59,14 +55,8 @@ func TestNormalizeProviderProtocolsInConfig(t *testing.T) {
 	if p1.Protocols[0] != "openai.chat" {
 		t.Errorf("Protocols[0] = %q, want openai.chat", p1.Protocols[0])
 	}
-	if p1.DefaultProtocols[0] != "anthropic.messages" {
-		t.Errorf("DefaultProtocols[0] = %q, want anthropic.messages", p1.DefaultProtocols[0])
-	}
 	if p1.Endpoints[0].Protocols[0] != "openai.chat" {
 		t.Errorf("Endpoints[0].Protocols[0] = %q, want openai.chat", p1.Endpoints[0].Protocols[0])
-	}
-	if p1.UpstreamModels[0].AllowedProtocols[1] != "openai.chat" {
-		t.Errorf("AllowedProtocols[1] = %q, want openai.chat", p1.UpstreamModels[0].AllowedProtocols[1])
 	}
 
 	// p2 已经是全名，不应再变化
@@ -80,8 +70,7 @@ func TestNormalizeProviderProtocolsInConfig_NoChange(t *testing.T) {
 		Providers: ProvidersConfig{
 			Items: map[string]ProviderConfig{
 				"p1": {
-					Protocols:        []string{"openai.chat"},
-					DefaultProtocols: []string{"anthropic.messages"},
+					Protocols: []string{"openai.chat"},
 					Endpoints: []EndpointConfig{
 						{URL: "https://a.com", Protocols: []string{"openai.chat"}},
 					},

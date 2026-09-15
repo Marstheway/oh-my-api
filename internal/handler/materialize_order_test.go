@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/codec"
+	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/model"
 )
@@ -43,8 +43,8 @@ func TestMaterializePlan_PreservesModelOrder_Failover(t *testing.T) {
 				Name: "root",
 				Mode: "failover",
 				Models: config.ModelEntries{
-					{Model: "child-group", Weight: 1},                  // 子 group 在前
-					{Model: "prov-success/model-success", Weight: 1},   // 叶子在后
+					{Model: "child-group", Weight: 1},                // 子 group 在前
+					{Model: "prov-success/model-success", Weight: 1}, // 叶子在后
 				},
 			},
 		},
@@ -88,14 +88,15 @@ func TestMaterializePlan_PreservesModelOrder_Failover(t *testing.T) {
 		t.Fatalf("codec.Get failed: %v", err)
 	}
 
-	runNode, err := materializePlan(
-		context.Background(),
-		plan,
-		codec.FormatOpenAIChat,
-		inboundCodec,
-		&dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
-		"root",
-	)
+	runNode, err := materializePlan(context.Background(), plan, materializeInput{
+		InboundFormat: codec.FormatOpenAIChat,
+		InboundCodec:  inboundCodec,
+		RawReq:        &dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
+		ModelGroup:    "root",
+		ClientModel:   "root",
+		KeyName:       "",
+		Rules:         nil,
+	})
 	if err != nil {
 		t.Fatalf("materializePlan failed: %v", err)
 	}
@@ -147,8 +148,8 @@ func TestMaterializePlan_PreservesModelOrder_Concurrent(t *testing.T) {
 				Name: "root",
 				Mode: "concurrent",
 				Models: config.ModelEntries{
-					{Model: "child", Weight: 1},           // 子 group
-					{Model: "prov-b/model-b", Weight: 1},  // 叶子
+					{Model: "child", Weight: 1},          // 子 group
+					{Model: "prov-b/model-b", Weight: 1}, // 叶子
 				},
 			},
 		},
@@ -169,14 +170,15 @@ func TestMaterializePlan_PreservesModelOrder_Concurrent(t *testing.T) {
 		t.Fatalf("codec.Get failed: %v", err)
 	}
 
-	runNode, err := materializePlan(
-		context.Background(),
-		plan,
-		codec.FormatOpenAIChat,
-		inboundCodec,
-		&dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
-		"root",
-	)
+	runNode, err := materializePlan(context.Background(), plan, materializeInput{
+		InboundFormat: codec.FormatOpenAIChat,
+		InboundCodec:  inboundCodec,
+		RawReq:        &dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
+		ModelGroup:    "root",
+		ClientModel:   "root",
+		KeyName:       "",
+		Rules:         nil,
+	})
 	if err != nil {
 		t.Fatalf("materializePlan failed: %v", err)
 	}
@@ -214,8 +216,8 @@ func TestMaterializePlan_PreservesModelOrder_LoadBalance(t *testing.T) {
 				Name: "root",
 				Mode: "load-balance",
 				Models: config.ModelEntries{
-					{Model: "child", Weight: 2},           // 子 group，权重 2
-					{Model: "prov-b/model-b", Weight: 1},  // 叶子，权重 1
+					{Model: "child", Weight: 2},          // 子 group，权重 2
+					{Model: "prov-b/model-b", Weight: 1}, // 叶子，权重 1
 				},
 			},
 		},
@@ -236,14 +238,15 @@ func TestMaterializePlan_PreservesModelOrder_LoadBalance(t *testing.T) {
 		t.Fatalf("codec.Get failed: %v", err)
 	}
 
-	runNode, err := materializePlan(
-		context.Background(),
-		plan,
-		codec.FormatOpenAIChat,
-		inboundCodec,
-		&dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
-		"root",
-	)
+	runNode, err := materializePlan(context.Background(), plan, materializeInput{
+		InboundFormat: codec.FormatOpenAIChat,
+		InboundCodec:  inboundCodec,
+		RawReq:        &dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
+		ModelGroup:    "root",
+		ClientModel:   "root",
+		KeyName:       "",
+		Rules:         nil,
+	})
 	if err != nil {
 		t.Fatalf("materializePlan failed: %v", err)
 	}
@@ -284,8 +287,8 @@ func TestMaterializePlan_PreservesModelOrder_Adaptive(t *testing.T) {
 				Name: "root",
 				Mode: "adaptive",
 				Models: config.ModelEntries{
-					{Model: "child", Weight: 1},           // 子 group
-					{Model: "prov-b/model-b", Weight: 1},  // 叶子
+					{Model: "child", Weight: 1},          // 子 group
+					{Model: "prov-b/model-b", Weight: 1}, // 叶子
 				},
 			},
 		},
@@ -306,14 +309,15 @@ func TestMaterializePlan_PreservesModelOrder_Adaptive(t *testing.T) {
 		t.Fatalf("codec.Get failed: %v", err)
 	}
 
-	runNode, err := materializePlan(
-		context.Background(),
-		plan,
-		codec.FormatOpenAIChat,
-		inboundCodec,
-		&dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
-		"root",
-	)
+	runNode, err := materializePlan(context.Background(), plan, materializeInput{
+		InboundFormat: codec.FormatOpenAIChat,
+		InboundCodec:  inboundCodec,
+		RawReq:        &dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
+		ModelGroup:    "root",
+		ClientModel:   "root",
+		KeyName:       "",
+		Rules:         nil,
+	})
 	if err != nil {
 		t.Fatalf("materializePlan failed: %v", err)
 	}
@@ -359,7 +363,7 @@ func TestMaterializePlan_PreservesModelOrder_PureChildGroups(t *testing.T) {
 				Name: "root",
 				Mode: "failover",
 				Models: config.ModelEntries{
-					{Model: "child-a", Weight: 1},  // 纯子 group，无直接叶子
+					{Model: "child-a", Weight: 1}, // 纯子 group，无直接叶子
 					{Model: "child-b", Weight: 2},
 				},
 			},
@@ -392,14 +396,15 @@ func TestMaterializePlan_PreservesModelOrder_PureChildGroups(t *testing.T) {
 		t.Fatalf("codec.Get failed: %v", err)
 	}
 
-	runNode, err := materializePlan(
-		context.Background(),
-		plan,
-		codec.FormatOpenAIChat,
-		inboundCodec,
-		&dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
-		"root",
-	)
+	runNode, err := materializePlan(context.Background(), plan, materializeInput{
+		InboundFormat: codec.FormatOpenAIChat,
+		InboundCodec:  inboundCodec,
+		RawReq:        &dto.ChatCompletionRequest{Model: "root", Messages: []dto.Message{}},
+		ModelGroup:    "root",
+		ClientModel:   "root",
+		KeyName:       "",
+		Rules:         nil,
+	})
 	if err != nil {
 		t.Fatalf("materializePlan failed: %v", err)
 	}

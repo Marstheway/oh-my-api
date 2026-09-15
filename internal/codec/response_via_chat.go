@@ -11,7 +11,6 @@ import (
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
-	"github.com/gin-gonic/gin"
 )
 
 // readAnthropicStreamToObject 消费 Claude SSE 流并积累为一个非流式 ClaudeResponse 对象。
@@ -163,13 +162,14 @@ func readResponsesStreamToObject(body io.Reader, counter TokenCounter) (*dto.Res
 			continue
 		}
 
-		var event dto.ResponsesStreamEvent
-		if jsonErr := json.Unmarshal([]byte(data), &event); jsonErr != nil {
+		res, normErr := normalizeResponsesEventData([]byte(data))
+		if normErr != nil {
 			if err == io.EOF {
 				break
 			}
 			continue
 		}
+		event := res.Event
 
 		switch event.Type {
 		case "response.created":
@@ -228,6 +228,7 @@ func readResponsesStreamToObject(body io.Reader, counter TokenCounter) (*dto.Res
 			}
 		case "response.completed":
 			if len(event.Response) > 0 {
+				// event.Response 已由公共入口归一化（含 usage details 补全）。
 				var r struct {
 					ID     string              `json:"id"`
 					Model  string              `json:"model"`
@@ -250,17 +251,9 @@ func readResponsesStreamToObject(body io.Reader, counter TokenCounter) (*dto.Res
 				}
 			}
 		case "response.failed":
-			var r struct {
-				Error *struct {
-					Code    string `json:"code"`
-					Message string `json:"message"`
-				} `json:"error"`
-			}
-			if len(event.Response) > 0 {
-				_ = json.Unmarshal(event.Response, &r)
-			}
-			if r.Error != nil {
-				return nil, fmt.Errorf("response failed [%s]: %s", r.Error.Code, r.Error.Message)
+			code, message := extractResponsesError(*event)
+			if code != "" || message != "" {
+				return nil, fmt.Errorf("response failed [%s]: %s", code, message)
 			}
 			return nil, fmt.Errorf("response failed")
 		}
@@ -291,21 +284,30 @@ func readResponsesStreamToObject(body io.Reader, counter TokenCounter) (*dto.Res
 		})
 	}
 
+	// AddOutputText 只追加文本，必须调用 ComputeOutputTokens 才会计算 token 数。
+	// 该函数原本只在测试中使用，现已被非流式 SSE 聚合路径复用，需要在此收口。
+	if counter != nil {
+		if sc, ok := counter.(*token.StreamCounter); ok {
+			sc.ComputeOutputTokens()
+		}
+	}
+	normalizeResponsesResponseObject(out)
+
 	return out, nil
 }
 
 // writeClaudeObjectAsStream 将 ClaudeResponse 对象以 Anthropic SSE 格式写给客户端。
-func writeClaudeObjectAsStream(c *gin.Context, claudeResp *dto.ClaudeResponse, counter TokenCounter, requestedModel string) error {
-	flusher, ok := c.Writer.(http.Flusher)
+func writeClaudeObjectAsStream(w http.ResponseWriter, claudeResp *dto.ClaudeResponse, counter TokenCounter, requestedModel string) error {
+	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
 	}
 
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	writeEvent := func(event dto.ClaudeStreamEvent) error {
 		data, err := json.Marshal(event)
@@ -313,11 +315,11 @@ func writeClaudeObjectAsStream(c *gin.Context, claudeResp *dto.ClaudeResponse, c
 			return err
 		}
 		if event.Type != "" {
-			if _, err := fmt.Fprintf(c.Writer, "event: %s\n", event.Type); err != nil {
+			if _, err := fmt.Fprintf(w, "event: %s\n", event.Type); err != nil {
 				return err
 			}
 		}
-		_, err = fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+		_, err = fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 		return err
 	}
@@ -443,15 +445,14 @@ func writeClaudeObjectAsStream(c *gin.Context, claudeResp *dto.ClaudeResponse, c
 }
 
 // writeResponsesObjectAsStream 将 ResponsesResponse 对象以 Responses API SSE 格式写给客户端。
-func writeResponsesObjectAsStream(c *gin.Context, responsesResp *dto.ResponsesResponse, counter TokenCounter, requestedModel string) error {
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
+func writeResponsesObjectAsStream(w http.ResponseWriter, responsesResp *dto.ResponsesResponse, counter TokenCounter, requestedModel string) error {
+	if _, ok := w.(http.Flusher); !ok {
 		return fmt.Errorf("streaming not supported")
 	}
 
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
 
 	chatID := responsesResp.ID
 	if chatID == "" {
@@ -462,15 +463,8 @@ func writeResponsesObjectAsStream(c *gin.Context, responsesResp *dto.ResponsesRe
 		model = requestedModel
 	}
 
-	writeEvent := func(v any) error {
-		data, err := json.Marshal(v)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintf(c.Writer, "data: %s\n\n", data)
-		flusher.Flush()
-		return err
-	}
+	writer := newResponsesStreamWriter(w)
+	writeEvent := writer.writeEvent
 
 	// response.created
 	if err := writeEvent(map[string]any{

@@ -151,8 +151,9 @@ func convertResponseRequestToChatRequest(req *dto.ResponsesRequest, upstreamMode
 }
 
 // responseMessageContentToChatContent 将 Responses API message item 的 content 字段转换为 Chat 格式。
-// content 可以是 JSON 字符串或 []dto.ResponsesContentPart 数组。
-// 返回 any 类型：纯文本返回 string，含图片返回 []dto.MediaContent 数组。
+// content 可以是 JSON 字符串或 content parts 数组。
+// 返回 any：纯文本返回 string，含媒体返回 []dto.MediaContent。
+// 无法映射的 part（未知类型、缺字段）跳过并打日志，不中断整条请求。
 func responseMessageContentToChatContent(raw json.RawMessage, role string) (any, error) {
 	// 优先尝试解析为字符串
 	var contentStr string
@@ -160,62 +161,189 @@ func responseMessageContentToChatContent(raw json.RawMessage, role string) (any,
 		return contentStr, nil
 	}
 
-	// 尝试解析为 content parts 数组
-	var parts []dto.ResponsesContentPart
+	// 用 map 解析以兼容 input_file/input_audio/input_video 等扩展字段
+	var parts []map[string]any
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, fmt.Errorf("message item content must be a string or array of content parts (role=%s): %w", role, err)
 	}
 
-	// 检查是否包含图片
-	hasImage := false
-	for _, part := range parts {
-		if part.Type == "input_image" {
-			hasImage = true
-			break
-		}
-	}
-
-	// 无图片，拼接为纯文本
-	if !hasImage {
-		var text string
-		for _, part := range parts {
-			switch part.Type {
-			case "input_text", "output_text", "text":
-				text += part.Text
-			default:
-				return nil, fmt.Errorf("unsupported content part type %q in message (role=%s)", part.Type, role)
-			}
-		}
-		return text, nil
-	}
-
-	// 包含图片，转换为 []dto.MediaContent 数组
 	var mediaContents []dto.MediaContent
+	var textOnly strings.Builder
+	hasMedia := false
+
 	for _, part := range parts {
-		switch part.Type {
+		partType, _ := part["type"].(string)
+		switch partType {
 		case "input_text", "output_text", "text":
+			text, _ := part["text"].(string)
+			if text == "" {
+				continue
+			}
+			textOnly.WriteString(text)
 			mediaContents = append(mediaContents, dto.MediaContent{
 				Type: "text",
-				Text: part.Text,
+				Text: text,
 			})
 		case "input_image":
-			// 提取图片 URL（支持字符串或对象两种格式）
-			url := extractImageURL(part.ImageURL)
+			url := extractImageURLFromAny(part["image_url"])
 			if url == "" {
 				slog.Warn("failed to extract image URL, skipping input_image part", "role", role)
 				continue
 			}
+			hasMedia = true
 			mediaContents = append(mediaContents, dto.MediaContent{
 				Type: "image_url",
 				ImageUrl: &dto.MessageImageUrl{
 					Url: url,
 				},
 			})
+		case "input_file":
+			filePart := responseInputFileToChatFile(part)
+			if filePart == nil {
+				slog.Warn("failed to map input_file part, skipping", "role", role)
+				continue
+			}
+			hasMedia = true
+			mediaContents = append(mediaContents, *filePart)
+		case "input_audio":
+			audioPart := responseInputAudioToChatAudio(part)
+			if audioPart == nil {
+				slog.Warn("failed to map input_audio part, skipping", "role", role)
+				continue
+			}
+			hasMedia = true
+			mediaContents = append(mediaContents, *audioPart)
+		case "input_video":
+			videoPart := responseInputVideoToChatVideo(part)
+			if videoPart == nil {
+				slog.Warn("failed to map input_video part, skipping", "role", role)
+				continue
+			}
+			hasMedia = true
+			mediaContents = append(mediaContents, *videoPart)
 		default:
-			return nil, fmt.Errorf("unsupported content part type %q in message (role=%s)", part.Type, role)
+			if partType == "" {
+				slog.Warn("content part missing type field, skipping", "role", role)
+			} else {
+				slog.Warn("unsupported content part type, skipping", "role", role, "type", partType)
+			}
 		}
 	}
+
+	if !hasMedia {
+		return textOnly.String(), nil
+	}
 	return mediaContents, nil
+}
+
+func responseInputFileToChatFile(part map[string]any) *dto.MediaContent {
+	// 兼容 flat: {type, file_data, filename, url} 与 nested: {type, file: {...}}
+	fileObj, _ := part["file"].(map[string]any)
+	filename, _ := part["filename"].(string)
+	fileData, _ := part["file_data"].(string)
+	url, _ := part["url"].(string)
+	if fileObj != nil {
+		if filename == "" {
+			filename, _ = fileObj["filename"].(string)
+		}
+		if fileData == "" {
+			fileData, _ = fileObj["file_data"].(string)
+		}
+		if url == "" {
+			url, _ = fileObj["url"].(string)
+		}
+		if fileID, _ := fileObj["file_id"].(string); fileID != "" && fileData == "" && url == "" {
+			return &dto.MediaContent{
+				Type: "file",
+				File: dto.MessageFile{FileId: fileID, FileName: filename},
+			}
+		}
+	}
+	if fileData == "" && url == "" {
+		return nil
+	}
+	file := dto.MessageFile{FileName: filename}
+	if fileData != "" {
+		file.FileData = fileData
+	} else if url != "" {
+		// Chat file 无独立 url 字段时，塞进 file_data 不合适；用 file map 透传 url
+		return &dto.MediaContent{
+			Type: "file",
+			File: map[string]any{
+				"filename": filename,
+				"url":      url,
+			},
+		}
+	}
+	return &dto.MediaContent{Type: "file", File: file}
+}
+
+func responseInputAudioToChatAudio(part map[string]any) *dto.MediaContent {
+	// flat: {audio_data, format} 或 nested: {input_audio: {data, format}}
+	data, _ := part["audio_data"].(string)
+	format, _ := part["format"].(string)
+	if nested, ok := part["input_audio"].(map[string]any); ok {
+		if data == "" {
+			data, _ = nested["data"].(string)
+		}
+		if format == "" {
+			format, _ = nested["format"].(string)
+		}
+	}
+	if data == "" {
+		return nil
+	}
+	return &dto.MediaContent{
+		Type: "input_audio",
+		InputAudio: dto.MessageInputAudio{
+			Data:   data,
+			Format: format,
+		},
+	}
+}
+
+func responseInputVideoToChatVideo(part map[string]any) *dto.MediaContent {
+	// flat: {video_url: "..."} 或 nested: {video_url: {url: "..."}}
+	switch v := part["video_url"].(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		return &dto.MediaContent{
+			Type:     "video_url",
+			VideoUrl: dto.MessageVideoUrl{Url: v},
+		}
+	case map[string]any:
+		url, _ := v["url"].(string)
+		if url == "" {
+			return nil
+		}
+		return &dto.MediaContent{
+			Type:     "video_url",
+			VideoUrl: dto.MessageVideoUrl{Url: url},
+		}
+	default:
+		return nil
+	}
+}
+
+// extractImageURLFromAny 从 image_url 字段提取 URL，支持字符串或 {"url":"..."} 对象。
+func extractImageURLFromAny(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case map[string]any:
+		if url, ok := x["url"].(string); ok {
+			return url
+		}
+	case json.RawMessage:
+		return extractImageURL(x)
+	}
+	// 经 json 往返后 number 等类型不处理
+	if b, err := json.Marshal(v); err == nil {
+		return extractImageURL(b)
+	}
+	return ""
 }
 
 // extractImageURL 从 image_url 字段提取 URL，支持字符串或对象两种格式
@@ -336,6 +464,11 @@ func convertResponseInputItemToMessage(item dto.ResponsesInputItem) (dto.Message
 			ToolCallID: item.CallID,
 			Content:    contentStr,
 		}, nil
+
+	case "reasoning":
+		// Chat API 没有 reasoning 输入语义，忽略该 item；
+		// assistant 侧缺失的 reasoning_content 由 DeepSeek compat 层补齐。
+		return dto.Message{}, nil
 
 	case "additional_tools":
 		// Chat API 不支持动态添加工具，忽略该 item

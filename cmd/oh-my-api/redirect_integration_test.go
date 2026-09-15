@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Marstheway/oh-my-api/internal/cascade"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/handler"
 	"github.com/Marstheway/oh-my-api/internal/health"
@@ -90,10 +91,10 @@ database:
 	resolver, err := model.NewResolver(cfg)
 	require.NoError(t, err)
 
-	client := provider.NewClient(cfg.Providers.Items, timeout, 0)
+	client := provider.NewClient(cfg.Providers.Items, timeout, 0, 0)
 	rlManager := ratelimit.NewManager(cfg.Providers.Items)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0)
+	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0, 0)
 	handler.Init(cfg, resolver, sched)
 
 	// 6. 创建 runtimeconfig manager
@@ -102,7 +103,7 @@ database:
 			return model.NewResolver(c)
 		},
 		NewScheduler: func(c *config.Config, r *model.Resolver) (*scheduler.Scheduler, error) {
-			return scheduler.New(rlManager, client, healthChecker, timeout, 0), nil
+			return scheduler.New(ratelimit.NewManager(c.Providers.Items), client, healthChecker, timeout, 0, 0), nil
 		},
 	}
 	reinitHandler := &runtimeconfig.DefaultReinitHandler{
@@ -117,7 +118,7 @@ database:
 	// 使用 goroutine 启动服务器
 	serverErrCh := make(chan error, 1)
 	go func() {
-		err := server.Run(cfg, metricsHandler, runtimeManager)
+		err := server.Run(cfg, metricsHandler, runtimeManager, cascade.NewHubRegistry())
 		serverErrCh <- err
 	}()
 
@@ -192,7 +193,7 @@ database:
 
 	t.Run("CreateRedirect", func(t *testing.T) {
 		input := map[string]string{
-			"source":  "fast-model",
+			"source": "fast-model",
 			"target": "gpt-4o",
 		}
 		body, _ := json.Marshal(input)
@@ -240,7 +241,7 @@ database:
 
 	t.Run("UpdateRedirect", func(t *testing.T) {
 		input := map[string]string{
-			"source":  "fast-model",
+			"source": "fast-model",
 			"target": "gpt-4",
 		}
 		body, _ := json.Marshal(input)
@@ -276,7 +277,7 @@ database:
 
 	t.Run("CreateAliasToAliasRedirect", func(t *testing.T) {
 		input := map[string]string{
-			"source":  "super-fast",
+			"source": "super-fast",
 			"target": "fast-model",
 		}
 		body, _ := json.Marshal(input)
@@ -364,7 +365,7 @@ database:
 	t.Run("CircularRedirectPrevention", func(t *testing.T) {
 		// 尝试创建自引用的 redirect
 		input := map[string]string{
-			"source":  "self-loop",
+			"source": "self-loop",
 			"target": "self-loop",
 		}
 		body, _ := json.Marshal(input)

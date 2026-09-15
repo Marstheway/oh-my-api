@@ -27,10 +27,11 @@ type OrderEntry struct {
 type PlanNode struct {
 	GroupName  string
 	Mode       string
-	Weight     int          // 父节点对本节点的引用边权重
-	Leaves     []PlanLeaf   // 直接叶子
-	Children   []*PlanNode  // 内部引用的子 group 节点
-	ModelOrder []OrderEntry // models 列表中各条目的原始顺序
+	Weight     int                   // 父节点对本节点的引用边权重
+	Leaves     []PlanLeaf            // 直接叶子
+	Children   []*PlanNode           // 内部引用的子 group 节点
+	ModelOrder []OrderEntry          // models 列表中各条目的原始顺序
+	Sticky     *scheduler.StickyMeta // 可选 sticky session（已解析；仅 load-balance 有意义）
 }
 
 // hasAnyLeaf 递归判断主链路中是否含有任何叶子。
@@ -44,11 +45,6 @@ func (n *PlanNode) hasAnyLeaf() bool {
 		}
 	}
 	return false
-}
-
-// HasAnyLeafForTest 暴露主链路叶子检查，供 handler 内部特殊流程复用。
-func (n *PlanNode) HasAnyLeafForTest() bool {
-	return n.hasAnyLeaf()
 }
 
 // ResolveResult 解析结果，同时保留旧字段（向后兼容 handler）。
@@ -67,6 +63,7 @@ type modelGroupDef struct {
 	exposure      config.Exposure
 	models        config.ModelEntries
 	modelMetadata config.ModelMetadataConfig
+	sticky        *scheduler.StickyMeta
 }
 
 // redirectDef 内部保存 redirect 配置，扩展支持 exposure 字段
@@ -93,6 +90,17 @@ type Resolver struct {
 	groups    map[string]*modelGroupDef // group name -> def
 	redirects map[string]*redirectDef   // source → redirectDef（扩展）
 	providers map[string]config.ProviderConfig
+
+	// groupOrder / redirectOrder 保存配置声明顺序，供 ListUserModels 稳定输出。
+	// /v1/models 的展示顺序 = redirect（用户显式配置的重点模型）在前、group 在后，
+	// 各自块内严格按 YAML 书写顺序，不跨块混排、不依赖 map 随机迭代序。
+	groupOrder    []string
+	redirectOrder []string
+
+	// callableEntries 是构造期由 config.ListDirectCallableNames 计算并复制的不可变
+	// public/hidden 入口集合（名称 + 最终 group）。构建后不持有 *config.Config，
+	// 因此不受运行时 draft/active 后续原地修改影响；ListCallableEntries 只读取它。
+	callableEntries []CallableEntry
 
 	// smart route 索引
 	smartRoute *SmartRouteIndex // 若未启用则为 nil
@@ -130,11 +138,19 @@ func NewResolver(cfg *config.Config) (*Resolver, error) {
 		}
 		mode := g.Mode
 		if mode == "" {
-			if len(g.Models) == 1 {
-				mode = "concurrent"
-			} else {
-				mode = "failover"
+			mode = "failover"
+		}
+		// 归一化 mode：loadbalance -> load-balance
+		if mode == "loadbalance" {
+			mode = "load-balance"
+		}
+		var stickyMeta *scheduler.StickyMeta
+		if g.Sticky != nil {
+			meta, err := scheduler.ParseStickyMeta(g.Sticky.Enabled, g.Sticky.IdleTimeout)
+			if err != nil {
+				return nil, fmt.Errorf("model_groups[%q].sticky: %w", g.Name, err)
 			}
+			stickyMeta = meta
 		}
 		groups[g.Name] = &modelGroupDef{
 			name:          g.Name,
@@ -142,6 +158,7 @@ func NewResolver(cfg *config.Config) (*Resolver, error) {
 			exposure:      exposure,
 			models:        g.Models,
 			modelMetadata: g.ModelMetadata,
+			sticky:        stickyMeta,
 		}
 	}
 
@@ -151,23 +168,42 @@ func NewResolver(cfg *config.Config) (*Resolver, error) {
 		return nil, err
 	}
 
-	r := &Resolver{
-		groups:    groups,
-		redirects: redirects,
-		providers: cfg.Providers.Items,
+	// 记录 group 声明顺序（cfg.ModelGroups 是 slice，天然保序）。
+	groupOrder := make([]string, 0, len(cfg.ModelGroups))
+	for _, g := range cfg.ModelGroups {
+		groupOrder = append(groupOrder, g.Name)
 	}
 
-	// 3. 校验所有 group 内的 models 引用合法性（启动期，不等到 Resolve 调用）
+	// 记录 redirect 声明顺序（cfg.Redirect 是 slice，天然保序）。
+	redirectOrder := make([]string, 0, len(cfg.Redirect))
+	for _, rc := range cfg.Redirect {
+		redirectOrder = append(redirectOrder, rc.Source)
+	}
+
+	r := &Resolver{
+		groups:        groups,
+		redirects:     redirects,
+		providers:     cfg.Providers.Items,
+		groupOrder:    groupOrder,
+		redirectOrder: redirectOrder,
+	}
+
+	// 3. 构造期复制不可变 callable-entry 集合：复用 config.ListDirectCallableNames
+	//    的纯配置枚举（public/hidden 名称去重、稳定排序），并补充最终 group。
+	//    此后不再读取 *config.Config，规避 Apply 后 draft 被原地修改的未提交数据与竞态。
+	r.callableEntries = r.buildCallableEntries(cfg)
+
+	// 4. 校验所有 group 内的 models 引用合法性（启动期，不等到 Resolve 调用）
 	if err := r.validateGroupRefs(); err != nil {
 		return nil, err
 	}
 
-	// 4. 联合依赖图环检测
+	// 5. 联合依赖图环检测
 	if err := r.detectCycles(); err != nil {
 		return nil, err
 	}
 
-	// 5. 若配置了 smart_route，建立索引并执行 resolver 期校验
+	// 6. 若配置了 smart_route，建立索引并执行 resolver 期校验
 	if cfg.SmartRoute != nil {
 		sri, err := r.buildSmartRouteIndex(cfg)
 		if err != nil {
@@ -178,6 +214,21 @@ func NewResolver(cfg *config.Config) (*Resolver, error) {
 	}
 
 	return r, nil
+}
+
+// buildCallableEntries 基于配置枚举构建不可变 callable-entry 集合。
+// names 已由 config.ListDirectCallableNames 去重并稳定排序；最终 group 由已构建的
+// groups/redirects 映射解析（校验通过的配置必然可解析）。
+func (r *Resolver) buildCallableEntries(cfg *config.Config) []CallableEntry {
+	names := config.ListDirectCallableNames(cfg)
+	entries := make([]CallableEntry, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, CallableEntry{
+			Name:       name,
+			FinalGroup: r.resolveInternalName(name),
+		})
+	}
+	return entries
 }
 
 // buildSmartRouteIndex 构建 smart route 索引并执行 resolver 期校验。
@@ -357,22 +408,30 @@ func (r *Resolver) resolveInternalName(name string) string {
 }
 
 // Resolve 解析 userModel，返回协议无关 plan tree 及向后兼容的 Tasks。
+// 外部直调规则：public/hidden 允许，internal 拒绝。
 func (r *Resolver) Resolve(userModel string) (*ResolveResult, error) {
-	// 外部直调规则：public/hidden 允许，internal 拒绝
+	return r.resolveByName(userModel, false)
+}
+
+// ResolveInternal 按内部引用解析模型名（group 或 redirect），忽略 exposure 直调限制。
+func (r *Resolver) ResolveInternal(name string) (*ResolveResult, error) {
+	return r.resolveByName(name, true)
+}
+
+func (r *Resolver) resolveByName(userModel string, allowInternal bool) (*ResolveResult, error) {
 	def, isDirect := r.groups[userModel]
 	finalGroupName := userModel
 
 	if isDirect {
-		if !exposureDirectCallable(def.exposure) {
+		if !allowInternal && !exposureDirectCallable(def.exposure) {
 			return nil, ErrModelNotFound
 		}
 	} else {
-		// 尝试 redirect：以 alias 自身的 exposure 判断是否允许外部直调
 		redirectDef, ok := r.redirects[userModel]
 		if !ok {
 			return nil, ErrModelNotFound
 		}
-		if !exposureDirectCallable(redirectDef.exposure) {
+		if !allowInternal && !exposureDirectCallable(redirectDef.exposure) {
 			return nil, ErrModelNotFound
 		}
 		finalGroupName = redirectDef.finalGroup
@@ -437,6 +496,7 @@ func (r *Resolver) buildPlanNode(groupName string) (*PlanNode, error) {
 	node := &PlanNode{
 		GroupName: groupName,
 		Mode:      def.mode,
+		Sticky:    def.sticky,
 	}
 
 	// 解析 models
@@ -477,7 +537,12 @@ func (r *Resolver) buildPlanNode(groupName string) (*PlanNode, error) {
 	return node, nil
 }
 
-// BuildPlanNodeForTest 暴露内部 group 的 plan 构建能力，供非用户可见的内部流程复用。
+// ResolveInternalName maps an internal alias or group name to the final group name.
+func (r *Resolver) ResolveInternalName(name string) string {
+	return r.resolveInternalName(name)
+}
+
+// BuildPlanNodeForTest 暴露内部 group 的 plan 构建，仅供测试使用。
 func (r *Resolver) BuildPlanNodeForTest(groupName string) (*PlanNode, error) {
 	return r.buildPlanNode(groupName)
 }
@@ -617,21 +682,39 @@ func (r *Resolver) FinalGroupName(userModel string) string {
 }
 
 // ListUserModels 返回所有应出现在 /v1/models 的模型名（group + redirect，仅 public）。
+//
+// 顺序稳定且不依赖 map 随机迭代序：redirect（用户显式配置的重点模型）在前、
+// group 在后，各自块内严格按 YAML 声明顺序输出，不跨块混排。
 func (r *Resolver) ListUserModels() []string {
-	models := make([]string, 0)
-	// 1. 添加所有 public 的 group
-	for name, def := range r.groups {
-		if exposureListed(def.exposure) {
+	models := make([]string, 0, len(r.redirectOrder)+len(r.groupOrder))
+	// 1. 先加 public redirect（按声明顺序）
+	for _, source := range r.redirectOrder {
+		if def, ok := r.redirects[source]; ok && exposureListed(def.exposure) {
+			models = append(models, source)
+		}
+	}
+	// 2. 再加 public group（按声明顺序）
+	for _, name := range r.groupOrder {
+		if def, ok := r.groups[name]; ok && exposureListed(def.exposure) {
 			models = append(models, name)
 		}
 	}
-	// 2. 添加所有 public 的 redirect
-	for _, def := range r.redirects {
-		if exposureListed(def.exposure) {
-			models = append(models, def.source)
-		}
-	}
 	return models
+}
+
+// CallableEntry 表示 Spoke 可被 Hub 外部直调（public 或 hidden）的模型入口
+// 及其最终 model group 名，供 Cascade Spoke 构建元数据快照。
+type CallableEntry struct {
+	Name       string // 入口名（model group 名或 redirect source）
+	FinalGroup string // 入口解析后的最终 model group 名
+}
+
+// ListCallableEntries 返回所有 public 与 hidden 的 group / redirect 入口，绝不包含 internal。
+// 读取构造期复制的不可变集合并返回副本：名称集合与 config.ListDirectCallableNames
+// 一致（去重、稳定排序），且不持有或读取 *config.Config，避免运行时配置被原地修改
+// 导致未提交数据或数据竞争。
+func (r *Resolver) ListCallableEntries() []CallableEntry {
+	return append([]CallableEntry(nil), r.callableEntries...)
 }
 
 // IsEmbeddingsCompatiblePlan 判断 plan 是否兼容 embeddings 调度：

@@ -1,12 +1,13 @@
 package scheduler
 
 import (
-	"io"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,25 +28,25 @@ func TestExecuteNode_DisabledLeafRejected(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-prov": {
-			Endpoint:           srv.URL,
-			APIKey:             "test-key",
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	node := &RunNode{
 		IsLeaf: true,
 		Task: Task{
-			ProviderName:  "disabled-prov",
-			Provider:      providers["disabled-prov"],
-			UpstreamModel: "model",
+			ProviderName:     "disabled-prov",
+			Provider:         providers["disabled-prov"],
+			UpstreamModel:    "model",
+			DisableTimeRange: []string{"00:00-24:00"},
 		},
 		RequestFactory: func() (*http.Request, error) {
 			return http.NewRequest(http.MethodPost, srv.URL, nil)
@@ -96,11 +97,10 @@ func TestExecuteNode_LoadBalanceMixedPath_SkipsDisabledLeaf(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-prov": {
-			Endpoint:           successSrv.URL,
-			APIKey:             "test-key",
+			Endpoint:  successSrv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 		"enabled-prov": {
 			Endpoint:  successSrv.URL,
@@ -110,10 +110,10 @@ func TestExecuteNode_LoadBalanceMixedPath_SkipsDisabledLeaf(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	root := &RunNode{
 		IsLeaf: false,
@@ -130,6 +130,7 @@ func TestExecuteNode_LoadBalanceMixedPath_SkipsDisabledLeaf(t *testing.T) {
 					Provider:         providers["disabled-prov"],
 					UpstreamModel:    "model",
 					OutboundProtocol: "openai",
+					DisableTimeRange: []string{"00:00-24:00"},
 				},
 				RequestFactory: func() (*http.Request, error) {
 					return http.NewRequest(http.MethodPost, successSrv.URL, nil)
@@ -171,6 +172,98 @@ func TestExecuteNode_LoadBalanceMixedPath_SkipsDisabledLeaf(t *testing.T) {
 	}
 }
 
+// TestExecuteNode_LoadBalanceMixedPath_LeafSingleAllow 验证混合 LB 对直接叶子
+// 只 Allow 一次（QPM=1 仍能打通上游）；限流在 lbStrat.executeTask 内完成。
+func TestExecuteNode_LoadBalanceMixedPath_LeafSingleAllow(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"ok","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	providers := map[string]config.ProviderConfig{
+		"leaf-prov": {
+			Endpoint:  srv.URL,
+			APIKey:    "k",
+			Protocols: []string{"openai.chat"},
+			RateLimit: config.RateLimitConfig{QPM: 1},
+		},
+		"group-prov": {
+			Endpoint:  srv.URL,
+			APIKey:    "k",
+			Protocols: []string{"openai.chat"},
+			// 子 group 叶子给足配额；本用例通过 weight 让 LB 必选直接叶子
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+	}
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
+	rl := ratelimit.NewManager(providers)
+	h := health.NewChecker(3, 30*time.Second)
+	sched := New(rl, client, h, 500*time.Millisecond, 0, 0)
+
+	root := &RunNode{
+		IsLeaf: false,
+		Name:   "mixed-lb",
+		Mode:   "load-balance",
+		Children: []*RunNode{
+			{
+				IsLeaf: true,
+				Weight: 100,
+				Task: Task{
+					ProviderName:     "leaf-prov",
+					Provider:         providers["leaf-prov"],
+					UpstreamModel:    "m",
+					Weight:           100,
+					OutboundProtocol: "openai.chat",
+				},
+				RequestFactory: func() (*http.Request, error) {
+					return http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", nil)
+				},
+			},
+			{
+				IsLeaf: false,
+				Name:   "child",
+				Mode:   "failover",
+				Weight: 1,
+				Children: []*RunNode{
+					{
+						IsLeaf: true,
+						Task: Task{
+							ProviderName:     "group-prov",
+							Provider:         providers["group-prov"],
+							UpstreamModel:    "m",
+							OutboundProtocol: "openai.chat",
+						},
+						RequestFactory: func() (*http.Request, error) {
+							return http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", nil)
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := sched.ExecuteNode(context.Background(), root)
+	if err != nil {
+		t.Fatalf("expected success with single Allow, err=%v", err)
+	}
+	if result == nil || result.FailureKind != FailureKindSuccess {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	if result.Response != nil {
+		result.Response.Body.Close()
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("expected 1 upstream hit via direct leaf, got %d", hits.Load())
+	}
+	if result.Winner != "leaf-prov" {
+		t.Fatalf("expected leaf-prov winner, got %q", result.Winner)
+	}
+}
+
 // TestExecuteNode_LoadBalanceMixedPath_AllDisabled 验证 load-balance 混合路径中
 // 所有候选（包括 group 内叶子）均被禁用时，返回 ErrNoProviderAvailable。
 func TestExecuteNode_LoadBalanceMixedPath_AllDisabled(t *testing.T) {
@@ -181,21 +274,20 @@ func TestExecuteNode_LoadBalanceMixedPath_AllDisabled(t *testing.T) {
 	defer successSrv.Close()
 
 	disabledCfg := config.ProviderConfig{
-		Endpoint:           successSrv.URL,
-		APIKey:             "test-key",
+		Endpoint:  successSrv.URL,
+		APIKey:    "test-key",
 		Protocols: []string{"openai"},
-		RateLimit:          config.RateLimitConfig{QPM: 0},
-		DisabledTimeRanges: []string{"00:00-24:00"},
+		RateLimit: config.RateLimitConfig{QPM: 0},
 	}
 
 	providers := map[string]config.ProviderConfig{
 		"all-disabled": disabledCfg,
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	root := &RunNode{
 		IsLeaf: false,
@@ -210,6 +302,7 @@ func TestExecuteNode_LoadBalanceMixedPath_AllDisabled(t *testing.T) {
 					Provider:         disabledCfg,
 					UpstreamModel:    "model",
 					OutboundProtocol: "openai",
+					DisableTimeRange: []string{"00:00-24:00"},
 				},
 				RequestFactory: func() (*http.Request, error) {
 					return http.NewRequest(http.MethodPost, successSrv.URL, nil)
@@ -228,6 +321,7 @@ func TestExecuteNode_LoadBalanceMixedPath_AllDisabled(t *testing.T) {
 							Provider:         disabledCfg,
 							UpstreamModel:    "model",
 							OutboundProtocol: "openai",
+							DisableTimeRange: []string{"00:00-24:00"},
 						},
 						RequestFactory: func() (*http.Request, error) {
 							return http.NewRequest(http.MethodPost, successSrv.URL, nil)
@@ -255,11 +349,10 @@ func TestExecuteNode_FailoverMixedPath_SkipsDisabledLeaf(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-prov": {
-			Endpoint:           successSrv.URL,
-			APIKey:             "test-key",
+			Endpoint:  successSrv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 		"enabled-prov": {
 			Endpoint:  successSrv.URL,
@@ -269,10 +362,10 @@ func TestExecuteNode_FailoverMixedPath_SkipsDisabledLeaf(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	root := &RunNode{
 		IsLeaf: false,
@@ -287,6 +380,7 @@ func TestExecuteNode_FailoverMixedPath_SkipsDisabledLeaf(t *testing.T) {
 					Provider:         providers["disabled-prov"],
 					UpstreamModel:    "model",
 					OutboundProtocol: "openai",
+					DisableTimeRange: []string{"00:00-24:00"},
 				},
 				RequestFactory: func() (*http.Request, error) {
 					return http.NewRequest(http.MethodPost, successSrv.URL, nil)
@@ -337,11 +431,10 @@ func TestExecuteNode_ConcurrentMixedPath_SkipsDisabledLeaf(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-prov": {
-			Endpoint:           successSrv.URL,
-			APIKey:             "test-key",
+			Endpoint:  successSrv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 		"enabled-prov": {
 			Endpoint:  successSrv.URL,
@@ -351,10 +444,10 @@ func TestExecuteNode_ConcurrentMixedPath_SkipsDisabledLeaf(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	root := &RunNode{
 		IsLeaf: false,
@@ -369,6 +462,7 @@ func TestExecuteNode_ConcurrentMixedPath_SkipsDisabledLeaf(t *testing.T) {
 					Provider:         providers["disabled-prov"],
 					UpstreamModel:    "model",
 					OutboundProtocol: "openai",
+					DisableTimeRange: []string{"00:00-24:00"},
 				},
 				RequestFactory: func() (*http.Request, error) {
 					return http.NewRequest(http.MethodPost, successSrv.URL, nil)
@@ -408,12 +502,171 @@ func TestExecuteNode_ConcurrentMixedPath_SkipsDisabledLeaf(t *testing.T) {
 	}
 }
 
-// TestExecuteNode_FailoverSubGroupDeadlineExhausted 复现生产 bug:
-// load-balance 子 group 所有候选失败后消耗了父 context 的 deadline，
-// executeFailoverNodes 循环头部的 ctx.Err() 导致后续叶子候选被跳过。
-//
-// 修复后验证：即使 ctx 已过期，父 failover 仍应尝试后续候选
-// （RequestFactory 被调用），而不是直接返回 ctx.Err()。
+// TestExecuteNode_ConcurrentMixedPath_WinnerStreamSurvivesRaceCancel 验证混合
+// concurrent（叶子 + 子 group）选出流式胜者后，SSE tail 仍可读完。
+func TestExecuteNode_ConcurrentMixedPath_WinnerStreamSurvivesRaceCancel(t *testing.T) {
+	winnerURL, releaseTail, winnerCanceled := newHeldOpenAIStreamServer(t)
+	loserURL, loserCanceled := newCancelWatchServer(t)
+
+	providers := map[string]config.ProviderConfig{
+		"winner-prov": {
+			Endpoint:  winnerURL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+		"loser-prov": {
+			Endpoint:  loserURL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+	}
+
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
+	rl := ratelimit.NewManager(providers)
+	h := health.NewChecker(3, 30*time.Second)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
+
+	root := &RunNode{
+		IsLeaf: false,
+		Name:   "root",
+		Mode:   "concurrent",
+		Children: []*RunNode{
+			{
+				IsLeaf: true,
+				Task: Task{
+					ProviderName:     "loser-prov",
+					Provider:         providers["loser-prov"],
+					UpstreamModel:    "model",
+					OutboundProtocol: "openai",
+					Stream:           true,
+				},
+				RequestFactory: func() (*http.Request, error) {
+					return http.NewRequest(http.MethodPost, loserURL, nil)
+				},
+			},
+			{
+				IsLeaf: false,
+				Name:   "child-group",
+				Mode:   "failover",
+				Children: []*RunNode{
+					{
+						IsLeaf: true,
+						Task: Task{
+							ProviderName:     "winner-prov",
+							Provider:         providers["winner-prov"],
+							UpstreamModel:    "model",
+							OutboundProtocol: "openai",
+							Stream:           true,
+						},
+						RequestFactory: func() (*http.Request, error) {
+							return http.NewRequest(http.MethodPost, winnerURL, nil)
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := scheduler.ExecuteNode(context.Background(), root)
+	if err != nil {
+		t.Fatalf("ExecuteNode failed: %v", err)
+	}
+	defer result.Response.Body.Close()
+
+	if result.Winner != "winner-prov" {
+		t.Fatalf("winner = %q, want %q", result.Winner, "winner-prov")
+	}
+	if result.FailureKind != FailureKindSuccess {
+		t.Fatalf("FailureKind = %q, want %q", result.FailureKind, FailureKindSuccess)
+	}
+
+	select {
+	case <-loserCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loser request was not canceled after winner")
+	}
+
+	releaseTail()
+	body := string(readSchedulerResponseBody(t, result.Response))
+	if !strings.Contains(body, `"content":"hello"`) {
+		t.Fatalf("missing probed prefix in stream body: %q", body)
+	}
+	if !strings.Contains(body, `"content":" world"`) {
+		t.Fatalf("winner tail was cut off after mixed-path race cancel: %q", body)
+	}
+
+	select {
+	case <-winnerCanceled:
+		t.Fatal("winner request context was canceled after mixed-path race")
+	default:
+	}
+}
+
+// nestedAutoFlashThenOhmygpt builds auto=failover(_low load-balance, ohmygpt leaf).
+func nestedAutoFlashThenOhmygpt(
+	providers map[string]config.ProviderConfig,
+	failURL, successURL string,
+	ohmygptRequested *bool,
+) *RunNode {
+	return &RunNode{
+		IsLeaf: false,
+		Name:   "auto",
+		Mode:   "failover",
+		Children: []*RunNode{
+			{
+				IsLeaf: false,
+				Name:   "flash",
+				Mode:   "load-balance",
+				Children: []*RunNode{
+					{
+						IsLeaf: true,
+						Task: Task{
+							ProviderName:     "opencode-go",
+							Provider:         providers["opencode-go"],
+							UpstreamModel:    "deepseek-v4-flash",
+							OutboundProtocol: "openai",
+						},
+						RequestFactory: func() (*http.Request, error) {
+							return http.NewRequest(http.MethodPost, failURL, nil)
+						},
+					},
+					{
+						IsLeaf: true,
+						Task: Task{
+							ProviderName:     "opencode-zen",
+							Provider:         providers["opencode-zen"],
+							UpstreamModel:    "deepseek-v4-flash-free",
+							OutboundProtocol: "openai",
+						},
+						RequestFactory: func() (*http.Request, error) {
+							return http.NewRequest(http.MethodPost, failURL, nil)
+						},
+					},
+				},
+			},
+			{
+				IsLeaf: true,
+				Task: Task{
+					ProviderName:     "ohmygpt",
+					Provider:         providers["ohmygpt"],
+					UpstreamModel:    "deepseek-v4-flash",
+					OutboundProtocol: "openai",
+				},
+				RequestFactory: func() (*http.Request, error) {
+					if ohmygptRequested != nil {
+						*ohmygptRequested = true
+					}
+					return http.NewRequest(http.MethodPost, successURL, nil)
+				},
+			},
+		},
+	}
+}
+
+// TestExecuteNode_FailoverSubGroupDeadlineExhausted 验证：父 request deadline 已耗尽时，
+// 不得再发起后续候选（死 ctx 上继续尝试只会空转）。f26ac2e 的「继续试」行为已收回。
 func TestExecuteNode_FailoverSubGroupDeadlineExhausted(t *testing.T) {
 	var ohmygptRequested bool
 
@@ -423,7 +676,7 @@ func TestExecuteNode_FailoverSubGroupDeadlineExhausted(t *testing.T) {
 	}))
 	defer successSrv.Close()
 
-	// 模拟耗时失败
+	// 模拟耗时失败，拖垮短 deadline
 	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(http.StatusBadGateway)
@@ -452,72 +705,229 @@ func TestExecuteNode_FailoverSubGroupDeadlineExhausted(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 100*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 100*time.Millisecond, 0, 0)
 
-	root := &RunNode{
-		IsLeaf: false,
-		Name:   "auto",
-		Mode:   "failover",
-		Children: []*RunNode{
-			{
-				IsLeaf: false,
-				Name:   "flash",
-				Mode:   "load-balance",
-				Children: []*RunNode{
-					{
-						IsLeaf: true,
-						Task: Task{
-							ProviderName:     "opencode-go",
-							Provider:         providers["opencode-go"],
-							UpstreamModel:    "deepseek-v4-flash",
-							OutboundProtocol: "openai",
-						},
-						RequestFactory: func() (*http.Request, error) {
-							return http.NewRequest(http.MethodPost, failSrv.URL, nil)
-						},
-					},
-					{
-						IsLeaf: true,
-						Task: Task{
-							ProviderName:     "opencode-zen",
-							Provider:         providers["opencode-zen"],
-							UpstreamModel:    "deepseek-v4-flash-free",
-							OutboundProtocol: "openai",
-						},
-						RequestFactory: func() (*http.Request, error) {
-							return http.NewRequest(http.MethodPost, failSrv.URL, nil)
-						},
-					},
-				},
-			},
-			{
-				IsLeaf: true,
-				Task: Task{
-					ProviderName:     "ohmygpt",
-					Provider:         providers["ohmygpt"],
-					UpstreamModel:    "deepseek-v4-flash",
-					OutboundProtocol: "openai",
-				},
-				RequestFactory: func() (*http.Request, error) {
-					ohmygptRequested = true
-					return http.NewRequest(http.MethodPost, successSrv.URL, nil)
-				},
-			},
-		},
-	}
+	root := nestedAutoFlashThenOhmygpt(providers, failSrv.URL, successSrv.URL, &ohmygptRequested)
 
-	// 短 deadline：子 group 400ms+ 尝试后 ctx 已过期
+	// 短 deadline：子 group 尝试后 ctx 已过期
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	_, _ = scheduler.ExecuteNode(ctx, root)
+	_, err := scheduler.ExecuteNode(ctx, root)
 
-	// 核心验证：ohmygpt 的 RequestFactory 应被调用（不含 ctx.Err() 短路）
-	if !ohmygptRequested {
-		t.Fatal("ohmygpt RequestFactory was not called — failover short-circuited on ctx.Err()")
+	if ohmygptRequested {
+		t.Fatal("ohmygpt RequestFactory must not be called after parent deadline is exhausted")
+	}
+	if err == nil {
+		t.Fatal("expected deadline/cancel error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		// First leaf may surface deadline via client Do; accept either abort form.
+		if !IsContextAbort(err) {
+			t.Fatalf("expected context abort, got %v", err)
+		}
+	}
+}
+
+// cancel-test helpers: block until request ctx done; signal first start.
+
+func newBlockingServer(t *testing.T) (url string, started <-chan struct{}, cleanup func()) {
+	t.Helper()
+	ch := make(chan struct{}, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+	}))
+	return srv.URL, ch, srv.Close
+}
+
+func newOKServer(t *testing.T) (url string, hits *int32, cleanup func()) {
+	t.Helper()
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&n, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	return srv.URL, &n, srv.Close
+}
+
+func providerPair(blockURL, otherURL string) map[string]config.ProviderConfig {
+	return map[string]config.ProviderConfig{
+		"p1": {Endpoint: blockURL, APIKey: "k", Protocols: []string{"openai"}, RateLimit: config.RateLimitConfig{QPM: 0}},
+		"p2": {Endpoint: otherURL, APIKey: "k", Protocols: []string{"openai"}, RateLimit: config.RateLimitConfig{QPM: 0}},
+	}
+}
+
+func leafNode(name string, p config.ProviderConfig, model, protocol, rawURL string, weight int) *RunNode {
+	return &RunNode{
+		IsLeaf: true,
+		Task: Task{
+			ProviderName: name, Provider: p, UpstreamModel: model,
+			OutboundProtocol: protocol, Weight: weight,
+		},
+		RequestFactory: func() (*http.Request, error) {
+			return http.NewRequest(http.MethodPost, rawURL, nil)
+		},
+	}
+}
+
+func runUntilStartedThenCancel(t *testing.T, started <-chan struct{}, fn func(ctx context.Context) error) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		defer close(done)
+		runErr = fn(ctx)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("upstream never started")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ExecuteNode did not return after cancel")
+	}
+	return runErr
+}
+
+// TestExecuteNode_ClientCancelStopsNestedFailover 验证客户端断开后，
+// 嵌套 auto failover 不得继续尝试后续叶子（ohmygpt）。
+func TestExecuteNode_ClientCancelStopsNestedFailover(t *testing.T) {
+	var ohmygptRequested bool
+	blockURL, started, closeBlock := newBlockingServer(t)
+	defer closeBlock()
+	okURL, _, closeOK := newOKServer(t)
+	defer closeOK()
+
+	providers := map[string]config.ProviderConfig{
+		"opencode-go":  {Endpoint: blockURL, APIKey: "test-key", Protocols: []string{"openai"}, RateLimit: config.RateLimitConfig{QPM: 0}},
+		"opencode-zen": {Endpoint: blockURL, APIKey: "test-key", Protocols: []string{"openai"}, RateLimit: config.RateLimitConfig{QPM: 0}},
+		"ohmygpt":      {Endpoint: okURL, APIKey: "test-key", Protocols: []string{"openai"}, RateLimit: config.RateLimitConfig{QPM: 0}},
+	}
+	h := health.NewChecker(3, 30*time.Second)
+	scheduler := New(ratelimit.NewManager(providers), provider.NewClient(providers, 120*time.Second, 0, 0), h, 500*time.Millisecond, 0, 0)
+	root := nestedAutoFlashThenOhmygpt(providers, blockURL, okURL, &ohmygptRequested)
+
+	runErr := runUntilStartedThenCancel(t, started, func(ctx context.Context) error {
+		_, err := scheduler.ExecuteNode(ctx, root)
+		return err
+	})
+	if ohmygptRequested {
+		t.Fatal("ohmygpt must not be attempted after client cancel")
+	}
+	if runErr == nil || !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", runErr)
+	}
+	if !h.IsHealthy(health.MakeHealthKey("opencode-go", "openai")) {
+		t.Fatal("client cancel must not ReportFailure on provider health")
+	}
+}
+
+// TestExecuteTask_ClientCancelDoesNotReportFailure 纯叶子 failover：cancel 不扣健康分，且不打下一个候选。
+func TestExecuteTask_ClientCancelDoesNotReportFailure(t *testing.T) {
+	blockURL, started, closeBlock := newBlockingServer(t)
+	defer closeBlock()
+	okURL, p2Hits, closeOK := newOKServer(t)
+	defer closeOK()
+
+	providers := providerPair(blockURL, okURL)
+	h := health.NewChecker(1, 30*time.Second) // threshold 1: one ReportFailure would unhealth
+	scheduler := New(ratelimit.NewManager(providers), provider.NewClient(providers, 120*time.Second, 0, 0), h, 500*time.Millisecond, 0, 0)
+	root := &RunNode{
+		IsLeaf: false, Name: "group", Mode: "failover",
+		Children: []*RunNode{
+			leafNode("p1", providers["p1"], "m", "openai", blockURL, 0),
+			// allLeaves may materialize factories eagerly; assert via p2Hits (actual Do).
+			leafNode("p2", providers["p2"], "m", "openai", okURL, 0),
+		},
+	}
+
+	_ = runUntilStartedThenCancel(t, started, func(ctx context.Context) error {
+		_, err := scheduler.ExecuteNode(ctx, root)
+		return err
+	})
+	if atomic.LoadInt32(p2Hits) != 0 {
+		t.Fatalf("p2 must not be hit after cancel, hits=%d", atomic.LoadInt32(p2Hits))
+	}
+	if !h.IsHealthy(health.MakeHealthKey("p1", "openai")) {
+		t.Fatal("cancel must not mark p1 unhealthy")
+	}
+}
+
+// TestExecuteNode_ClientCancelStopsLoadBalance further sequential candidates.
+func TestExecuteNode_ClientCancelStopsLoadBalance(t *testing.T) {
+	var hits int32
+	started := make(chan struct{}, 2)
+	blockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+		}
+		<-r.Context().Done()
+	}))
+	defer blockSrv.Close()
+
+	providers := providerPair(blockSrv.URL, blockSrv.URL)
+	scheduler := New(ratelimit.NewManager(providers), provider.NewClient(providers, 120*time.Second, 0, 0), health.NewChecker(3, 30*time.Second), 500*time.Millisecond, 0, 0)
+	root := &RunNode{
+		IsLeaf: false, Name: "lb", Mode: "load-balance",
+		Children: []*RunNode{
+			leafNode("p1", providers["p1"], "m", "openai", blockSrv.URL, 1),
+			leafNode("p2", providers["p2"], "m", "openai", blockSrv.URL, 1),
+		},
+	}
+
+	runErr := runUntilStartedThenCancel(t, started, func(ctx context.Context) error {
+		_, err := scheduler.ExecuteNode(ctx, root)
+		return err
+	})
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("load-balance must attempt exactly 1 candidate after client cancel, hits=%d", got)
+	}
+	if runErr == nil || !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", runErr)
+	}
+}
+
+// TestExecuteNode_ClientCancelStopsConcurrent cancels the race and returns abort.
+func TestExecuteNode_ClientCancelStopsConcurrent(t *testing.T) {
+	blockURL, started, closeBlock := newBlockingServer(t)
+	defer closeBlock()
+
+	providers := providerPair(blockURL, blockURL)
+	h := health.NewChecker(3, 30*time.Second)
+	scheduler := New(ratelimit.NewManager(providers), provider.NewClient(providers, 120*time.Second, 0, 0), h, 500*time.Millisecond, 0, 0)
+	root := &RunNode{
+		IsLeaf: false, Name: "race", Mode: "concurrent",
+		Children: []*RunNode{
+			leafNode("p1", providers["p1"], "m", "openai", blockURL, 0),
+			leafNode("p2", providers["p2"], "m", "openai", blockURL, 0),
+		},
+	}
+
+	runErr := runUntilStartedThenCancel(t, started, func(ctx context.Context) error {
+		_, err := scheduler.ExecuteNode(ctx, root)
+		return err
+	})
+	if runErr == nil || !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", runErr)
+	}
+	if !h.IsHealthy(health.MakeHealthKey("p1", "openai")) || !h.IsHealthy(health.MakeHealthKey("p2", "openai")) {
+		t.Fatal("concurrent client cancel must not mark providers unhealthy")
 	}
 }
 
@@ -568,10 +978,10 @@ func TestExecuteNode_FailoverSubGroupPrefillTimeoutFallsThrough(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 2*time.Second, 0)
+	client := provider.NewClient(providers, 2*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 50*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 50*time.Millisecond, 0, 0)
 
 	newStreamReq := func(rawURL string) (*http.Request, error) {
 		body := io.NopCloser(strings.NewReader(`{"model":"deepseek-v4-flash","stream":true}`))

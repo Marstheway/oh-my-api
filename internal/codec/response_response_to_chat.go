@@ -10,7 +10,6 @@ import (
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
-	"github.com/gin-gonic/gin"
 )
 
 // convertOpenAIResponseToChat 将 Responses API 非流式响应转换为 Chat 格式。
@@ -179,12 +178,16 @@ func usageFromResponsesUsage(src *dto.ResponsesUsage) dto.Usage {
 		usage.PromptTokensDetails.AudioTokens = src.InputTokensDetails.AudioTokens
 	}
 
-	// 映射 completion_tokens_details.reasoning_tokens -> CompletionTokensDetails.ReasoningTokens
-	if src.CompletionTokensDetails != nil && src.CompletionTokensDetails.ReasoningTokens != 0 {
+	// 映射 output_tokens_details.reasoning_tokens，兼容旧字段 completion_tokens_details。
+	outputDetails := src.OutputTokensDetails
+	if outputDetails == nil {
+		outputDetails = src.CompletionTokensDetails
+	}
+	if outputDetails != nil && outputDetails.ReasoningTokens != 0 {
 		if usage.CompletionTokensDetails == nil {
 			usage.CompletionTokensDetails = &dto.UsageDetails{}
 		}
-		usage.CompletionTokensDetails.ReasoningTokens = src.CompletionTokensDetails.ReasoningTokens
+		usage.CompletionTokensDetails.ReasoningTokens = outputDetails.ReasoningTokens
 	}
 
 	return usage
@@ -208,15 +211,45 @@ func responsesFinishReasonFromStatus(resp *dto.ResponsesResponse) (string, bool)
 }
 
 // writeOpenAIResponseAsChatResponse 读取 Responses API 格式的响应体，转换后以 Chat 格式写回客户端。
-func writeOpenAIResponseAsChatResponse(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
-	body, err := io.ReadAll(resp.Body)
+func writeOpenAIResponseAsChatResponse(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+	responsesResp, err := readResponsesResponseForNonStream(resp, counter)
 	if err != nil {
 		return err
 	}
 
-	var responsesResp dto.ResponsesResponse
-	if err := json.Unmarshal(body, &responsesResp); err != nil {
+	chatResp, err := convertOpenAIResponseToChat(responsesResp)
+	if err != nil {
 		return err
+	}
+
+	if rmc.RequestedModel != "" {
+		chatResp.Model = rmc.RequestedModel
+	}
+
+	if err := writeJSON(w, http.StatusOK, chatResp); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readResponsesResponseForNonStream(resp *http.Response, counter TokenCounter) (*dto.ResponsesResponse, error) {
+	if isResponsesStreamContentType(resp.Header.Get("Content-Type")) {
+		return readResponsesStreamToObject(resp.Body, counter)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	responsesResp, _, compat, err := readResponsesNonStreamBody(body)
+	if err != nil {
+		return nil, err
+	}
+	if compat.Changed() {
+		slog.Debug("responses compat normalized response body",
+			"fixed_paths", compat.FixedPaths,
+		)
 	}
 
 	if counter != nil {
@@ -239,36 +272,28 @@ func writeOpenAIResponseAsChatResponse(c *gin.Context, resp *http.Response, coun
 		}
 	}
 
-	chatResp, err := convertOpenAIResponseToChat(&responsesResp)
-	if err != nil {
-		return err
-	}
-
-	if rmc.RequestedModel != "" {
-		chatResp.Model = rmc.RequestedModel
-	}
-
-	c.JSON(http.StatusOK, chatResp)
-	return nil
+	return responsesResp, nil
 }
 
 // writeOpenAIResponseStreamAsChatStream 读取 Responses API SSE 流，转换后以 Chat SSE 格式写回客户端。
-func writeOpenAIResponseStreamAsChatStream(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
-	flusher, ok := c.Writer.(http.Flusher)
+func writeOpenAIResponseStreamAsChatStream(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
 	}
 
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
 
-	mapper := newResponsesToChatStreamMapper("", requestedModel, 0)
+	mapper := newResponsesToChatStreamMapper("", rmc.RequestedModel, 0)
 	err := scanSSEData(resp.Body, func(data string) error {
-		var event dto.ResponsesStreamEvent
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
+		res, err := normalizeResponsesEventData([]byte(data))
+		if err != nil {
 			return nil
 		}
+		event := res.Event
+
 		if counter != nil {
 			if sc, ok := counter.(*token.StreamCounter); ok {
 				switch event.Type {
@@ -283,25 +308,42 @@ func writeOpenAIResponseStreamAsChatStream(c *gin.Context, resp *http.Response, 
 				}
 			}
 		}
-		chunks, err := mapper.Map(event)
+		chunks, err := mapper.Map(*event)
 		if err != nil {
 			return err
 		}
 		for _, chunk := range chunks {
-			payload, err := json.Marshal(chunk)
-			if err != nil {
-				return err
+			// 按 Design Rules「Chat 写回层」处理 usage
+			var usageToSend *dto.Usage
+			if chunk.Usage != nil {
+				usageToSend = chunk.Usage
+				chunk.Usage = nil
 			}
-			if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", payload); err != nil {
-				return err
+
+			// 判断 base chunk 是否有可写内容
+			if len(chunk.Choices) > 0 {
+				payload, marshalErr := json.Marshal(chunk)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", payload); writeErr != nil {
+					return writeErr
+				}
+				flusher.Flush()
 			}
-			flusher.Flush()
-		}
-		if event.Type == "response.completed" {
-			if _, err := fmt.Fprintf(c.Writer, "data: [DONE]\n\n"); err != nil {
-				return err
+
+			// 仅当 IncludeUsage==true 时发送 usage-only chunk
+			if usageToSend != nil && rmc.IncludeUsage {
+				usageChunk := buildOpenAIStreamUsageChunk(chunk, *usageToSend)
+				usageData, marshalErr := json.Marshal(usageChunk)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", usageData); writeErr != nil {
+					return writeErr
+				}
+				flusher.Flush()
 			}
-			flusher.Flush()
 		}
 		return nil
 	})
@@ -310,6 +352,12 @@ func writeOpenAIResponseStreamAsChatStream(c *gin.Context, resp *http.Response, 
 		if sc, ok := counter.(*token.StreamCounter); ok {
 			sc.ComputeOutputTokens()
 		}
+	}
+
+	// 流结束写一次 [DONE]
+	if err == nil {
+		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
 	}
 
 	return err

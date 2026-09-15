@@ -60,11 +60,7 @@ func extractAPIKey(c *gin.Context) string {
 		return auth
 	}
 
-	if key := c.GetHeader("x-api-key"); key != "" {
-		return key
-	}
-
-	return c.Query("api_key")
+	return c.GetHeader("x-api-key")
 }
 
 func detectInboundProtocol(c *gin.Context) errors.Protocol {

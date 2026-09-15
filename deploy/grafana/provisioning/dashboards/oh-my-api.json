@@ -63,12 +63,12 @@
       "id": 1,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "delta"
+            "lastNotNull"
           ],
           "fields": "",
           "values": false
@@ -78,7 +78,9 @@
       "targets": [
         {
           "expr": "sum(increase(request_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[$__range]))",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "title": "总请求数",
@@ -125,12 +127,12 @@
       "id": 2,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "delta"
+            "lastNotNull"
           ],
           "fields": "",
           "values": false
@@ -140,7 +142,9 @@
       "targets": [
         {
           "expr": "sum(increase(token_input_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[$__range]))",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "title": "输入 Token",
@@ -187,12 +191,12 @@
       "id": 3,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "delta"
+            "lastNotNull"
           ],
           "fields": "",
           "values": false
@@ -202,7 +206,9 @@
       "targets": [
         {
           "expr": "sum(increase(token_output_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[$__range]))",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "title": "输出 Token",
@@ -452,7 +458,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(request_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\",status=\"error\"}[5m])) / sum(rate(request_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[5m]))",
+          "expr": "sum(rate(request_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\",status=~\"error|upstream_read_error|upstream_timeout|upstream_eof\"}[5m])) / sum(rate(request_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[5m]))",
           "refId": "A"
         }
       ],
@@ -907,12 +913,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (provider) (rate(token_input_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[5m]) > 0) * 60",
-          "legendFormat": "{{provider}}",
+          "expr": "sum by (provider, upstream_model) (rate(token_input_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[5m]) > 0) * 60",
+          "legendFormat": "{{provider}} / {{upstream_model}}",
           "refId": "A"
         }
       ],
-      "title": "按 Provider 每分钟输入 Token",
+      "title": "按 Provider / Upstream Model 的输入 Token 吞吐量 (tokens/min)",
       "type": "timeseries"
     },
     {
@@ -982,12 +988,87 @@
       },
       "targets": [
         {
-          "expr": "sum by (provider) (rate(token_output_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[5m]) > 0) * 60",
-          "legendFormat": "{{provider}}",
+          "expr": "sum by (provider, upstream_model) (rate(token_output_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[5m]) > 0) * 60",
+          "legendFormat": "{{provider}} / {{upstream_model}}",
           "refId": "A"
         }
       ],
-      "title": "按 Provider 每分钟输出 Token",
+      "title": "按 Provider / Upstream Model 的输出 Token 吞吐量 (tokens/min)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "unit": "tokens/s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 25,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (provider, upstream_model) (rate(stream_decode_output_tokens_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[5m])) / sum by (provider, upstream_model) (rate(stream_decode_duration_seconds_total{key_name=~\"$key\",provider=~\"$provider\",upstream_model=~\"$model\"}[5m]))",
+          "legendFormat": "{{provider}} / {{upstream_model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Decode TPS (tokens/s)",
       "type": "timeseries"
     },
     {
@@ -1040,7 +1121,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 56
       },
       "id": 11,
       "options": {
@@ -1117,7 +1198,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 56
+        "y": 64
       },
       "id": 12,
       "options": {
@@ -1178,7 +1259,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 56
+        "y": 64
       },
       "id": 13,
       "options": {
@@ -1254,7 +1335,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 64
+        "y": 72
       },
       "id": 14,
       "options": {
@@ -1329,7 +1410,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 72
+        "y": 80
       },
       "id": 16,
       "options": {
@@ -1404,7 +1485,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 80
+        "y": 88
       },
       "id": 17,
       "options": {
@@ -1479,7 +1560,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 80
+        "y": 88
       },
       "id": 18,
       "options": {
@@ -1554,7 +1635,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 72
+        "y": 80
       },
       "id": 19,
       "options": {
@@ -1629,7 +1710,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 88
+        "y": 96
       },
       "id": 20,
       "options": {
@@ -1652,6 +1733,81 @@
         }
       ],
       "title": "Provider Attempt 失败延迟 P95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 96
+      },
+      "id": 26,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (provider, upstream_model) (rate(provider_attempt_total{provider=~\"$provider\",upstream_model=~\"$model\",failure_reason=\"quota_exceeded\"}[5m]) > 0) * 60",
+          "legendFormat": "{{provider}}/{{upstream_model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "额度失败（Quota Exceeded）",
       "type": "timeseries"
     },
     {
@@ -1704,7 +1860,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 96
+        "y": 104
       },
       "id": 22,
       "options": {

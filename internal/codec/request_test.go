@@ -2,6 +2,7 @@ package codec
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
@@ -1347,7 +1348,6 @@ func TestOpenAIResponseCodec_EncodeRequest_ToOpenAIChat_TextParts(t *testing.T) 
 	}
 }
 
-
 func TestAnthropicMessagesCodec_EncodeRequest_ToOpenAIResponse_ViaChat_JSONPath(t *testing.T) {
 	// 验证通过完整 JSON 序列化/反序列化路径时（模拟真实 HTTP 请求），
 	// []any (map[string]any) 格式的 ContentBlock 能被正确转换。
@@ -2645,6 +2645,7 @@ func TestOpenAIChatToAnthropic_ReasoningEffort(t *testing.T) {
 		{"low", "enabled", 1280},
 		{"medium", "enabled", 2048},
 		{"high", "enabled", 4096},
+		{"none", "disabled", 0},
 		{"invalid", "", 0},
 	}
 
@@ -2674,6 +2675,12 @@ func TestOpenAIChatToAnthropic_ReasoningEffort(t *testing.T) {
 			}
 			if out.Thinking.Type != tt.expectType {
 				t.Fatalf("thinking.type = %v, want %v", out.Thinking.Type, tt.expectType)
+			}
+			if tt.expectBudget == 0 {
+				if out.Thinking.BudgetTokens != nil {
+					t.Fatalf("thinking.budget_tokens = %v, want nil", out.Thinking.BudgetTokens)
+				}
+				return
 			}
 			if out.Thinking.BudgetTokens == nil || *out.Thinking.BudgetTokens != tt.expectBudget {
 				t.Fatalf("thinking.budget_tokens = %v, want %d", out.Thinking.BudgetTokens, tt.expectBudget)
@@ -3002,5 +3009,903 @@ func TestOpenAIChatToAnthropic_ConsecutiveSameRoleTextMerge(t *testing.T) {
 	}
 	if out.Messages[0].Content != "Hello world" {
 		t.Fatalf("merged user content = %v, want 'Hello world'", out.Messages[0].Content)
+	}
+}
+
+// TestChatToResponse_Reasoning 测试 reasoning_effort 映射
+func TestChatToResponse_Reasoning(t *testing.T) {
+	c := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model:           "gpt-4",
+		ReasoningEffort: "high",
+		Messages: []dto.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	}
+
+	payload, err := c.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if out.Reasoning == nil || out.Reasoning.Effort != "high" {
+		t.Fatalf("reasoning.effort = %v, want 'high'", out.Reasoning)
+	}
+}
+
+// TestChatToResponse_MaxCompletion 测试 max_completion_tokens 映射
+func TestChatToResponse_MaxCompletion(t *testing.T) {
+	c := &OpenAIChatCodec{}
+
+	// 测试 MaxCompletionTokens 优先
+	maxComp := 100
+	req1 := &dto.ChatCompletionRequest{
+		Model:               "gpt-4",
+		MaxCompletionTokens: &maxComp,
+		MaxTokens:           50,
+		Messages: []dto.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	}
+
+	payload1, err := c.EncodeRequest(FormatOpenAIResponse, req1, "gpt-4o", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out1 dto.ResponsesRequest
+	if err := json.Unmarshal(payload1, &out1); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if out1.MaxOutputTokens != 100 {
+		t.Fatalf("max_output_tokens = %d, want 100 (from MaxCompletionTokens)", out1.MaxOutputTokens)
+	}
+
+	// 测试 MaxTokens 回退
+	req2 := &dto.ChatCompletionRequest{
+		Model:     "gpt-4",
+		MaxTokens: 50,
+		Messages: []dto.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	}
+
+	payload2, err := c.EncodeRequest(FormatOpenAIResponse, req2, "gpt-4o", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out2 dto.ResponsesRequest
+	if err := json.Unmarshal(payload2, &out2); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if out2.MaxOutputTokens != 50 {
+		t.Fatalf("max_output_tokens = %d, want 50 (from MaxTokens)", out2.MaxOutputTokens)
+	}
+}
+
+// TestChatToResponse_StreamOptions 测试 stream_options 透传
+func TestChatToResponse_StreamOptions(t *testing.T) {
+	c := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model:  "gpt-4",
+		Stream: true,
+		StreamOptions: &dto.StreamOptions{
+			IncludeUsage: true,
+		},
+		Messages: []dto.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	}
+
+	payload, err := c.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if out.StreamOptions == nil || !out.StreamOptions.IncludeUsage {
+		t.Fatalf("stream_options.include_usage not preserved")
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_ToolMultimodalContent 测试 tool 消息包含多模态内容（图片）时不报错，
+// content 整体序列化为字符串放入 function_call_output.output。
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_ToolMultimodalContent(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{
+				Role: "assistant",
+				ToolCalls: []dto.ToolCall{
+					{ID: "call-img", Type: "function", Function: dto.ToolCallFunc{Name: "view_image", Arguments: `{}`}},
+				},
+			},
+			{
+				Role:       "tool",
+				ToolCallID: "call-img",
+				Content: []any{
+					map[string]any{"type": "text", "text": "screenshot result:"},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,AAAA"}},
+				},
+			},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("input length = %d, want 2", len(items))
+	}
+
+	fcoItem := items[1]
+	if fcoItem["type"] != "function_call_output" {
+		t.Fatalf("item type = %v, want function_call_output", fcoItem["type"])
+	}
+	if fcoItem["call_id"] != "call-img" {
+		t.Fatalf("call_id = %v, want call-img", fcoItem["call_id"])
+	}
+
+	output, ok := fcoItem["output"].(string)
+	if !ok {
+		t.Fatalf("output is not string: %T", fcoItem["output"])
+	}
+	// output 应保留序列化后的多模态 content，而不是转换报错
+	var blocks []map[string]any
+	if err := json.Unmarshal([]byte(output), &blocks); err != nil {
+		t.Fatalf("output is not serialized content JSON: %v", err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("output blocks length = %d, want 2", len(blocks))
+	}
+	if blocks[1]["type"] != "image_url" {
+		t.Fatalf("output blocks[1].type = %v, want image_url", blocks[1]["type"])
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_ToolMissingCallID 测试 tool 消息缺少 call_id 时降级为 user 消息。
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_ToolMissingCallID(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{Role: "tool", Content: "orphan tool output"},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("input length = %d, want 1", len(items))
+	}
+	item := items[0]
+	if item["type"] != "message" {
+		t.Fatalf("item type = %v, want message", item["type"])
+	}
+	if item["role"] != "user" {
+		t.Fatalf("item role = %v, want user", item["role"])
+	}
+	content, ok := item["content"].(string)
+	if !ok {
+		t.Fatalf("content is not string: %T", item["content"])
+	}
+	if !strings.Contains(content, "[tool_output_missing_call_id]") {
+		t.Fatalf("content = %q, want contains [tool_output_missing_call_id]", content)
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_AssistantMultimodalContent 测试 assistant 消息包含多模态内容（图片）时
+// 仅保留 output_text，丢弃 input_image（Responses API 不允许 assistant 携带 input_* part）。
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_AssistantMultimodalContent(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "text", "text": "Here is the image:"},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,BBBB"}},
+				},
+			},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("input length = %d, want 1", len(items))
+	}
+	item := items[0]
+	if item["type"] != "message" || item["role"] != "assistant" {
+		t.Fatalf("item = %v, want assistant message", item)
+	}
+	var content []map[string]any
+	contentBytes, _ := json.Marshal(item["content"])
+	if err := json.Unmarshal(contentBytes, &content); err != nil {
+		t.Fatalf("failed to parse content: %v", err)
+	}
+	// Responses API 不允许 assistant 消息携带 input_image part，图片块应被丢弃，仅保留文本
+	if len(content) != 1 {
+		t.Fatalf("content length = %d, want 1 (image dropped)", len(content))
+	}
+	if content[0]["type"] != "output_text" {
+		t.Fatalf("content[0].type = %v, want output_text", content[0]["type"])
+	}
+	if content[0]["text"] != "Here is the image:" {
+		t.Fatalf("content[0].text = %v, want 'Here is the image:'", content[0]["text"])
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_SystemMultimodalContent 测试 system 消息包含多模态内容时
+// 降级提取文本部分，不报错。
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_SystemMultimodalContent(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{
+				Role: "system",
+				Content: []any{
+					map[string]any{"type": "text", "text": "You are helpful."},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,CCCC"}},
+				},
+			},
+			{Role: "user", Content: "Hello"},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	// instructions 应保留文本部分，多模态块被忽略
+	var instructions string
+	if err := json.Unmarshal(out.Instructions, &instructions); err != nil {
+		t.Fatalf("failed to unmarshal instructions: %v", err)
+	}
+	if !strings.Contains(instructions, "You are helpful.") {
+		t.Fatalf("instructions = %q, want contains 'You are helpful.'", instructions)
+	}
+}
+
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_LegacyFunctionCall(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{Role: "user", Content: "Check the weather"},
+			{
+				Role:         "assistant",
+				Content:      nil,
+				FunctionCall: &dto.ToolCallFunc{Name: "get_weather", Arguments: `{"city":"Beijing"}`},
+			},
+			{Role: "function", Name: "get_weather", Content: map[string]any{"temperature": 26}},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal response request: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("input length = %d, want 3", len(items))
+	}
+	if items[1]["type"] != "function_call" || items[1]["name"] != "get_weather" {
+		t.Fatalf("items[1] = %v, want get_weather function_call", items[1])
+	}
+	callID, ok := items[1]["call_id"].(string)
+	if !ok || callID == "" {
+		t.Fatalf("items[1].call_id = %v, want non-empty string", items[1]["call_id"])
+	}
+	if items[2]["type"] != "function_call_output" || items[2]["call_id"] != callID {
+		t.Fatalf("items[2] = %v, want output paired with %q", items[2], callID)
+	}
+	if _, exists := items[2]["name"]; exists {
+		t.Fatalf("items[2] must not contain message-level name: %v", items[2])
+	}
+}
+
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_DropsReasoningContentForNonDeepSeek(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	reasoning := "private reasoning"
+	req := &dto.ChatCompletionRequest{
+		Messages: []dto.Message{{
+			Role:             "assistant",
+			ReasoningContent: &reasoning,
+			Content:          "answer",
+		}},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal response request: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	if len(items) != 1 || items[0]["type"] != "message" {
+		t.Fatalf("items = %v, want only assistant message", items)
+	}
+}
+
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_ReplaysReasoningContent(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	reasoning := "think before calling"
+	req := &dto.ChatCompletionRequest{
+		Model: "deepseek",
+		Messages: []dto.Message{
+			{
+				Role:             "assistant",
+				Content:          nil,
+				ReasoningContent: &reasoning,
+				ToolCalls: []dto.ToolCall{{
+					ID: "call-1", Type: "function", Function: dto.ToolCallFunc{Name: "lookup", Arguments: `{}`},
+				}},
+			},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "deepseek-v4", true)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal response request: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	if len(items) != 2 || items[0]["type"] != "reasoning" || items[1]["type"] != "function_call" {
+		t.Fatalf("items = %v, want reasoning followed by function_call", items)
+	}
+	content, ok := items[0]["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("reasoning content = %v", items[0]["content"])
+	}
+	part, _ := content[0].(map[string]any)
+	if part["type"] != "reasoning_text" || part["text"] != reasoning {
+		t.Fatalf("reasoning part = %v", part)
+	}
+}
+
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_DeepSeekPadsMissingReasoning(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "deepseek",
+		Messages: []dto.Message{
+			{
+				Role: "assistant",
+				ToolCalls: []dto.ToolCall{{
+					ID: "call-1", Type: "function", Function: dto.ToolCallFunc{Name: "lookup", Arguments: `{}`},
+				}},
+			},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "deepseek-v4", true)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal response request: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	if len(items) != 2 || items[0]["type"] != "reasoning" || items[1]["type"] != "function_call" {
+		t.Fatalf("items = %v, want padded reasoning followed by function_call", items)
+	}
+	content, _ := items[0]["content"].([]any)
+	part, _ := content[0].(map[string]any)
+	if part["text"] != " " {
+		t.Fatalf("reasoning text = %v, want single space", part["text"])
+	}
+	if req.Messages[0].ReasoningContent != nil {
+		t.Fatalf("original request should not be mutated")
+	}
+}
+
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_MissingToolCallIDs(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{
+				Role:    "assistant",
+				Content: nil,
+				ToolCalls: []dto.ToolCall{
+					{Type: "function", Function: dto.ToolCallFunc{Name: "first", Arguments: ""}},
+					{Type: "function", Function: dto.ToolCallFunc{Name: "second", Arguments: `{"x":1}`}},
+				},
+			},
+			{Role: "tool", Content: "first output"},
+			{Role: "tool", Content: "second output"},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal response request: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	if len(items) != 4 {
+		t.Fatalf("input length = %d, want 4", len(items))
+	}
+	for i := 0; i < 2; i++ {
+		callID, ok := items[i]["call_id"].(string)
+		if !ok || callID == "" {
+			t.Fatalf("items[%d].call_id = %v, want non-empty", i, items[i]["call_id"])
+		}
+		if items[i]["arguments"] != "{}" && i == 0 {
+			t.Fatalf("items[0].arguments = %v, want {}", items[i]["arguments"])
+		}
+		if items[i+2]["type"] != "function_call_output" || items[i+2]["call_id"] != callID {
+			t.Fatalf("items[%d] = %v, want output paired with %q", i+2, items[i+2], callID)
+		}
+	}
+}
+
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_RejectsOrphanLegacyFunctionOutput(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{Role: "function", Name: "get_weather", Content: "sunny"},
+		},
+	}
+
+	_, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err == nil || !strings.Contains(err.Error(), "has no matching call") {
+		t.Fatalf("EncodeRequest error = %v, want unmatched legacy function error", err)
+	}
+}
+
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_RejectsAmbiguousLegacyFunctionOutput(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{Role: "assistant", FunctionCall: &dto.ToolCallFunc{Name: "get_weather", Arguments: `{"city":"Beijing"}`}},
+			{Role: "assistant", FunctionCall: &dto.ToolCallFunc{Name: "get_weather", Arguments: `{"city":"Shanghai"}`}},
+			{Role: "function", Name: "get_weather", Content: "sunny"},
+		},
+	}
+
+	_, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err == nil || !strings.Contains(err.Error(), "matches multiple pending calls") {
+		t.Fatalf("EncodeRequest error = %v, want ambiguous legacy function error", err)
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_AssistantMapTextWithToolCalls
+// 纯文本 []any content 时 ToolCalls 字段也应转换为 function_call。
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_AssistantMapTextWithToolCalls(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "text", "text": "calling tool"},
+				},
+				ToolCalls: []dto.ToolCall{
+					{ID: "call-1", Type: "function", Function: dto.ToolCallFunc{Name: "lookup", Arguments: `{"q":"x"}`}},
+				},
+			},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("input length = %d, want 2 (message + function_call)", len(items))
+	}
+	if items[0]["type"] != "message" || items[0]["role"] != "assistant" {
+		t.Fatalf("items[0] = %v, want assistant message", items[0])
+	}
+	if items[1]["type"] != "function_call" || items[1]["call_id"] != "call-1" {
+		t.Fatalf("items[1] = %v, want function_call call-1", items[1])
+	}
+	if items[1]["name"] != "lookup" {
+		t.Fatalf("function name = %v, want lookup", items[1]["name"])
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_AssistantMultimodalWithToolCalls
+// 多模态 []any content 时 ToolCalls 与 content 内 tool_use 均应出现。
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_AssistantMultimodalWithToolCalls(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "text", "text": "see image"},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/a.png"}},
+					map[string]any{"type": "tool_use", "id": "tu-1", "name": "inner_tool", "input": map[string]any{"a": 1}},
+				},
+				ToolCalls: []dto.ToolCall{
+					{ID: "call-outer", Type: "function", Function: dto.ToolCallFunc{Name: "outer_tool", Arguments: `{}`}},
+				},
+			},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	// function_call(tu-1) + assistant message(parts) + function_call(call-outer)
+	if len(items) != 3 {
+		t.Fatalf("input length = %d, want 3", len(items))
+	}
+	if items[0]["type"] != "function_call" || items[0]["call_id"] != "tu-1" {
+		t.Fatalf("items[0] = %v, want function_call tu-1", items[0])
+	}
+	if items[1]["type"] != "message" || items[1]["role"] != "assistant" {
+		t.Fatalf("items[1] = %v, want assistant message", items[1])
+	}
+	if items[2]["type"] != "function_call" || items[2]["call_id"] != "call-outer" {
+		t.Fatalf("items[2] = %v, want function_call call-outer", items[2])
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_AssistantContentBlockImage
+// []dto.ContentBlock 中的 image 块不应转为 input_image：Responses API 不允许
+// assistant 消息携带 input_image part，图片应被丢弃，仅保留文本。
+func TestOpenAIChatCodec_EncodeRequest_ToOpenAIResponse_AssistantContentBlockImage(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{
+				Role: "assistant",
+				Content: []dto.ContentBlock{
+					{Type: "text", Text: "caption"},
+					{
+						Type: "image",
+						Source: &dto.MessageSource{
+							Type: "url",
+							Url:  "https://example.com/block.png",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIResponse, req, "gpt-4o-mini", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var out dto.ResponsesRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	var items []map[string]any
+	if err := json.Unmarshal(out.Input, &items); err != nil {
+		t.Fatalf("failed to unmarshal input: %v", err)
+	}
+	// 图片块被丢弃：仅剩文本 message，且不得出现 input_image
+	if len(items) != 1 {
+		t.Fatalf("input length = %d, want 1 (text message only, image dropped)", len(items))
+	}
+	if items[0]["type"] != "message" || items[0]["content"] != "caption" {
+		t.Fatalf("items[0] = %v, want text caption message", items[0])
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToAnthropicMessages_AssistantMultimodalWithToolCalls
+// assistant 同时含多模态 content 与 tool_calls 时，图片不得被静默丢弃。
+func TestOpenAIChatCodec_EncodeRequest_ToAnthropicMessages_AssistantMultimodalWithToolCalls(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "text", "text": "see this"},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/a.png"}},
+				},
+				ToolCalls: []dto.ToolCall{
+					{ID: "call-1", Type: "function", Function: dto.ToolCallFunc{Name: "lookup", Arguments: `{"q":"x"}`}},
+				},
+			},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatAnthropicMessages, req, "claude-3", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out dto.ClaudeRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Messages) == 0 {
+		t.Fatal("expected at least one message")
+	}
+	// 可能因 isFirstMessage 补了占位 user
+	var assistant *dto.ClaudeMessage
+	for i := range out.Messages {
+		if out.Messages[i].Role == "assistant" {
+			assistant = &out.Messages[i]
+			break
+		}
+	}
+	if assistant == nil {
+		t.Fatalf("assistant message not found: %+v", out.Messages)
+	}
+	blocks, ok := assistant.Content.([]any)
+	if !ok {
+		// Content may already be []dto.ContentBlock after unmarshal as []any
+		raw, _ := json.Marshal(assistant.Content)
+		if err := json.Unmarshal(raw, &blocks); err != nil {
+			t.Fatalf("assistant content type %T: %v", assistant.Content, err)
+		}
+	}
+	var hasText, hasImage, hasToolUse bool
+	for _, b := range blocks {
+		m, ok := b.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch m["type"] {
+		case "text":
+			hasText = true
+		case "image":
+			hasImage = true
+		case "tool_use":
+			hasToolUse = true
+		}
+	}
+	if !hasText || !hasImage || !hasToolUse {
+		t.Fatalf("blocks = %v, want text+image+tool_use", blocks)
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToAnthropicMessages_ToolMultimodalContent
+// tool 消息多模态 content 应 JSON 序列化为字符串，而不是原样塞 OpenAI image_url 块。
+func TestOpenAIChatCodec_EncodeRequest_ToAnthropicMessages_ToolMultimodalContent(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{
+				Role: "assistant",
+				ToolCalls: []dto.ToolCall{
+					{ID: "call-img", Type: "function", Function: dto.ToolCallFunc{Name: "view", Arguments: `{}`}},
+				},
+			},
+			{
+				Role:       "tool",
+				ToolCallID: "call-img",
+				Content: []any{
+					map[string]any{"type": "text", "text": "shot:"},
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,AA"}},
+				},
+			},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatAnthropicMessages, req, "claude-3", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out dto.ClaudeRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// 找到含 tool_result 的 user 消息
+	var toolResult map[string]any
+	for _, msg := range out.Messages {
+		if msg.Role != "user" {
+			continue
+		}
+		raw, _ := json.Marshal(msg.Content)
+		var blocks []map[string]any
+		if err := json.Unmarshal(raw, &blocks); err != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b["type"] == "tool_result" {
+				toolResult = b
+			}
+		}
+	}
+	if toolResult == nil {
+		t.Fatalf("tool_result not found in messages: %s", string(payload))
+	}
+	content, ok := toolResult["content"].(string)
+	if !ok {
+		t.Fatalf("tool_result.content type = %T, want string (serialized multimodal)", toolResult["content"])
+	}
+	if !strings.Contains(content, "image_url") {
+		t.Fatalf("tool_result.content = %q, want serialized multimodal JSON", content)
+	}
+}
+
+// TestOpenAIChatCodec_EncodeRequest_ToAnthropicMessages_DeveloperAsSystem
+// developer 角色应并入 Anthropic system，而非作为 message 下发。
+func TestOpenAIChatCodec_EncodeRequest_ToAnthropicMessages_DeveloperAsSystem(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	req := &dto.ChatCompletionRequest{
+		Model: "gpt-4",
+		Messages: []dto.Message{
+			{Role: "developer", Content: "Be concise."},
+			{Role: "user", Content: "Hi"},
+		},
+	}
+
+	payload, err := codec.EncodeRequest(FormatAnthropicMessages, req, "claude-3", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out dto.ClaudeRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// system 应包含 developer 文本
+	sysRaw, _ := json.Marshal(out.System)
+	if !strings.Contains(string(sysRaw), "Be concise.") {
+		t.Fatalf("system = %s, want contains developer text", string(sysRaw))
+	}
+	for _, msg := range out.Messages {
+		if msg.Role == "developer" {
+			t.Fatalf("developer should not appear in messages: %+v", out.Messages)
+		}
+	}
+}
+
+// TestOpenAIResponseCodec_EncodeRequest_ToOpenAIChat_MultimodalParts 测试 Responses
+// input_image/file/audio/video 转为 Chat，未知类型跳过而不失败。
+func TestOpenAIResponseCodec_EncodeRequest_ToOpenAIChat_MultimodalParts(t *testing.T) {
+	codec := &OpenAIResponseCodec{}
+	inputJSON := json.RawMessage(`[
+		{"type":"message","role":"user","content":[
+			{"type":"input_text","text":"look"},
+			{"type":"input_image","image_url":"https://example.com/a.png"},
+			{"type":"input_file","file_data":"data:text/plain;base64,QQ==","filename":"a.txt"},
+			{"type":"input_audio","audio_data":"AAAA","format":"wav"},
+			{"type":"input_video","video_url":"https://example.com/v.mp4"},
+			{"type":"unknown_part","foo":1}
+		]}
+	]`)
+	req := &dto.ResponsesRequest{
+		Model: "gpt-4o",
+		Input: inputJSON,
+	}
+
+	payload, err := codec.EncodeRequest(FormatOpenAIChat, req, "gpt-4o", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+	var out dto.ChatCompletionRequest
+	if err := json.Unmarshal(payload, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Messages) != 1 {
+		t.Fatalf("messages length = %d, want 1", len(out.Messages))
+	}
+	raw, _ := json.Marshal(out.Messages[0].Content)
+	var parts []map[string]any
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		t.Fatalf("content not array: %v (%s)", err, string(raw))
+	}
+	types := map[string]bool{}
+	for _, p := range parts {
+		if typ, _ := p["type"].(string); typ != "" {
+			types[typ] = true
+		}
+	}
+	for _, want := range []string{"text", "image_url", "file", "input_audio", "video_url"} {
+		if !types[want] {
+			t.Fatalf("missing content type %q in %v", want, parts)
+		}
+	}
+	if types["unknown_part"] {
+		t.Fatalf("unknown_part should be skipped, got %v", parts)
 	}
 }

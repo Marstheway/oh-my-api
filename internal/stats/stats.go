@@ -53,8 +53,17 @@ type ProviderOnlyStats struct {
 	LatencyMs    int64
 }
 
+type UserModelStats struct {
+	UserModel    string
+	InputTokens  int64
+	OutputTokens int64
+	RequestCount int64
+	LatencyMs    int64
+}
+
 type Recorder interface {
 	Record(keyName, providerName, upstreamModel string, inputTokens, outputTokens int, latencyMs int64) error
+	RecordUserModel(userModel string, inputTokens, outputTokens int, latencyMs int64) error
 }
 
 type Querier interface {
@@ -62,6 +71,7 @@ type Querier interface {
 	QueryByKeys(since, until string) (map[string]*KeyStats, error)
 	QueryByProviders(since, until string) (map[string]*ProviderStats, error)
 	QueryByProviderOnly(since, until string) (map[string]*ProviderOnlyStats, error)
+	QueryByUserModels(since, until string) (map[string]*UserModelStats, error)
 	QueryEarliestDate() (string, error)
 }
 
@@ -157,6 +167,16 @@ func createTable() error {
 			PRIMARY KEY (date, key_name, provider_name, upstream_model)
 		);
 		CREATE INDEX IF NOT EXISTS idx_date ON daily_stats(date);
+		CREATE TABLE IF NOT EXISTS user_model_stats (
+			date TEXT NOT NULL,
+			user_model TEXT NOT NULL,
+			input_tokens INTEGER DEFAULT 0,
+			output_tokens INTEGER DEFAULT 0,
+			request_count INTEGER DEFAULT 0,
+			latency_ms INTEGER DEFAULT 0,
+			PRIMARY KEY (date, user_model)
+		);
+		CREATE INDEX IF NOT EXISTS idx_user_model_date ON user_model_stats(date);
 	`)
 	return err
 }
@@ -181,6 +201,22 @@ func (r *sqliteRecorder) Record(keyName, providerName, upstreamModel string, inp
 			request_count = request_count + 1,
 			latency_ms = latency_ms + excluded.latency_ms
 	`, date, keyName, providerName, upstreamModel, inputTokens, outputTokens, latencyMs)
+
+	return err
+}
+
+func (r *sqliteRecorder) RecordUserModel(userModel string, inputTokens, outputTokens int, latencyMs int64) error {
+	date := timeNow().Format("2006-01-02")
+
+	_, err := r.db.Exec(`
+		INSERT INTO user_model_stats (date, user_model, input_tokens, output_tokens, request_count, latency_ms)
+		VALUES (?, ?, ?, ?, 1, ?)
+		ON CONFLICT(date, user_model) DO UPDATE SET
+			input_tokens = input_tokens + excluded.input_tokens,
+			output_tokens = output_tokens + excluded.output_tokens,
+			request_count = request_count + 1,
+			latency_ms = latency_ms + excluded.latency_ms
+	`, date, userModel, inputTokens, outputTokens, latencyMs)
 
 	return err
 }
@@ -351,6 +387,49 @@ func (q *sqliteQuerier) QueryByProviderOnly(since, until string) (map[string]*Pr
 	return result, rows.Err()
 }
 
+func (q *sqliteQuerier) QueryByUserModels(since, until string) (map[string]*UserModelStats, error) {
+	query := "SELECT user_model, COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(request_count), 0), COALESCE(SUM(latency_ms), 0) FROM user_model_stats"
+	args := []any{}
+
+	if since != "" || until != "" {
+		query += " WHERE 1=1"
+		if since != "" {
+			query += " AND date >= ?"
+			args = append(args, since)
+		}
+		if until != "" {
+			query += " AND date <= ?"
+			args = append(args, until)
+		}
+	}
+
+	query += " GROUP BY user_model"
+
+	rows, err := q.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]*UserModelStats)
+	for rows.Next() {
+		var userModel string
+		var inputTokens, outputTokens, requestCount, latencyMs int64
+		if err := rows.Scan(&userModel, &inputTokens, &outputTokens, &requestCount, &latencyMs); err != nil {
+			return nil, err
+		}
+		result[userModel] = &UserModelStats{
+			UserModel:    userModel,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			RequestCount: requestCount,
+			LatencyMs:    latencyMs,
+		}
+	}
+
+	return result, rows.Err()
+}
+
 func (q *sqliteQuerier) QueryEarliestDate() (string, error) {
 	var date sql.NullString
 	err := q.db.QueryRow("SELECT MIN(date) FROM daily_stats").Scan(&date)
@@ -364,6 +443,9 @@ func ClearStats() error {
 	if db == nil {
 		return fmt.Errorf("database not initialized")
 	}
-	_, err := db.Exec("DELETE FROM daily_stats")
+	if _, err := db.Exec("DELETE FROM daily_stats"); err != nil {
+		return err
+	}
+	_, err := db.Exec("DELETE FROM user_model_stats")
 	return err
 }

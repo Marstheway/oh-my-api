@@ -1,10 +1,24 @@
+{{/* 默认空实现；各页面可覆盖以注入 <link>/<meta> 等 head 资源 */}}
+{{ define "page_head" }}{{ end }}
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{{ template "title" . }} | Admin</title>
+  <link rel="icon" href="/admin/static/favicon.png" type="image/png">
   <link rel="stylesheet" href="/admin/static/fonts.css">
+  <script>
+    // 在页面渲染前设置主题，避免闪烁；默认 light，用户选择持久化在 localStorage
+    (function () {
+      var theme = 'light';
+      try {
+        var saved = localStorage.getItem('admin-theme');
+        if (saved === 'light' || saved === 'dark') theme = saved;
+      } catch (e) { /* localStorage 不可用时使用默认主题 */ }
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <script src="https://unpkg.com/sortablejs@1.15.0/Sortable.min.js"></script>
   <style>
@@ -12,26 +26,7 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      color-scheme: dark;
-      --bg-root: #07080c;
-      --bg-surface: #0d0f15;
-      --bg-elevated: #12151e;
-      --bg-hover: #181c28;
-      --bg-input: #0a0c12;
-      --border-default: #1c1f2e;
-      --border-active: #2a3050;
-      --border-focus: #3568d4;
-      --text-primary: #e2e4ec;
-      --text-secondary: #787d91;
-      --text-muted: #4a4f60;
-      --accent: #3b82f6;
-      --accent-glow: rgba(59,130,246,0.15);
-      --success: #10b981;
-      --success-glow: rgba(16,185,129,0.15);
-      --warning: #f59e0b;
-      --warning-glow: rgba(245,158,11,0.15);
-      --danger: #ef4444;
-      --danger-glow: rgba(239,68,68,0.15);
+      /* ── 共享令牌（不随主题变化） ── */
       --radius-sm: 3px;
       --radius-md: 5px;
       --radius-lg: 8px;
@@ -40,6 +35,93 @@
       --transition-fast: 120ms ease;
       --transition-normal: 200ms ease;
       --sidebar-width: 220px;
+
+      /* ── Light 主题（默认，暖纸感） ── */
+      color-scheme: light;
+      --bg-root: #f5f1e8;
+      --bg-surface: #fffdf8;
+      --bg-elevated: #efe9dd;
+      --bg-hover: #e9e2d3;
+      --bg-input: #fbf8f1;
+      --border-default: #e6dfd0;
+      --border-active: #cfc5b0;
+      --border-faint: #f0eadd;
+      --border-focus: #b45309;
+      --text-primary: #2b2519;
+      --text-secondary: #6f6553;
+      --text-muted: #a39a87;
+      --accent: #b45309;
+      --accent-strong: #92400e;
+      --accent-glow: rgba(180,83,9,0.10);
+      --success: #3f8f5f;
+      --success-strong: #356f4d;
+      --success-glow: rgba(63,143,95,0.10);
+      --warning: #c98a16;
+      --warning-glow: rgba(201,138,22,0.12);
+      --danger: #bd4a38;
+      --danger-strong: #a13d2e;
+      --danger-glow: rgba(189,74,56,0.10);
+      --info: #3f6e8f;
+      --info-glow: rgba(63,110,143,0.10);
+      --neutral: #6f6553;
+      --mode-concurrent: #5d54a5;
+      --mode-loadbalance: #8250a0;
+      --mode-failover: #9a6a10;
+      --mode-adaptive: #356f4d;
+      --on-accent: #fffdf8;
+      --toggle-knob: #7a6f5c;
+      --grid-line: rgba(43,37,25,0.03);
+      --scanline: rgba(255,255,255,0.35);
+      --overlay: rgba(43,37,25,0.40);
+      --shadow-card: 0 1px 2px rgba(80,60,30,0.06), 0 2px 6px rgba(80,60,30,0.05);
+      --shadow-panel: 0 8px 24px rgba(80,60,30,0.12);
+      --shadow-dropdown: 0 4px 12px rgba(80,60,30,0.10);
+      --shadow-toast: 0 8px 24px rgba(80,60,30,0.14);
+      --shadow-modal: 0 20px 50px rgba(80,60,30,0.18);
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --bg-root: #07080c;
+      --bg-surface: #0d0f15;
+      --bg-elevated: #12151e;
+      --bg-hover: #181c28;
+      --bg-input: #0a0c12;
+      --border-default: #1c1f2e;
+      --border-active: #2a3050;
+      --border-faint: #151827;
+      --border-focus: #3568d4;
+      --text-primary: #e2e4ec;
+      --text-secondary: #787d91;
+      --text-muted: #4a4f60;
+      --accent: #3b82f6;
+      --accent-strong: #2563eb;
+      --accent-glow: rgba(59,130,246,0.15);
+      --success: #10b981;
+      --success-strong: #059669;
+      --success-glow: rgba(16,185,129,0.15);
+      --warning: #f59e0b;
+      --warning-glow: rgba(245,158,11,0.15);
+      --danger: #ef4444;
+      --danger-strong: #dc2626;
+      --danger-glow: rgba(239,68,68,0.15);
+      --info: #38bdf8;
+      --info-glow: rgba(56,189,248,0.12);
+      --neutral: #94a3b8;
+      --mode-concurrent: #818cf8;
+      --mode-loadbalance: #a78bfa;
+      --mode-failover: #fbbf24;
+      --mode-adaptive: #4ade80;
+      --on-accent: #fff;
+      --toggle-knob: #fff;
+      --grid-line: rgba(28,31,46,0.6);
+      --scanline: rgba(0,0,0,0.03);
+      --overlay: rgba(4,5,8,0.8);
+      --shadow-card: 0 1px 2px rgba(0,0,0,0.25);
+      --shadow-panel: 0 8px 24px rgba(0,0,0,0.25);
+      --shadow-dropdown: 0 4px 12px rgba(0,0,0,0.3);
+      --shadow-toast: 0 8px 24px rgba(0,0,0,0.4);
+      --shadow-modal: 0 20px 60px rgba(0,0,0,0.5);
     }
 
     body {
@@ -57,15 +139,15 @@
       content: '';
       position: fixed; inset: 0;
       background-image:
-        linear-gradient(rgba(28,31,46,0.6) 1px,transparent 1px),
-        linear-gradient(90deg, rgba(28,31,46,0.6) 1px,transparent 1px);
+        linear-gradient(var(--grid-line) 1px,transparent 1px),
+        linear-gradient(90deg, var(--grid-line) 1px,transparent 1px);
       background-size: 48px 48px;
       pointer-events: none; z-index: 0;
     }
 
     .scanline {
       position: fixed; inset: 0;
-      background: repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.03) 2px,rgba(0,0,0,0.03) 4px);
+      background: repeating-linear-gradient(0deg,transparent,transparent 2px,var(--scanline) 2px,var(--scanline) 4px);
       pointer-events: none; z-index: 0;
     }
 
@@ -137,17 +219,6 @@
 
     .nav-item.active .nav-icon { opacity: 1; }
 
-    .nav-badge {
-      margin-left: auto;
-      font-family: var(--font-mono); font-size: 12px;
-      padding: 1px 6px; border-radius: 8px;
-      background: var(--bg-hover); color: var(--text-muted);
-    }
-
-    .nav-badge.has-changes {
-      background: var(--warning-glow); color: var(--warning);
-    }
-
     /* ═══ Page Header ═══ */
     .page-header {
       display: flex; align-items: flex-start; justify-content: space-between;
@@ -177,17 +248,17 @@
 
     .btn:focus-visible { box-shadow: 0 0 0 2px var(--border-focus); }
 
-    .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .btn-primary:hover { background: #2563eb; border-color: #2563eb; }
+    .btn-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+    .btn-primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
 
     .btn-ghost { background: transparent; border-color: var(--border-default); color: var(--text-secondary); }
     .btn-ghost:hover { background: var(--bg-hover); border-color: var(--border-active); color: var(--text-primary); }
 
-    .btn-success { background: var(--success); color: #fff; border-color: var(--success); }
-    .btn-success:hover { background: #059669; border-color: #059669; }
+    .btn-success { background: var(--success); color: var(--on-accent); border-color: var(--success); }
+    .btn-success:hover { background: var(--success-strong); border-color: var(--success-strong); }
 
-    .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
-    .btn-danger:hover { background: #dc2626; border-color: #dc2626; }
+    .btn-danger { background: var(--danger); color: var(--on-accent); border-color: var(--danger); }
+    .btn-danger:hover { background: var(--danger-strong); border-color: var(--danger-strong); }
 
     .btn-sm { padding: 4px 10px; font-size: 12px; }
 
@@ -235,12 +306,13 @@
     .badge-success { background: var(--success-glow); color: var(--success); }
     .badge-warning { background: var(--warning-glow); color: var(--warning); }
     .badge-danger { background: var(--danger-glow); color: var(--danger); }
-    .badge-neutral { background: rgba(148,163,184,0.1); color: #94a3b8; border: 1px solid rgba(148,163,184,0.2); }
+    .badge-neutral { background: color-mix(in srgb, var(--neutral) 10%, transparent); color: var(--neutral); border: 1px solid color-mix(in srgb, var(--neutral) 18%, transparent); }
+    .badge-info { background: color-mix(in srgb, var(--info) 12%, transparent); color: var(--info); border: 1px solid color-mix(in srgb, var(--info) 25%, transparent); }
 
-    .badge-mode-concurrent { background: rgba(99,102,241,0.12); color: #818cf8; border: 1px solid rgba(99,102,241,0.25); }
-    .badge-mode-loadbalance { background: rgba(139,92,246,0.12); color: #a78bfa; border: 1px solid rgba(139,92,246,0.25); }
-    .badge-mode-failover { background: rgba(245,158,11,0.12); color: #fbbf24; border: 1px solid rgba(245,158,11,0.25); }
-    .badge-mode-adaptive { background: rgba(34,197,94,0.12); color: #4ade80; border: 1px solid rgba(34,197,94,0.25); }
+    .badge-mode-concurrent { background: color-mix(in srgb, var(--mode-concurrent) 12%, transparent); color: var(--mode-concurrent); border: 1px solid color-mix(in srgb, var(--mode-concurrent) 25%, transparent); }
+    .badge-mode-loadbalance { background: color-mix(in srgb, var(--mode-loadbalance) 12%, transparent); color: var(--mode-loadbalance); border: 1px solid color-mix(in srgb, var(--mode-loadbalance) 25%, transparent); }
+    .badge-mode-failover { background: color-mix(in srgb, var(--mode-failover) 12%, transparent); color: var(--mode-failover); border: 1px solid color-mix(in srgb, var(--mode-failover) 25%, transparent); }
+    .badge-mode-adaptive { background: color-mix(in srgb, var(--mode-adaptive) 12%, transparent); color: var(--mode-adaptive); border: 1px solid color-mix(in srgb, var(--mode-adaptive) 25%, transparent); }
 
     .vis-dot { width: 5px; height: 5px; border-radius: 50%; display: inline-block; }
     .vis-dot.public { background: var(--success); }
@@ -266,9 +338,9 @@
 
     .chips .chip {
       display: inline-flex; align-items: center; gap: 3px;
-      padding: 2px 7px; border-radius: var(--radius-sm);
+      padding: 3px 8px; border-radius: var(--radius-sm);
       background: var(--bg-input); border: 1px solid var(--border-default);
-      font-weight: 500;
+      font-weight: 500; font-size: 13px;
     }
 
     /* ═══ Code value ═══ */
@@ -302,7 +374,7 @@
 
     /* ═══ Modals ═══ */
     .modal-overlay, .confirm-overlay {
-      position: fixed; inset: 0; background: rgba(4,5,8,0.8);
+      position: fixed; inset: 0; background: var(--overlay);
       display: flex; align-items: center; justify-content: center;
       z-index: 100; animation: fadeIn 150ms ease;
     }
@@ -313,7 +385,7 @@
       background: var(--bg-surface); border: 1px solid var(--border-active);
       border-radius: var(--radius-lg); width: 100%; max-width: 600px;
       max-height: 85vh; display: flex; flex-direction: column;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      box-shadow: var(--shadow-modal);
       animation: slideUp 200ms ease;
     }
 
@@ -367,13 +439,14 @@
       padding: 8px 14px; border-radius: var(--radius-sm);
       background: var(--bg-elevated); border: 1px solid var(--border-active);
       font-size: 13px; animation: slideIn 200ms ease;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+      box-shadow: var(--shadow-toast);
     }
 
     @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } }
 
     .toast.success { border-color: var(--success); }
     .toast.error { border-color: var(--danger); color: var(--danger); }
+    .toast.warning { border-color: var(--warning); color: var(--warning); }
 
     /* ═══ Empty State ═══ */
     .empty-state {
@@ -478,7 +551,7 @@
       position: fixed; padding: 4px 0;
       background: var(--bg-elevated); border: 1px solid var(--border-active);
       border-radius: var(--radius-sm);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      box-shadow: var(--shadow-dropdown);
       z-index: 200; display: none; max-height: 240px; overflow-y: auto;
     }
 
@@ -502,6 +575,12 @@
       color: var(--text-primary);
     }
 
+    .dropdown-option.disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
     .dropdown-optgroup-label {
       padding: 6px 10px 3px;
       font-family: var(--font-mono); font-size: 12px;
@@ -521,12 +600,12 @@
     .toggle-track.on { background: var(--accent); }
 
     .toggle-knob {
-      width: 14px; height: 14px; border-radius: 50%; background: #fff;
+      width: 14px; height: 14px; border-radius: 50%; background: var(--toggle-knob);
       position: absolute; top: 2px; left: 2px;
       transition: transform var(--transition-fast);
     }
 
-    .toggle-track.on .toggle-knob { transform: translateX(16px); }
+    .toggle-track.on .toggle-knob { background: var(--on-accent); transform: translateX(16px); }
 
     .toggle-label { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); }
 
@@ -557,6 +636,45 @@
       border: none; background: transparent; color: var(--text-primary);
       font-family: var(--font-mono); font-size: 12px; outline: none;
       min-width: 100px; flex: 1;
+    }
+
+    /* ═══ Enum Chips（固定枚举点选，shared.js renderEnumChips） ═══ */
+    .enum-chips {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+    .enum-chips.hidden { display: none; }
+    .enum-chip {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-default);
+      background: var(--bg-input);
+      color: var(--text-secondary);
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      transition: border-color var(--transition-fast), background var(--transition-fast), color var(--transition-fast);
+    }
+    .enum-chip:hover {
+      border-color: var(--border-active);
+      color: var(--text-primary);
+    }
+    .enum-chip:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+      outline-offset: 1px;
+    }
+    .enum-chip.active {
+      border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      color: var(--accent);
+    }
+    .enum-chips-compact .enum-chip {
+      padding: 2px 8px;
+      font-size: 10px;
     }
 
     /* ═══ Form Row ═══ */
@@ -664,7 +782,7 @@
         display: none;
         position: fixed;
         inset: 0;
-        background: rgba(4, 5, 8, 0.7);
+        background: var(--overlay);
         z-index: 40;
         opacity: 0;
         transition: opacity 250ms ease;
@@ -782,6 +900,8 @@
 
     {{ template "styles" . }}
   </style>
+  {{/* 页面级样式表放在全局 <style> 之后，保证同优先级规则能覆盖 layout */}}
+  {{ template "page_head" . }}
 </head>
 <body>
   <div class="scanline"></div>
@@ -805,28 +925,36 @@
           <i data-lucide="bot" style="width:16px;height:16px"></i>
         </span>
         <span>Model Groups</span>
-        <span class="nav-badge">0</span>
       </a>
       <a href="/admin/redirects" class="nav-item {{ if eq .Page "redirects" }}active{{ end }}">
         <span class="nav-icon">
           <i data-lucide="arrow-right-left" style="width:16px;height:16px"></i>
         </span>
         <span>Redirects</span>
-        <span class="nav-badge">0</span>
+      </a>
+      <a href="/admin/rules" class="nav-item {{ if eq .Page "rules" }}active{{ end }}">
+        <span class="nav-icon">
+          <i data-lucide="list-ordered" style="width:16px;height:16px"></i>
+        </span>
+        <span>Rules</span>
       </a>
       <a href="/admin/providers" class="nav-item {{ if eq .Page "providers" }}active{{ end }}">
         <span class="nav-icon">
           <i data-lucide="cloud" style="width:16px;height:16px"></i>
         </span>
         <span>Providers</span>
-        <span class="nav-badge">0</span>
       </a>
-      <a href="/admin/auth-keys" class="nav-item disabled {{ if eq .Page "auth-keys" }}active{{ end }}">
+      <a href="/admin/cascade" class="nav-item {{ if eq .Page "cascade" }}active{{ end }}">
+        <span class="nav-icon">
+          <i data-lucide="network" style="width:16px;height:16px"></i>
+        </span>
+        <span>Cascade</span>
+      </a>
+      <a href="/admin/auth-keys" class="nav-item {{ if eq .Page "auth-keys" }}active{{ end }}">
         <span class="nav-icon">
           <i data-lucide="key" style="width:16px;height:16px"></i>
         </span>
         <span>Auth Keys</span>
-        <span class="nav-badge">Coming</span>
       </a>
       <a href="/admin/settings" class="nav-item disabled {{ if eq .Page "settings" }}active{{ end }}">
         <span class="nav-icon">
@@ -834,7 +962,14 @@
         </span>
         <span>Settings</span>
       </a>
-      <button type="button" class="nav-item" onclick="logout()" style="margin-top:auto">
+      <button type="button" class="nav-item" onclick="toggleTheme()" style="margin-top:auto">
+        <span class="nav-icon">
+          <i data-lucide="moon" id="themeIconMoon" style="width:16px;height:16px"></i>
+          <i data-lucide="sun" id="themeIconSun" style="width:16px;height:16px;display:none"></i>
+        </span>
+        <span id="themeLabel">Dark</span>
+      </button>
+      <button type="button" class="nav-item" onclick="logout()">
         <span class="nav-icon">
           <i data-lucide="log-out" style="width:16px;height:16px"></i>
         </span>
@@ -866,8 +1001,86 @@
       window.location.href = '/admin/login';
     }
 
+    // ═══ Theme Toggle ═══
+    function currentTheme() {
+      return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+    }
+
+    function setTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      try {
+        localStorage.setItem('admin-theme', theme);
+      } catch (e) { /* 存储不可用时忽略，仅本次会话生效 */ }
+      updateThemeButton();
+    }
+
+    function toggleTheme() {
+      setTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+    }
+
+    function updateThemeButton() {
+      const dark = currentTheme() === 'dark';
+      // 侧边栏按钮
+      const moon = document.getElementById('themeIconMoon');
+      const sun = document.getElementById('themeIconSun');
+      const label = document.getElementById('themeLabel');
+      if (moon) moon.style.display = dark ? 'none' : '';
+      if (sun) sun.style.display = dark ? '' : 'none';
+      if (label) label.textContent = dark ? 'Light' : 'Dark';
+      // 登录页按钮
+      const lMoon = document.getElementById('loginThemeMoon');
+      const lSun = document.getElementById('loginThemeSun');
+      if (lMoon) lMoon.style.display = dark ? 'none' : '';
+      if (lSun) lSun.style.display = dark ? '' : 'none';
+    }
+
+    // 同步按钮状态（lucide 图标已在 shared.js 中初始化为 svg，id 会被保留）
+    updateThemeButton();
+
     // ═══ Dropdown Component ═══
     // 自动初始化所有 <select data-dropdown> 为自定义下拉组件
+    function buildDropdownMenu(dropdown, select, menu) {
+      menu.innerHTML = '';
+      select.querySelectorAll('optgroup, option').forEach(el => {
+        if (el.tagName === 'OPTGROUP') {
+          const label = document.createElement('div');
+          label.className = 'dropdown-optgroup-label';
+          label.textContent = el.label;
+          menu.appendChild(label);
+          return;
+        }
+        if (el.tagName !== 'OPTION') return;
+        const opt = document.createElement('div');
+        const disabled = el.disabled;
+        opt.className = 'dropdown-option'
+          + (el.selected ? ' selected' : '')
+          + (disabled ? ' disabled' : '');
+        opt.dataset.value = el.value;
+        opt.textContent = el.textContent;
+        if (!disabled) {
+          opt.addEventListener('click', () => selectOption(dropdown, select, opt));
+        }
+        menu.appendChild(opt);
+      });
+    }
+
+    function findDropdownForSelect(select) {
+      const prev = select.previousElementSibling;
+      if (prev && prev.classList.contains('dropdown')) return prev;
+      return null;
+    }
+
+    // 在 select options 被动态改写后重建自定义菜单（含 disabled / selected）
+    function refreshDropdown(select) {
+      if (!select || !select.dataset.dropdownInit) return;
+      const dropdown = findDropdownForSelect(select);
+      if (!dropdown) return;
+      const menu = dropdown.querySelector('.dropdown-menu');
+      if (!menu) return;
+      buildDropdownMenu(dropdown, select, menu);
+      syncDropdownValue(dropdown, select);
+    }
+
     function initDropdowns() {
       document.querySelectorAll('select[data-dropdown]').forEach(select => {
         if (select.dataset.dropdownInit) return;
@@ -882,23 +1095,7 @@
 
         const menu = document.createElement('div');
         menu.className = 'dropdown-menu';
-
-        // 构建 options
-        select.querySelectorAll('optgroup, option').forEach(el => {
-          if (el.tagName === 'OPTGROUP') {
-            const label = document.createElement('div');
-            label.className = 'dropdown-optgroup-label';
-            label.textContent = el.label;
-            menu.appendChild(label);
-          } else if (el.tagName === 'OPTION') {
-            const opt = document.createElement('div');
-            opt.className = 'dropdown-option' + (el.selected ? ' selected' : '');
-            opt.dataset.value = el.value;
-            opt.textContent = el.textContent;
-            opt.addEventListener('click', () => selectOption(dropdown, select, opt));
-            menu.appendChild(opt);
-          }
-        });
+        buildDropdownMenu(dropdown, select, menu);
 
         dropdown.appendChild(trigger);
         dropdown.appendChild(menu);
@@ -976,15 +1173,12 @@
     }
 
     function selectOption(dropdown, select, optEl) {
+      if (optEl.classList.contains('disabled')) return;
       const value = optEl.dataset.value;
       select.value = value;
       select.dispatchEvent(new Event('change', { bubbles: true }));
-
-      // 更新显示
-      dropdown.querySelector('.dropdown-text').textContent = optEl.textContent;
-      dropdown.querySelectorAll('.dropdown-option').forEach(o => o.classList.remove('selected'));
-      optEl.classList.add('selected');
-
+      // change 回调可能回滚 value，按最终 select 状态同步显示
+      syncDropdownValue(dropdown, select);
       closeDropdown(dropdown);
     }
 
@@ -995,8 +1189,13 @@
 
     function syncDropdownValue(dropdown, select) {
       const opt = select.options[select.selectedIndex];
-      if (!opt) return;
-      dropdown.querySelector('.dropdown-text').textContent = opt.textContent;
+      const textEl = dropdown.querySelector('.dropdown-text');
+      if (!opt) {
+        if (textEl) textEl.textContent = '';
+        dropdown.querySelectorAll('.dropdown-option').forEach(o => o.classList.remove('selected'));
+        return;
+      }
+      if (textEl) textEl.textContent = opt.textContent;
       dropdown.querySelectorAll('.dropdown-option').forEach(o => {
         o.classList.toggle('selected', o.dataset.value === opt.value);
       });

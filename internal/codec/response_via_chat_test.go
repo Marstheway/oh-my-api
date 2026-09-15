@@ -104,7 +104,7 @@ func TestReadResponsesStreamToObject_Failed(t *testing.T) {
 }
 
 func TestWriteClaudeObjectAsStream_WithEventNames(t *testing.T) {
-	ctx, w := newTestContext()
+	_, w := newTestContext()
 	counter := token.NewStreamCounter(0)
 	stopReason := "tool_use"
 	resp := &dto.ClaudeResponse{
@@ -119,7 +119,7 @@ func TestWriteClaudeObjectAsStream_WithEventNames(t *testing.T) {
 		},
 	}
 
-	if err := writeClaudeObjectAsStream(ctx, resp, counter, ""); err != nil {
+	if err := writeClaudeObjectAsStream(w, resp, counter, ""); err != nil {
 		t.Fatalf("writeClaudeObjectAsStream error: %v", err)
 	}
 	if got := w.Header().Get("X-Accel-Buffering"); got != "no" {
@@ -142,12 +142,12 @@ func TestWriteClaudeObjectAsStream_WithEventNames(t *testing.T) {
 
 func TestPassThroughResponsesResponse_NonStreamAndStream(t *testing.T) {
 	t.Run("non-stream", func(t *testing.T) {
-		ctx, w := newTestContext()
+		_, w := newTestContext()
 		counter := token.NewStreamCounter(0)
 		body := `{"id":"resp-1","object":"response","created_at":1,"model":"gpt-4o","status":"completed","output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello"}]},{"type":"function_call","call_id":"call-1","name":"get_weather","arguments":"{\"city\":\"beijing\"}"}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`
 		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}
 
-		if err := passThroughResponsesResponse(ctx, resp, false, counter, ResponseModelContext{}); err != nil {
+		if err := passThroughResponsesResponse(w, resp, false, counter, ResponseModelContext{}); err != nil {
 			t.Fatalf("passThroughResponsesResponse non-stream error: %v", err)
 		}
 		if w.Body.String() == "" {
@@ -159,14 +159,14 @@ func TestPassThroughResponsesResponse_NonStreamAndStream(t *testing.T) {
 	})
 
 	t.Run("stream", func(t *testing.T) {
-		ctx, w := newTestContext()
+		_, w := newTestContext()
 		counter := token.NewStreamCounter(0)
 		streamBody := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n" +
 			"data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"city\\\":\\\"beijing\\\"}\"}\n\n" +
 			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n"
 		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(streamBody))}
 
-		if err := passThroughResponsesResponse(ctx, resp, true, counter, ResponseModelContext{}); err != nil {
+		if err := passThroughResponsesResponse(w, resp, true, counter, ResponseModelContext{}); err != nil {
 			t.Fatalf("passThroughResponsesResponse stream error: %v", err)
 		}
 		if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
@@ -189,7 +189,7 @@ func TestPassThroughResponsesResponse_NonStreamAndStream(t *testing.T) {
 // emits the requestedModel in the message_start event rather than the model stored in the
 // ClaudeResponse object (which may be the upstream model name).
 func TestWriteClaudeObjectAsStream_UsesRequestedModel(t *testing.T) {
-	ctx, w := newTestContext()
+	_, w := newTestContext()
 	stopReason := "end_turn"
 	resp := &dto.ClaudeResponse{
 		ID:         "msg-1",
@@ -202,7 +202,7 @@ func TestWriteClaudeObjectAsStream_UsesRequestedModel(t *testing.T) {
 		},
 	}
 
-	if err := writeClaudeObjectAsStream(ctx, resp, nil, "my-alias"); err != nil {
+	if err := writeClaudeObjectAsStream(w, resp, nil, "my-alias"); err != nil {
 		t.Fatalf("writeClaudeObjectAsStream error: %v", err)
 	}
 
@@ -219,7 +219,7 @@ func TestWriteClaudeObjectAsStream_UsesRequestedModel(t *testing.T) {
 // emits the requestedModel in the response.created and response.completed events rather than the
 // model stored in the ResponsesResponse object (which may be the upstream model name).
 func TestWriteResponsesObjectAsStream_UsesRequestedModel(t *testing.T) {
-	ctx, w := newTestContext()
+	_, w := newTestContext()
 	resp := &dto.ResponsesResponse{
 		ID:     "resp-1",
 		Object: "response",
@@ -238,7 +238,7 @@ func TestWriteResponsesObjectAsStream_UsesRequestedModel(t *testing.T) {
 		},
 	}
 
-	if err := writeResponsesObjectAsStream(ctx, resp, nil, "my-alias"); err != nil {
+	if err := writeResponsesObjectAsStream(w, resp, nil, "my-alias"); err != nil {
 		t.Fatalf("writeResponsesObjectAsStream error: %v", err)
 	}
 

@@ -29,8 +29,8 @@ var (
 	requestFirstTokenSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "request_first_token_seconds",
-			Help:    "首 token 延迟（仅流式请求）",
-			Buckets: []float64{0.01, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1, 2, 5, 10},
+			Help:    "端到端首个 SSE 事件延迟（仅流式请求）",
+			Buckets: []float64{0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1, 1.5, 2, 3, 5, 8, 12, 20, 30},
 		},
 		[]string{"provider", "upstream_model", "key_name", "status"},
 	)
@@ -47,6 +47,22 @@ var (
 		prometheus.CounterOpts{
 			Name: "token_output_total",
 			Help: "输出 token 消耗",
+		},
+		[]string{"provider", "upstream_model", "model_group", "key_name"},
+	)
+
+	streamDecodeOutputTokensTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stream_decode_output_tokens_total",
+			Help: "成功流式请求从首个 SSE 事件至完成期间生成的输出 token 总数",
+		},
+		[]string{"provider", "upstream_model", "model_group", "key_name"},
+	)
+
+	streamDecodeDurationSecondsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stream_decode_duration_seconds_total",
+			Help: "成功流式请求从首个 SSE 事件至完成的总耗时",
 		},
 		[]string{"provider", "upstream_model", "model_group", "key_name"},
 	)
@@ -84,6 +100,14 @@ var (
 			Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60},
 		},
 		[]string{"scheduler", "provider", "upstream_model", "model_group", "outbound_protocol", "result", "failure_reason", "status_code"},
+	)
+
+	streamInterruptedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stream_interrupted_total",
+			Help: "流式响应中断次数",
+		},
+		[]string{"provider", "upstream_model", "outbound_protocol", "reason"},
 	)
 
 	// 限流指标
@@ -124,10 +148,13 @@ func Init() http.Handler {
 			requestFirstTokenSeconds,
 			tokenInputTotal,
 			tokenOutputTotal,
+			streamDecodeOutputTokensTotal,
+			streamDecodeDurationSecondsTotal,
 			providerRequestFailures,
 			providerHealthStatus,
 			providerAttemptTotal,
 			providerAttemptDuration,
+			streamInterruptedTotal,
 			ratelimitTriggeredTotal,
 			concurrentRequests,
 			smartRouteDecisionTotal,
@@ -144,10 +171,13 @@ func ResetForTest() {
 	requestFirstTokenSeconds.Reset()
 	tokenInputTotal.Reset()
 	tokenOutputTotal.Reset()
+	streamDecodeOutputTokensTotal.Reset()
+	streamDecodeDurationSecondsTotal.Reset()
 	providerRequestFailures.Reset()
 	providerHealthStatus.Reset()
 	providerAttemptTotal.Reset()
 	providerAttemptDuration.Reset()
+	streamInterruptedTotal.Reset()
 	ratelimitTriggeredTotal.Reset()
 	concurrentRequests.Set(0)
 	smartRouteDecisionTotal.Reset()
@@ -156,6 +186,16 @@ func ResetForTest() {
 // GetProviderAttemptTotal 返回 providerAttemptTotal 指标用于测试
 func GetProviderAttemptTotal() *prometheus.CounterVec {
 	return providerAttemptTotal
+}
+
+// GetStreamInterruptedTotal 返回 streamInterruptedTotal 指标用于测试
+func GetStreamInterruptedTotal() *prometheus.CounterVec {
+	return streamInterruptedTotal
+}
+
+// GetStreamDecodeDurationSecondsTotal returns stream decode duration metrics for tests.
+func GetStreamDecodeDurationSecondsTotal() *prometheus.CounterVec {
+	return streamDecodeDurationSecondsTotal
 }
 
 // GetRequestTotal 返回 requestTotal 指标用于测试

@@ -31,7 +31,9 @@ func (a *OpenAIAdaptor) BuildRequest(ctx context.Context, provider *config.Provi
 	)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	if provider.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	}
 	return req
 }
 

@@ -202,7 +202,7 @@ func TestDeepseekTokenizer_HuggingFaceCrossCheck(t *testing.T) {
 		{"你好world", 2},
 		{"café", 3},
 		// 修复 1：\p{N} 数字规则（含非 ASCII 数字）
-		{"２３４", 3},   // 全角数字，每个独立成 1 token
+		{"２３４", 3},     // 全角数字，每个独立成 1 token
 		{"٣٤٥", 5},     // 阿拉伯-印度数字，HF 按字节拆开
 		{"abc④def", 3}, // \p{No} 圈号数字
 		// 修复 2：special=false added_tokens 整体匹配

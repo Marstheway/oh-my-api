@@ -83,7 +83,7 @@ func TestRedirectCRUD_ValidateCreate(t *testing.T) {
 			name: "alias 已存在",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
 			},
 			input:   &RedirectInput{Source: "gpt-4-turbo", Target: "gpt-4"},
 			wantErr: true,
@@ -104,7 +104,7 @@ func TestRedirectCRUD_ValidateCreate(t *testing.T) {
 			name: "循环 redirect - alias 指向自己",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "alias-a", Target: "gpt-4"}}, // alias-a 存在
+				Redirect:    config.RedirectConfigs{{Source: "alias-a", Target: "gpt-4"}}, // alias-a 存在
 			},
 			input:   &RedirectInput{Source: "alias-b", Target: "alias-b"}, // 新 alias 指向自己
 			wantErr: true,
@@ -115,7 +115,7 @@ func TestRedirectCRUD_ValidateCreate(t *testing.T) {
 			name: "间接循环 - target 不存在应报错",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "alias-b", Target: "alias-c"}}, // alias-c 不存在
+				Redirect:    config.RedirectConfigs{{Source: "alias-b", Target: "alias-c"}}, // alias-c 不存在
 			},
 			input:   &RedirectInput{Source: "alias-a", Target: "alias-c"},
 			wantErr: true,
@@ -125,7 +125,7 @@ func TestRedirectCRUD_ValidateCreate(t *testing.T) {
 			name: "间接循环 2",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "alias-a", Target: "alias-b"}},
+				Redirect:    config.RedirectConfigs{{Source: "alias-a", Target: "alias-b"}},
 			},
 			input:   &RedirectInput{Source: "alias-b", Target: "alias-a"},
 			wantErr: true,
@@ -136,7 +136,7 @@ func TestRedirectCRUD_ValidateCreate(t *testing.T) {
 			name: "允许指向其他 alias",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "alias-b", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "alias-b", Target: "gpt-4"}},
 			},
 			input:   &RedirectInput{Source: "alias-a", Target: "alias-b"},
 			wantErr: false,
@@ -181,7 +181,7 @@ func TestRedirectCRUD_ValidateUpdate(t *testing.T) {
 			name: "有效更新",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}, {Name: "gpt-3.5"}},
-				Redirect: config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
 			},
 			oldAlias: "gpt-4-turbo",
 			input:    &RedirectInput{Source: "gpt-4-turbo", Target: "gpt-3.5"},
@@ -191,7 +191,7 @@ func TestRedirectCRUD_ValidateUpdate(t *testing.T) {
 			name: "有效改名",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
 			},
 			oldAlias: "gpt-4-turbo",
 			input:    &RedirectInput{Source: "gpt-4-turbo-v2", Target: "gpt-4"},
@@ -201,7 +201,7 @@ func TestRedirectCRUD_ValidateUpdate(t *testing.T) {
 			name: "oldAlias 不存在",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
 			},
 			oldAlias: "not-exists",
 			input:    &RedirectInput{Source: "gpt-4-turbo", Target: "gpt-4"},
@@ -212,7 +212,7 @@ func TestRedirectCRUD_ValidateUpdate(t *testing.T) {
 			name: "改名冲突",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}, {Source: "alias-2", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}, {Source: "alias-2", Target: "gpt-4"}},
 			},
 			oldAlias: "gpt-4-turbo",
 			input:    &RedirectInput{Source: "alias-2", Target: "gpt-4"},
@@ -223,7 +223,7 @@ func TestRedirectCRUD_ValidateUpdate(t *testing.T) {
 			name: "更新形成循环",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "alias-a", Target: "alias-b"}, {Source: "alias-b", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "alias-a", Target: "alias-b"}, {Source: "alias-b", Target: "gpt-4"}},
 			},
 			oldAlias: "alias-b",
 			input:    &RedirectInput{Source: "alias-b", Target: "alias-a"},
@@ -266,7 +266,7 @@ func TestRedirectCRUD_ValidateDelete(t *testing.T) {
 			name: "有效删除",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
 			},
 			alias:   "gpt-4-turbo",
 			wantErr: false,
@@ -275,7 +275,7 @@ func TestRedirectCRUD_ValidateDelete(t *testing.T) {
 			name: "alias 不存在",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "gpt-4-turbo", Target: "gpt-4"}},
 			},
 			alias:   "not-exists",
 			wantErr: true,
@@ -285,7 +285,7 @@ func TestRedirectCRUD_ValidateDelete(t *testing.T) {
 			name: "被其他 redirect 引用",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{{Name: "gpt-4"}},
-				Redirect: config.RedirectConfigs{{Source: "alias-a", Target: "alias-b"}, {Source: "alias-b", Target: "gpt-4"}},
+				Redirect:    config.RedirectConfigs{{Source: "alias-a", Target: "alias-b"}, {Source: "alias-b", Target: "gpt-4"}},
 			},
 			alias:   "alias-b",
 			wantErr: true,

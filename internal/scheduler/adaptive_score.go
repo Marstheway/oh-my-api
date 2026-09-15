@@ -13,7 +13,8 @@ const (
 	forcedCorrectionThreshold = 30 * time.Minute
 )
 
-// CandidateStats 候选的 TTFT 统计信息
+// CandidateStats 候选的 TTFT 统计信息。
+// TTFT 表示单次上游尝试从发起 HTTP 请求到收到首个 SSE 事件的端到端延迟。
 type CandidateStats struct {
 	Key            string    // provider/upstream_model
 	MeanTTFT       float64   // 有效样本平均 TTFT，单位 ms

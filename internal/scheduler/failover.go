@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/Marstheway/oh-my-api/internal/health"
@@ -12,11 +11,7 @@ import (
 )
 
 type FailoverStrategy struct {
-	client            *provider.Client
-	ratelimit         *ratelimit.Manager
-	health            *health.Checker
-	prefillTimeout    time.Duration
-	streamIdleTimeout time.Duration
+	leafRuntime
 }
 
 type failoverDeferredTask struct {
@@ -24,19 +19,18 @@ type failoverDeferredTask struct {
 	waitForRateLimit bool
 }
 
-func NewFailoverStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker, prefillTimeout time.Duration, streamIdleTimeout time.Duration) *FailoverStrategy {
+func NewFailoverStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker, prefillTimeout, streamIdleTimeout, nonStreamTimeout time.Duration) *FailoverStrategy {
 	return &FailoverStrategy{
-		client:            client,
-		ratelimit:         rl,
-		health:            h,
-		prefillTimeout:    prefillTimeout,
-		streamIdleTimeout: streamIdleTimeout,
+		leafRuntime: newLeafRuntime("failover", client, rl, h, prefillTimeout, streamIdleTimeout, nonStreamTimeout),
 	}
 }
 
 func (s *FailoverStrategy) Execute(ctx context.Context, tasks []Task) (*Result, error) {
 	if len(tasks) == 0 {
 		return nil, ErrNoTasks
+	}
+	if err := entryAbort(ctx, "failover"); err != nil {
+		return nil, err
 	}
 
 	now := time.Now().Local()
@@ -50,12 +44,14 @@ func (s *FailoverStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 	deferred := make([]failoverDeferredTask, 0, len(tasks))
 
 	for _, task := range tasks {
-		if ctx.Err() != nil {
-			fallback.DiscardSoftResult()
-			return nil, ctx.Err()
+		if stop, err := stopSequential(ctx, "failover", fallback, nil); stop {
+			return nil, err
 		}
 
 		if isProviderDisabledAt(task, now) {
+			continue
+		}
+		if !cascadeLeafReady(s.client, task.ProviderName) {
 			continue
 		}
 
@@ -65,7 +61,7 @@ func (s *FailoverStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 			continue
 		}
 
-		if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel) {
+		if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel, task.ModelQPM) {
 			slog.Warn("provider rate limited, skipping",
 				"provider", task.ProviderName,
 				"upstream_identity", task.ProviderName+"/"+task.UpstreamModel,
@@ -75,7 +71,7 @@ func (s *FailoverStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 		}
 
 		result, err := s.executeTask(ctx, &task)
-		if success, doneResult, doneErr := s.handleAttemptOutcome(fallback, result, err, task, false); success {
+		if success, doneResult, doneErr := s.handleAttemptOutcome(ctx, fallback, result, err, task, false); success {
 			return doneResult, doneErr
 		}
 	}
@@ -85,15 +81,20 @@ func (s *FailoverStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 	}
 
 	for _, deferredTask := range deferred {
-		if ctx.Err() != nil {
-			fallback.DiscardSoftResult()
-			return nil, ctx.Err()
+		if stop, err := stopSequential(ctx, "failover", fallback, nil); stop {
+			return nil, err
 		}
 
 		task := deferredTask.task
 		if deferredTask.waitForRateLimit {
-			if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel) {
-				if err := s.ratelimit.Wait(ctx, task.ProviderName, task.UpstreamModel); err != nil {
+			if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel, task.ModelQPM) {
+				if err := s.ratelimit.Wait(ctx, task.ProviderName, task.UpstreamModel, task.ModelQPM); err != nil {
+					if stop, retErr := stopSequential(ctx, "failover", fallback, err,
+						"provider", task.ProviderName,
+						"upstream_identity", task.ProviderName+"/"+task.UpstreamModel,
+					); stop {
+						return nil, retErr
+					}
 					slog.Warn("provider rate limit wait failed",
 						"provider", task.ProviderName,
 						"upstream_identity", task.ProviderName+"/"+task.UpstreamModel,
@@ -103,7 +104,7 @@ func (s *FailoverStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 					continue
 				}
 			}
-		} else if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel) {
+		} else if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel, task.ModelQPM) {
 			slog.Warn("provider rate limited, skipping",
 				"provider", task.ProviderName,
 				"upstream_identity", task.ProviderName+"/"+task.UpstreamModel,
@@ -113,7 +114,7 @@ func (s *FailoverStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 		}
 
 		result, err := s.executeTask(ctx, &task)
-		if success, doneResult, doneErr := s.handleAttemptOutcome(fallback, result, err, task, true); success {
+		if success, doneResult, doneErr := s.handleAttemptOutcome(ctx, fallback, result, err, task, true); success {
 			return doneResult, doneErr
 		}
 	}
@@ -121,8 +122,14 @@ func (s *FailoverStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 	return fallback.Final()
 }
 
-func (s *FailoverStrategy) handleAttemptOutcome(fallback *sequentialFallback, result *Result, err error, task Task, forced bool) (bool, *Result, error) {
+func (s *FailoverStrategy) handleAttemptOutcome(ctx context.Context, fallback *sequentialFallback, result *Result, err error, task Task, forced bool) (bool, *Result, error) {
 	if err != nil {
+		if stop, retErr := stopSequential(ctx, "failover", fallback, err,
+			"provider", task.ProviderName,
+			"upstream_identity", task.ProviderName+"/"+task.UpstreamModel,
+		); stop {
+			return true, nil, retErr
+		}
 		slog.Warn(s.failoverFailureLogMessage(forced),
 			"provider", task.ProviderName,
 			"upstream_identity", task.ProviderName+"/"+task.UpstreamModel,
@@ -149,12 +156,13 @@ func (s *FailoverStrategy) handleAttemptOutcome(fallback *sequentialFallback, re
 		fallback.RecordSoftResult(result)
 		return false, nil, nil
 	default:
-		slog.Warn(s.failoverFailureLogMessage(forced),
+		logAttrs := []any{
 			"provider", task.ProviderName,
-			"upstream_identity", task.ProviderName+"/"+task.UpstreamModel,
+			"upstream_identity", task.ProviderName + "/" + task.UpstreamModel,
 			"status", result.Response.StatusCode,
 			"reason", result.FailureReason,
-		)
+		}
+		slog.Warn(s.failoverFailureLogMessage(forced), upstreamErrorLogAttrs(logAttrs, result)...)
 		fallback.RecordHardResult(result)
 		return false, nil, nil
 	}
@@ -165,50 +173,6 @@ func (s *FailoverStrategy) failoverFailureLogMessage(forced bool) string {
 		return "provider failed (forced try), trying next"
 	}
 	return "provider failed, trying next"
-}
-
-// executeTask 执行单个请求并在分类后上报健康状态
-func (s *FailoverStrategy) executeTask(ctx context.Context, task *Task) (*Result, error) {
-	start := time.Now()
-	resp, err := s.client.Do(task.ProviderName, task.Request)
-	if err != nil {
-		recordAttemptMetric("failover", *task, nil, err, time.Since(start))
-		s.health.ReportFailure(health.MakeHealthKey(task.ProviderName, task.OutboundProtocol))
-		return nil, err
-	}
-
-	healthKey := health.MakeHealthKey(task.ProviderName, task.OutboundProtocol)
-	result, err := s.parseResponse(resp, task.ProviderName, task.UpstreamModel, responseProtocol(*task), s.prefillTimeout, s.streamIdleTimeout)
-	if err != nil {
-		recordAttemptMetric("failover", *task, nil, err, time.Since(start))
-		s.health.ReportFailure(healthKey)
-		return nil, err
-	}
-
-	// 统一应用 TokenHub 错误码分类（仅对硬失败重分级）
-	applyTokenHubClassification(result, resp, task.Request)
-
-	recordAttemptMetric("failover", *task, result, nil, time.Since(start))
-
-	applyHealthAction(s.health, healthKey, result)
-	if result.HealthActionInfo.Action != HealthActionNone {
-		return result, nil
-	}
-
-	switch result.FailureKind {
-	case FailureKindSuccess:
-		s.health.ReportSuccess(healthKey)
-	case FailureKindHard:
-		if result.Response != nil && result.Response.StatusCode >= http.StatusInternalServerError {
-			s.health.ReportFailure(healthKey)
-		}
-	}
-
-	return result, nil
-}
-
-func (s *FailoverStrategy) parseResponse(resp *http.Response, providerName, upstreamModel, protocol string, prefillTimeout time.Duration, streamIdleTimeout time.Duration) (*Result, error) {
-	return parseResponse(resp, providerName, upstreamModel, protocol, prefillTimeout, streamIdleTimeout)
 }
 
 type sequentialFallback struct {

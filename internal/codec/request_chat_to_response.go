@@ -17,11 +17,22 @@ func convertChatToResponseRequest(req *dto.ChatCompletionRequest, upstreamModel 
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
 	}
-	if req.MaxTokens != 0 {
+	// max_output_tokens 映射：优先 MaxCompletionTokens（仅 >0 视为有效；显式 0 回退到 MaxTokens）
+	if req.MaxCompletionTokens != nil && *req.MaxCompletionTokens > 0 {
+		out.MaxOutputTokens = *req.MaxCompletionTokens
+	} else if req.MaxTokens > 0 {
 		out.MaxOutputTokens = req.MaxTokens
 	}
+	// reasoning_effort 映射
+	if req.ReasoningEffort != "" {
+		out.Reasoning = &dto.ResponsesReasoning{Effort: req.ReasoningEffort}
+	}
+	// stream_options 透传
+	if req.StreamOptions != nil {
+		out.StreamOptions = req.StreamOptions
+	}
 
-	if err := fillInstructionsAndInput(req.Messages, out); err != nil {
+	if err := fillInstructionsAndInput(req.Messages, out, NeedsDeepSeekCompat(upstreamModel)); err != nil {
 		return nil, err
 	}
 
@@ -45,324 +56,82 @@ func convertChatToResponseRequest(req *dto.ChatCompletionRequest, upstreamModel 
 }
 
 // fillInstructionsAndInput 将消息列表分离为 instructions（system/developer）和 input（其余）。
-func fillInstructionsAndInput(messages []dto.Message, out *dto.ResponsesRequest) error {
+func fillInstructionsAndInput(messages []dto.Message, out *dto.ResponsesRequest, replayReasoning bool) error {
 	var systemTexts []string
 	var items []dto.ResponsesInputItem
+	legacyCalls := make(map[string][]string)
+	legacyCallSeq := 0
+	generatedCallSeq := 0
+	var pendingCallIDs []string
 
 	for _, msg := range messages {
 		switch msg.Role {
 		case "system", "developer":
-			text, err := extractStringContent(msg.Content)
+			text, err := systemTextFromContent(msg.Content)
 			if err != nil {
-				return fmt.Errorf("system/developer message content: %w", err)
+				return err
 			}
 			systemTexts = append(systemTexts, text)
 
 		case "assistant":
-			// 处理来自 anthropic→chat 转换的 ContentBlock 数组（包含 tool_use 块）
-			if blocks, ok := msg.Content.([]dto.ContentBlock); ok {
-				for _, block := range blocks {
-					switch block.Type {
-					case "text":
-						if block.Text != "" {
-							contentJSON, err := json.Marshal(block.Text)
-							if err != nil {
-								return fmt.Errorf("marshal assistant text block: %w", err)
-							}
-							items = append(items, dto.ResponsesInputItem{
-								Type:    "message",
-								Role:    "assistant",
-								Content: json.RawMessage(contentJSON),
-							})
-						}
-					case "tool_use":
-						argsJSON, err := json.Marshal(block.Input)
-						if err != nil {
-							return fmt.Errorf("marshal tool_use input: %w", err)
-						}
-						items = append(items, dto.ResponsesInputItem{
-							Type:      "function_call",
-							CallID:    block.ID,
-							Name:      block.Name,
-							Arguments: string(argsJSON),
-						})
-					}
+			if replayReasoning && msg.ReasoningContent != nil && *msg.ReasoningContent != "" {
+				reasoningContent, err := json.Marshal([]map[string]any{
+					{"type": "reasoning_text", "text": *msg.ReasoningContent},
+				})
+				if err != nil {
+					return fmt.Errorf("marshal assistant reasoning content: %w", err)
 				}
-			} else if mapBlocks, ok := msg.Content.([]any); ok {
-				// 处理来自 JSON 反序列化的 []map[string]any blocks（tool_use 等）
-				for _, item := range mapBlocks {
-					m, ok := item.(map[string]any)
-					if !ok {
-						continue
-					}
-					blockType, _ := m["type"].(string)
-					switch blockType {
-					case "text":
-						text, _ := m["text"].(string)
-						if text != "" {
-							contentJSON, err := json.Marshal(text)
-							if err != nil {
-								return fmt.Errorf("marshal assistant text block (map): %w", err)
-							}
-							items = append(items, dto.ResponsesInputItem{
-								Type:    "message",
-								Role:    "assistant",
-								Content: json.RawMessage(contentJSON),
-							})
-						}
-					case "tool_use":
-						argsJSON, err := json.Marshal(m["input"])
-						if err != nil {
-							return fmt.Errorf("marshal tool_use input (map): %w", err)
-						}
-						id, _ := m["id"].(string)
-						name, _ := m["name"].(string)
-						items = append(items, dto.ResponsesInputItem{
-							Type:      "function_call",
-							CallID:    id,
-							Name:      name,
-							Arguments: string(argsJSON),
-						})
-					default:
-						if blockType == "" {
-							return fmt.Errorf("content part missing type field in assistant message")
-						}
-						return fmt.Errorf("unsupported content part type %q in assistant message", blockType)
-					}
-				}
-			} else {
-				// 先处理文本内容（即使同时有 tool_calls 也应保留）
-				if text, err := extractStringContent(msg.Content); err != nil {
-					return fmt.Errorf("assistant message content: %w", err)
-				} else if text != "" {
-					contentJSON, err := json.Marshal(text)
-					if err != nil {
-						return fmt.Errorf("marshal assistant content: %w", err)
-					}
-					items = append(items, dto.ResponsesInputItem{
-						Type:    "message",
-						Role:    "assistant",
-						Content: json.RawMessage(contentJSON),
-					})
-				}
-				// 处理工具调用（与文本内容平级）
-				for _, tc := range msg.ToolCalls {
-					items = append(items, dto.ResponsesInputItem{
-						Type:      "function_call",
-						CallID:    tc.ID,
-						Name:      tc.Function.Name,
-						Arguments: tc.Function.Arguments,
-					})
-				}
+				items = append(items, dto.ResponsesInputItem{
+					Type:    "reasoning",
+					Content: json.RawMessage(reasoningContent),
+				})
+			}
+			var err error
+			var callIDs []string
+			items, callIDs, generatedCallSeq, err = appendAssistantItems(items, msg, generatedCallSeq)
+			if err != nil {
+				return err
+			}
+			pendingCallIDs = append(pendingCallIDs, callIDs...)
+			if msg.FunctionCall != nil {
+				legacyCallSeq++
+				callID := fmt.Sprintf("legacy_function_call_%d", legacyCallSeq)
+				items = append(items, dto.ResponsesInputItem{
+					Type:      "function_call",
+					CallID:    callID,
+					Name:      msg.FunctionCall.Name,
+					Arguments: normalizeArguments(msg.FunctionCall.Arguments),
+				})
+				legacyCalls[msg.FunctionCall.Name] = append(legacyCalls[msg.FunctionCall.Name], callID)
 			}
 
 		case "tool":
-			text, err := extractStringContent(msg.Content)
-			if err != nil {
-				return fmt.Errorf("tool message content: %w", err)
+			var err error
+			callID := msg.ToolCallID
+			if callID == "" && len(pendingCallIDs) > 0 {
+				callID = pendingCallIDs[0]
+				pendingCallIDs = pendingCallIDs[1:]
+			} else if callID != "" {
+				pendingCallIDs = removePendingCallID(pendingCallIDs, callID)
 			}
-			outputJSON, err := json.Marshal(text)
+			msg.ToolCallID = callID
+			items, err = appendToolItems(items, msg)
 			if err != nil {
-				return fmt.Errorf("marshal tool output: %w", err)
+				return err
 			}
-			items = append(items, dto.ResponsesInputItem{
-				Type:   "function_call_output",
-				CallID: msg.ToolCallID,
-				Output: json.RawMessage(outputJSON),
-			})
+
+		case "function":
+			var err error
+			items, err = appendLegacyFunctionOutput(items, msg, legacyCalls)
+			if err != nil {
+				return err
+			}
 
 		default:
-			// 处理来自 anthropic→chat 转换的 ContentBlock 数组（包含 tool_result 块、图片等多模态内容）
-			if blocks, ok := msg.Content.([]dto.ContentBlock); ok {
-				for _, block := range blocks {
-					switch block.Type {
-					case "text":
-						if block.Text != "" {
-							contentJSON, err := json.Marshal(block.Text)
-							if err != nil {
-								return fmt.Errorf("marshal user text block: %w", err)
-							}
-							items = append(items, dto.ResponsesInputItem{
-								Type:    "message",
-								Role:    msg.Role,
-								Content: json.RawMessage(contentJSON),
-							})
-						}
-					case "tool_result":
-						contentStr, _ := block.Content.(string)
-						outputJSON, err := json.Marshal(contentStr)
-						if err != nil {
-							return fmt.Errorf("marshal tool result output: %w", err)
-						}
-						items = append(items, dto.ResponsesInputItem{
-							Type:   "function_call_output",
-							CallID: block.ToolUseID,
-							Output: json.RawMessage(outputJSON),
-						})
-					case "image":
-						// 处理多模态图片内容
-						if block.Source != nil {
-							part := map[string]any{
-								"type": "input_image",
-							}
-							if block.Source.Type == "base64" && block.Source.Data != "" {
-								// base64 格式：转换为 data URL
-								mediaType := block.Source.MediaType
-								if mediaType == "" {
-									mediaType = "image/jpeg"
-								}
-								part["image_url"] = fmt.Sprintf("data:%s;base64,%s", mediaType, block.Source.Data)
-							} else if block.Source.Type == "url" && block.Source.Url != "" {
-								// URL 格式
-								part["image_url"] = block.Source.Url
-							}
-							parts := []map[string]any{part}
-							contentJSON, err := json.Marshal(parts)
-							if err != nil {
-								return fmt.Errorf("marshal image content block: %w", err)
-							}
-							items = append(items, dto.ResponsesInputItem{
-								Type:    "message",
-								Role:    msg.Role,
-								Content: json.RawMessage(contentJSON),
-							})
-						}
-					case "document":
-						// 处理文档内容
-						if block.Source != nil {
-							part := map[string]any{
-								"type": "input_file",
-							}
-							if block.Source.Type == "base64" && block.Source.Data != "" {
-								part["file_data"] = block.Source.Data
-							}
-							if block.Source.MediaType != "" {
-								part["format"] = block.Source.MediaType
-							}
-							parts := []map[string]any{part}
-							contentJSON, err := json.Marshal(parts)
-							if err != nil {
-								return fmt.Errorf("marshal document content block: %w", err)
-							}
-							items = append(items, dto.ResponsesInputItem{
-								Type:    "message",
-								Role:    msg.Role,
-								Content: json.RawMessage(contentJSON),
-							})
-						}
-					}
-				}
-			} else if mapBlocks, ok := msg.Content.([]any); ok {
-				// 处理来自 JSON 反序列化的 []map[string]any blocks
-				// 先检查是否包含多模态内容（image_url, input_audio, file, video_url）
-				hasMultimodal := false
-				for _, item := range mapBlocks {
-					m, ok := item.(map[string]any)
-					if !ok {
-						continue
-					}
-					blockType, _ := m["type"].(string)
-					if blockType == "image_url" || blockType == "input_audio" ||
-						blockType == "file" || blockType == "video_url" {
-						hasMultimodal = true
-						break
-					}
-				}
-
-				if hasMultimodal {
-					// 使用多模态处理路径
-					parts, err := convertContentToResponseParts(msg.Content)
-					if err != nil {
-						return fmt.Errorf("message (role=%s) content: %w", msg.Role, err)
-					}
-					if len(parts) > 0 {
-						contentJSON, err := json.Marshal(parts)
-						if err != nil {
-							return fmt.Errorf("marshal multimodal content: %w", err)
-						}
-						items = append(items, dto.ResponsesInputItem{
-							Type:    "message",
-							Role:    msg.Role,
-							Content: json.RawMessage(contentJSON),
-						})
-					}
-				} else {
-					// 处理 tool_result 等传统 blocks
-					for _, item := range mapBlocks {
-						m, ok := item.(map[string]any)
-						if !ok {
-							continue
-						}
-						blockType, _ := m["type"].(string)
-						switch blockType {
-						case "text":
-							text, _ := m["text"].(string)
-							if text != "" {
-								contentJSON, err := json.Marshal(text)
-								if err != nil {
-									return fmt.Errorf("marshal user text block (map): %w", err)
-								}
-								items = append(items, dto.ResponsesInputItem{
-									Type:    "message",
-									Role:    msg.Role,
-									Content: json.RawMessage(contentJSON),
-								})
-							}
-						case "tool_result":
-							toolUseID, _ := m["tool_use_id"].(string)
-							contentStr, _ := m["content"].(string)
-							outputJSON, err := json.Marshal(contentStr)
-							if err != nil {
-								return fmt.Errorf("marshal map tool result output: %w", err)
-							}
-							items = append(items, dto.ResponsesInputItem{
-								Type:   "function_call_output",
-								CallID: toolUseID,
-								Output: json.RawMessage(outputJSON),
-							})
-						default:
-							if blockType == "" {
-								return fmt.Errorf("content part missing type field in role=%s message", msg.Role)
-							}
-							return fmt.Errorf("unsupported content part type %q in role=%s message", blockType, msg.Role)
-						}
-					}
-				}
-			} else {
-				// user 及其他角色统一作为 message 类型
-				// 先尝试提取纯文本，如果包含多模态内容则使用多模态处理路径
-				text, err := extractStringContent(msg.Content)
-				if err == nil {
-					// 纯文本内容
-					contentJSON, err := json.Marshal(text)
-					if err != nil {
-						return fmt.Errorf("marshal message content: %w", err)
-					}
-					items = append(items, dto.ResponsesInputItem{
-						Type:    "message",
-						Role:    msg.Role,
-						Content: json.RawMessage(contentJSON),
-					})
-				} else if errors.Is(err, ErrMultimodalDetected) {
-					// 多模态内容，转换为 parts 数组
-					parts, err := convertContentToResponseParts(msg.Content)
-					if err != nil {
-						return fmt.Errorf("message (role=%s) content: %w", msg.Role, err)
-					}
-					if len(parts) > 0 {
-						contentJSON, err := json.Marshal(parts)
-						if err != nil {
-							return fmt.Errorf("marshal multimodal content: %w", err)
-						}
-						items = append(items, dto.ResponsesInputItem{
-							Type:    "message",
-							Role:    msg.Role,
-							Content: json.RawMessage(contentJSON),
-						})
-					}
-				} else {
-					return fmt.Errorf("message (role=%s) content: %w", msg.Role, err)
-				}
+			var err error
+			items, err = appendUserItems(items, msg)
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -387,9 +156,521 @@ func fillInstructionsAndInput(messages []dto.Message, out *dto.ResponsesRequest)
 	return nil
 }
 
+// systemTextFromContent 提取 system/developer 文本；多模态时仅保留 text 部分（不失败）。
+func systemTextFromContent(content any) (string, error) {
+	text, err := extractStringContent(content)
+	if err == nil || errors.Is(err, ErrMultimodalDetected) {
+		// ErrMultimodalDetected 时 extractStringContent 仍返回已收集的文本
+		return text, nil
+	}
+	return "", fmt.Errorf("system/developer message content: %w", err)
+}
+
+// appendAssistantItems 将 assistant 消息转为 Responses input items。
+// content 与 msg.ToolCalls 解耦：无论 content 形态如何，末尾始终追加 ToolCalls。
+func appendAssistantItems(items []dto.ResponsesInputItem, msg dto.Message, generatedCallSeq int) ([]dto.ResponsesInputItem, []string, int, error) {
+	var err error
+	switch content := msg.Content.(type) {
+	case []dto.ContentBlock:
+		items, err = appendAssistantContentBlocks(items, content)
+	case []any:
+		items, err = appendAssistantMapBlocks(items, content)
+	default:
+		items, err = appendAssistantPlainOrMultimodal(items, msg.Content)
+	}
+	if err != nil {
+		return nil, nil, generatedCallSeq, err
+	}
+	items, callIDs, generatedCallSeq := appendFunctionCalls(items, msg.ToolCalls, generatedCallSeq)
+	return items, callIDs, generatedCallSeq, nil
+}
+
+func appendAssistantContentBlocks(items []dto.ResponsesInputItem, blocks []dto.ContentBlock) ([]dto.ResponsesInputItem, error) {
+	for _, block := range blocks {
+		switch block.Type {
+		case "text":
+			if block.Text == "" {
+				continue
+			}
+			contentJSON, err := json.Marshal(block.Text)
+			if err != nil {
+				return nil, fmt.Errorf("marshal assistant text block: %w", err)
+			}
+			items = append(items, dto.ResponsesInputItem{
+				Type:    "message",
+				Role:    "assistant",
+				Content: json.RawMessage(contentJSON),
+			})
+		case "tool_use":
+			item, err := functionCallFromToolUse(block.ID, block.Name, block.Input)
+			if err != nil {
+				return nil, fmt.Errorf("marshal tool_use input: %w", err)
+			}
+			items = append(items, item)
+		case "image", "document":
+			// Responses API 不允许 assistant 消息携带 input_image/input_file 等 part
+			//（assistant content 仅支持 output_text/output_audio），且 assistant 的图片
+			// 并非给模型的输入，这里静默丢弃以保持请求合法（与 727e86a^ 行为一致）。
+		}
+	}
+	return items, nil
+}
+
+// appendAssistantMapBlocks 处理 []any content。
+// 纯文本路径保持 text/tool_use 交错顺序；多模态路径将 tool_use 提出为 function_call，
+// 仅保留 text 合并为一条 output_text message（assistant 不允许 input_* part，多模态块丢弃）。
+func appendAssistantMapBlocks(items []dto.ResponsesInputItem, mapBlocks []any) ([]dto.ResponsesInputItem, error) {
+	if mapBlocksHaveMultimodal(mapBlocks) {
+		var textBlocks []any
+		for _, item := range mapBlocks {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			blockType, _ := m["type"].(string)
+			switch blockType {
+			case "tool_use":
+				fc, err := functionCallFromMapToolUse(m)
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, fc)
+			case "text":
+				textBlocks = append(textBlocks, item)
+			case "image_url", "input_audio", "file", "video_url":
+				// Responses API 不允许 assistant 消息携带 input_image 等 part，
+				// 与 assistant ContentBlock 路径一致：丢弃多模态块，仅保留文本。
+			case "":
+				return nil, fmt.Errorf("content part missing type field in assistant message")
+			default:
+				return nil, fmt.Errorf("unsupported content part type %q in assistant message", blockType)
+			}
+		}
+		parts, err := convertContentToResponsePartsWithTextType(textBlocks, "output_text")
+		if err != nil {
+			return nil, fmt.Errorf("assistant message content: %w", err)
+		}
+		return appendMessageWithParts(items, "assistant", parts)
+	}
+
+	// 纯文本 + tool_use：按出现顺序交错输出（既有 wire format）
+	for _, item := range mapBlocks {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		blockType, _ := m["type"].(string)
+		switch blockType {
+		case "text":
+			text, _ := m["text"].(string)
+			if text == "" {
+				continue
+			}
+			contentJSON, err := json.Marshal(text)
+			if err != nil {
+				return nil, fmt.Errorf("marshal assistant text block (map): %w", err)
+			}
+			items = append(items, dto.ResponsesInputItem{
+				Type:    "message",
+				Role:    "assistant",
+				Content: json.RawMessage(contentJSON),
+			})
+		case "tool_use":
+			fc, err := functionCallFromMapToolUse(m)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, fc)
+		case "":
+			return nil, fmt.Errorf("content part missing type field in assistant message")
+		default:
+			return nil, fmt.Errorf("unsupported content part type %q in assistant message", blockType)
+		}
+	}
+	return items, nil
+}
+
+func appendAssistantPlainOrMultimodal(items []dto.ResponsesInputItem, content any) ([]dto.ResponsesInputItem, error) {
+	text, err := extractStringContent(content)
+	if err == nil {
+		if text == "" {
+			return items, nil
+		}
+		contentJSON, err := json.Marshal(text)
+		if err != nil {
+			return nil, fmt.Errorf("marshal assistant content: %w", err)
+		}
+		return append(items, dto.ResponsesInputItem{
+			Type:    "message",
+			Role:    "assistant",
+			Content: json.RawMessage(contentJSON),
+		}), nil
+	}
+	if !errors.Is(err, ErrMultimodalDetected) {
+		return nil, fmt.Errorf("assistant message content: %w", err)
+	}
+	parts, err := convertContentToResponsePartsWithTextType(content, "output_text")
+	if err != nil {
+		return nil, fmt.Errorf("assistant message content: %w", err)
+	}
+	return appendMessageWithParts(items, "assistant", parts)
+}
+
+// appendToolItems 将 tool 消息转为 function_call_output。
+// content 可能含多模态或结构化数据：string 直用，其余整体 JSON 序列化为字符串（与 new-api 对齐）。
+// 缺少 call_id 时降级为 user 消息，避免上游校验失败。
+func appendToolItems(items []dto.ResponsesInputItem, msg dto.Message) ([]dto.ResponsesInputItem, error) {
+	output, err := stringifyToolOutput(msg.Content)
+	if err != nil {
+		return nil, err
+	}
+
+	if msg.ToolCallID == "" {
+		fallbackJSON, err := json.Marshal("[tool_output_missing_call_id] " + output)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tool output fallback: %w", err)
+		}
+		return append(items, dto.ResponsesInputItem{
+			Type:    "message",
+			Role:    "user",
+			Content: json.RawMessage(fallbackJSON),
+		}), nil
+	}
+
+	outputJSON, err := json.Marshal(output)
+	if err != nil {
+		return nil, fmt.Errorf("marshal tool output: %w", err)
+	}
+	return append(items, dto.ResponsesInputItem{
+		Type:   "function_call_output",
+		CallID: msg.ToolCallID,
+		Output: json.RawMessage(outputJSON),
+	}), nil
+}
+
+func appendLegacyFunctionOutput(items []dto.ResponsesInputItem, msg dto.Message, calls map[string][]string) ([]dto.ResponsesInputItem, error) {
+	if msg.Name == "" {
+		return nil, fmt.Errorf("legacy function output missing name")
+	}
+	callIDs := calls[msg.Name]
+	if len(callIDs) == 0 {
+		return nil, fmt.Errorf("legacy function output %q has no matching call", msg.Name)
+	}
+	if len(callIDs) > 1 {
+		return nil, fmt.Errorf("legacy function output %q matches multiple pending calls", msg.Name)
+	}
+
+	output, err := stringifyToolOutput(msg.Content)
+	if err != nil {
+		return nil, err
+	}
+	delete(calls, msg.Name)
+	outputJSON, err := json.Marshal(output)
+	if err != nil {
+		return nil, fmt.Errorf("marshal legacy function output: %w", err)
+	}
+	return append(items, dto.ResponsesInputItem{
+		Type:   "function_call_output",
+		CallID: callIDs[0],
+		Output: json.RawMessage(outputJSON),
+	}), nil
+}
+
+func removePendingCallID(callIDs []string, target string) []string {
+	for i, callID := range callIDs {
+		if callID == target {
+			return append(callIDs[:i], callIDs[i+1:]...)
+		}
+	}
+	return callIDs
+}
+
+func stringifyToolOutput(content any) (string, error) {
+	switch value := content.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	default:
+		body, err := json.Marshal(value)
+		if err != nil {
+			return "", fmt.Errorf("marshal tool output: %w", err)
+		}
+		return string(body), nil
+	}
+}
+
+// appendUserItems 处理 user 及其他角色（含 tool_result / 多模态 ContentBlock）。
+func appendUserItems(items []dto.ResponsesInputItem, msg dto.Message) ([]dto.ResponsesInputItem, error) {
+	switch content := msg.Content.(type) {
+	case []dto.ContentBlock:
+		return appendUserContentBlocks(items, msg.Role, content)
+	case []any:
+		return appendUserMapBlocks(items, msg.Role, content)
+	default:
+		return appendUserPlainOrMultimodal(items, msg.Role, msg.Content)
+	}
+}
+
+func appendUserContentBlocks(items []dto.ResponsesInputItem, role string, blocks []dto.ContentBlock) ([]dto.ResponsesInputItem, error) {
+	for _, block := range blocks {
+		switch block.Type {
+		case "text":
+			if block.Text == "" {
+				continue
+			}
+			contentJSON, err := json.Marshal(block.Text)
+			if err != nil {
+				return nil, fmt.Errorf("marshal user text block: %w", err)
+			}
+			items = append(items, dto.ResponsesInputItem{
+				Type:    "message",
+				Role:    role,
+				Content: json.RawMessage(contentJSON),
+			})
+		case "tool_result":
+			contentStr, _ := block.Content.(string)
+			outputJSON, err := json.Marshal(contentStr)
+			if err != nil {
+				return nil, fmt.Errorf("marshal tool result output: %w", err)
+			}
+			items = append(items, dto.ResponsesInputItem{
+				Type:   "function_call_output",
+				CallID: block.ToolUseID,
+				Output: json.RawMessage(outputJSON),
+			})
+		case "image":
+			item, ok, err := messageItemFromImageContentBlock(role, block)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				items = append(items, item)
+			}
+		case "document":
+			item, ok, err := messageItemFromDocumentContentBlock(role, block)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				items = append(items, item)
+			}
+		}
+	}
+	return items, nil
+}
+
+// appendUserMapBlocks 处理 user 侧 []any content。
+// 纯文本路径保持 text/tool_result 交错顺序；多模态路径合并为 input_* parts。
+func appendUserMapBlocks(items []dto.ResponsesInputItem, role string, mapBlocks []any) ([]dto.ResponsesInputItem, error) {
+	if mapBlocksHaveMultimodal(mapBlocks) {
+		parts, err := convertContentToResponsePartsWithTextType(mapBlocks, "input_text")
+		if err != nil {
+			return nil, fmt.Errorf("message (role=%s) content: %w", role, err)
+		}
+		return appendMessageWithParts(items, role, parts)
+	}
+
+	for _, item := range mapBlocks {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		blockType, _ := m["type"].(string)
+		switch blockType {
+		case "text":
+			text, _ := m["text"].(string)
+			if text == "" {
+				continue
+			}
+			contentJSON, err := json.Marshal(text)
+			if err != nil {
+				return nil, fmt.Errorf("marshal user text block (map): %w", err)
+			}
+			items = append(items, dto.ResponsesInputItem{
+				Type:    "message",
+				Role:    role,
+				Content: json.RawMessage(contentJSON),
+			})
+		case "tool_result":
+			toolUseID, _ := m["tool_use_id"].(string)
+			contentStr, _ := m["content"].(string)
+			outputJSON, err := json.Marshal(contentStr)
+			if err != nil {
+				return nil, fmt.Errorf("marshal map tool result output: %w", err)
+			}
+			items = append(items, dto.ResponsesInputItem{
+				Type:   "function_call_output",
+				CallID: toolUseID,
+				Output: json.RawMessage(outputJSON),
+			})
+		case "":
+			return nil, fmt.Errorf("content part missing type field in role=%s message", role)
+		default:
+			return nil, fmt.Errorf("unsupported content part type %q in role=%s message", blockType, role)
+		}
+	}
+	return items, nil
+}
+
+func appendUserPlainOrMultimodal(items []dto.ResponsesInputItem, role string, content any) ([]dto.ResponsesInputItem, error) {
+	text, err := extractStringContent(content)
+	if err == nil {
+		contentJSON, err := json.Marshal(text)
+		if err != nil {
+			return nil, fmt.Errorf("marshal message content: %w", err)
+		}
+		return append(items, dto.ResponsesInputItem{
+			Type:    "message",
+			Role:    role,
+			Content: json.RawMessage(contentJSON),
+		}), nil
+	}
+	if !errors.Is(err, ErrMultimodalDetected) {
+		return nil, fmt.Errorf("message (role=%s) content: %w", role, err)
+	}
+	parts, err := convertContentToResponsePartsWithTextType(content, "input_text")
+	if err != nil {
+		return nil, fmt.Errorf("message (role=%s) content: %w", role, err)
+	}
+	return appendMessageWithParts(items, role, parts)
+}
+
+func appendMessageWithParts(items []dto.ResponsesInputItem, role string, parts []map[string]any) ([]dto.ResponsesInputItem, error) {
+	if len(parts) == 0 {
+		return items, nil
+	}
+	contentJSON, err := json.Marshal(parts)
+	if err != nil {
+		return nil, fmt.Errorf("marshal multimodal content: %w", err)
+	}
+	return append(items, dto.ResponsesInputItem{
+		Type:    "message",
+		Role:    role,
+		Content: json.RawMessage(contentJSON),
+	}), nil
+}
+
+func appendFunctionCalls(items []dto.ResponsesInputItem, toolCalls []dto.ToolCall, generatedCallSeq int) ([]dto.ResponsesInputItem, []string, int) {
+	callIDs := make([]string, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		callID := tc.ID
+		if callID == "" {
+			generatedCallSeq++
+			callID = fmt.Sprintf("generated_tool_call_%d", generatedCallSeq)
+		}
+		items = append(items, dto.ResponsesInputItem{
+			Type:      "function_call",
+			CallID:    callID,
+			Name:      tc.Function.Name,
+			Arguments: normalizeArguments(tc.Function.Arguments),
+		})
+		callIDs = append(callIDs, callID)
+	}
+	return items, callIDs, generatedCallSeq
+}
+
+func functionCallFromToolUse(id, name string, input any) (dto.ResponsesInputItem, error) {
+	argsJSON, err := json.Marshal(input)
+	if err != nil {
+		return dto.ResponsesInputItem{}, err
+	}
+	return dto.ResponsesInputItem{
+		Type:      "function_call",
+		CallID:    id,
+		Name:      name,
+		Arguments: string(argsJSON),
+	}, nil
+}
+
+func functionCallFromMapToolUse(m map[string]any) (dto.ResponsesInputItem, error) {
+	id, _ := m["id"].(string)
+	name, _ := m["name"].(string)
+	item, err := functionCallFromToolUse(id, name, m["input"])
+	if err != nil {
+		return dto.ResponsesInputItem{}, fmt.Errorf("marshal tool_use input (map): %w", err)
+	}
+	return item, nil
+}
+
+// messageItemFromImageContentBlock 将 Anthropic 风格 image ContentBlock 转为 Responses message item。
+// 第二个返回值表示是否生成了有效 item（无 Source 时为 false）。
+func messageItemFromImageContentBlock(role string, block dto.ContentBlock) (dto.ResponsesInputItem, bool, error) {
+	if block.Source == nil {
+		return dto.ResponsesInputItem{}, false, nil
+	}
+	part := map[string]any{"type": "input_image"}
+	if block.Source.Type == "base64" && block.Source.Data != "" {
+		mediaType := block.Source.MediaType
+		if mediaType == "" {
+			mediaType = "image/jpeg"
+		}
+		part["image_url"] = fmt.Sprintf("data:%s;base64,%s", mediaType, block.Source.Data)
+	} else if block.Source.Type == "url" && block.Source.Url != "" {
+		part["image_url"] = block.Source.Url
+	} else {
+		return dto.ResponsesInputItem{}, false, nil
+	}
+	contentJSON, err := json.Marshal([]map[string]any{part})
+	if err != nil {
+		return dto.ResponsesInputItem{}, false, fmt.Errorf("marshal image content block: %w", err)
+	}
+	return dto.ResponsesInputItem{
+		Type:    "message",
+		Role:    role,
+		Content: json.RawMessage(contentJSON),
+	}, true, nil
+}
+
+func messageItemFromDocumentContentBlock(role string, block dto.ContentBlock) (dto.ResponsesInputItem, bool, error) {
+	if block.Source == nil {
+		return dto.ResponsesInputItem{}, false, nil
+	}
+	part := map[string]any{"type": "input_file"}
+	if block.Source.Type == "base64" && block.Source.Data != "" {
+		part["file_data"] = block.Source.Data
+	}
+	if block.Source.MediaType != "" {
+		part["format"] = block.Source.MediaType
+	}
+	contentJSON, err := json.Marshal([]map[string]any{part})
+	if err != nil {
+		return dto.ResponsesInputItem{}, false, fmt.Errorf("marshal document content block: %w", err)
+	}
+	return dto.ResponsesInputItem{
+		Type:    "message",
+		Role:    role,
+		Content: json.RawMessage(contentJSON),
+	}, true, nil
+}
+
+func mapBlocksHaveMultimodal(blocks []any) bool {
+	for _, item := range blocks {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		blockType, _ := m["type"].(string)
+		if isMultimodalPartType(blockType) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMultimodalPartType(blockType string) bool {
+	switch blockType {
+	case "image_url", "input_audio", "file", "video_url":
+		return true
+	default:
+		return false
+	}
+}
+
 // extractStringContent 从消息 content 提取纯文本。
-// 仅支持 string 和只含 text part 的 []any（JSON 反序列化后）。
-// 如果包含非文本 part（如 image_url），返回 error 以触发多模态处理路径。
+// 仅支持 string 和 []any（JSON 反序列化后）。
+// 若包含非文本 part（如 image_url），返回已收集的文本 + ErrMultimodalDetected，
+// 便于 system 降级直接使用文本，其它路径再走多模态转换。
 func extractStringContent(content any) (string, error) {
 	switch v := content.(type) {
 	case string:
@@ -416,9 +697,8 @@ func extractStringContent(content any) (string, error) {
 				hasNonText = true
 			}
 		}
-		// 如果包含非文本内容，返回错误以触发多模态处理
 		if hasNonText {
-			return "", ErrMultimodalDetected
+			return sb.String(), ErrMultimodalDetected
 		}
 		return sb.String(), nil
 	default:
@@ -429,12 +709,16 @@ func extractStringContent(content any) (string, error) {
 // convertContentToResponseParts 将 Chat Completion 的多模态 content 转换为 Responses API 格式。
 // 返回 input_text, input_image, input_file, input_audio, input_video 等类型的 parts。
 func convertContentToResponseParts(content any) ([]map[string]any, error) {
+	return convertContentToResponsePartsWithTextType(content, "input_text")
+}
+
+func convertContentToResponsePartsWithTextType(content any, textType string) ([]map[string]any, error) {
 	switch v := content.(type) {
 	case string:
 		if v == "" {
 			return nil, nil
 		}
-		return []map[string]any{{"type": "input_text", "text": v}}, nil
+		return []map[string]any{{"type": textType, "text": v}}, nil
 	case nil:
 		return nil, nil
 	case []any:
@@ -454,7 +738,7 @@ func convertContentToResponseParts(content any) ([]map[string]any, error) {
 				text, _ := m["text"].(string)
 				if text != "" {
 					parts = append(parts, map[string]any{
-						"type": "input_text",
+						"type": textType,
 						"text": text,
 					})
 				}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Marstheway/oh-my-api/internal/catalog"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/model"
 	"github.com/Marstheway/oh-my-api/internal/runtimeconfig"
@@ -315,8 +316,8 @@ func createBasicTestConfig() *config.Config {
 		Providers: config.ProvidersConfig{
 			Items: map[string]config.ProviderConfig{
 				"openai": {
-					Endpoint: "https://api.openai.com",
-					APIKey:   "sk-openai",
+					Endpoint:  "https://api.openai.com",
+					APIKey:    "sk-openai",
 					Protocols: []string{"openai.chat"},
 				},
 			},
@@ -330,6 +331,12 @@ func createBasicTestConfig() *config.Config {
 }
 
 func createInMemoryManager(t *testing.T, cfg *config.Config) *runtimeconfig.Manager {
+	t.Helper()
+	mgr, _ := createInMemoryManagerWithPath(t, cfg)
+	return mgr
+}
+
+func createInMemoryManagerWithPath(t *testing.T, cfg *config.Config) (*runtimeconfig.Manager, string) {
 	t.Helper()
 
 	// Create a temp config file for YAML store initialization
@@ -357,7 +364,7 @@ func createInMemoryManager(t *testing.T, cfg *config.Config) *runtimeconfig.Mana
 
 	mgr, err := runtimeconfig.NewManager(cfg, configPath, rebuilder, reinit)
 	require.NoError(t, err)
-	return mgr
+	return mgr, configPath
 }
 
 func configToYAML(cfg *config.Config) ([]byte, error) {
@@ -378,11 +385,11 @@ func configToYAML(cfg *config.Config) ([]byte, error) {
 		Protocols []string `yaml:"protocols"`
 	}
 	type yamlConfig struct {
-		Server      yamlServer                 `yaml:"server"`
-		Inbound     yamlInbound                `yaml:"inbound"`
-		Providers   map[string]yamlProvider    `yaml:"providers"`
-		ModelGroups []config.ModelGroupConfig  `yaml:"model_groups"`
-		Redirect    config.RedirectConfigs     `yaml:"redirect"`
+		Server      yamlServer                `yaml:"server"`
+		Inbound     yamlInbound               `yaml:"inbound"`
+		Providers   map[string]yamlProvider   `yaml:"providers"`
+		ModelGroups []config.ModelGroupConfig `yaml:"model_groups"`
+		Redirect    config.RedirectConfigs    `yaml:"redirect"`
 	}
 
 	yc := yamlConfig{
@@ -400,8 +407,8 @@ func configToYAML(cfg *config.Config) ([]byte, error) {
 
 	for k, v := range cfg.Providers.Items {
 		yc.Providers[k] = yamlProvider{
-			Endpoint: v.Endpoint,
-			APIKey:   v.APIKey,
+			Endpoint:  v.Endpoint,
+			APIKey:    v.APIKey,
 			Protocols: v.Protocols,
 		}
 	}
@@ -472,9 +479,9 @@ func TestAdminRuntimeConfigHandler_CreateProvider(t *testing.T) {
 
 	// Success
 	input := runtimeconfig.ProviderInput{
-		Name:     "anthropic",
-		Endpoint: "https://api.anthropic.com",
-		APIKey:   "sk-ant-test",
+		Name:      "anthropic",
+		Endpoint:  "https://api.anthropic.com",
+		APIKey:    "sk-ant-test",
 		Protocols: []string{"anthropic.messages"},
 	}
 	body, _ := json.Marshal(input)
@@ -575,4 +582,114 @@ func TestAdminRuntimeConfigHandler_DeleteProvider(t *testing.T) {
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// mockCatalogSource 实现 CatalogSource，返回固定的目录视图用于测试。
+type mockCatalogSource struct {
+	view catalog.CatalogView
+}
+
+func (m *mockCatalogSource) ContextLength(provider, upstreamModel string) (int, bool) {
+	return 0, false
+}
+
+func (m *mockCatalogSource) CatalogView() catalog.CatalogView {
+	return m.view
+}
+
+func TestAdminRuntimeConfigHandler_GetCatalog(t *testing.T) {
+	cl := 128000
+	view := catalog.CatalogView{
+		GeneratedAt: "2026-07-12T12:00:00Z",
+		Stale:       false,
+		Providers: []catalog.CatalogProviderView{
+			{
+				Name:          "openai",
+				Protocol:      "openai.chat",
+				LastSuccessAt: "2026-07-12T12:00:00Z",
+				Status:        "ok",
+				Models: []catalog.CatalogModelView{
+					{ID: "gpt-4o", ContextLength: &cl},
+				},
+			},
+		},
+	}
+
+	old := catalogSrc
+	defer func() { catalogSrc = old }()
+	SetCatalogSource(&mockCatalogSource{view: view})
+
+	cfg := createBasicTestConfig()
+	mgr := createInMemoryManager(t, cfg)
+	h := NewAdminRuntimeConfigHandler(mgr)
+
+	r := gin.New()
+	r.GET("/admin/runtime-config/catalog", h.GetCatalog)
+
+	req := httptest.NewRequest("GET", "/admin/runtime-config/catalog", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp catalog.CatalogView
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.False(t, resp.Stale)
+	assert.Equal(t, "2026-07-12T12:00:00Z", resp.GeneratedAt)
+	require.Len(t, resp.Providers, 1)
+	pv := resp.Providers[0]
+	assert.Equal(t, "openai", pv.Name)
+	assert.Equal(t, "openai.chat", pv.Protocol)
+	assert.Equal(t, "ok", pv.Status)
+	require.Len(t, pv.Models, 1)
+	assert.Equal(t, "gpt-4o", pv.Models[0].ID)
+	require.NotNil(t, pv.Models[0].ContextLength)
+	assert.Equal(t, 128000, *pv.Models[0].ContextLength)
+
+	// 确认响应不含任何敏感字段（url/body/api_key/error）
+	body := w.Body.String()
+	for _, leak := range []string{"url", "body", "api_key", "error", "sk-", "GET https"} {
+		assert.NotContains(t, body, leak, "catalog response must not contain sensitive field/value %q", leak)
+	}
+}
+
+func TestAdminRuntimeConfigHandler_GetCatalog_NoSource(t *testing.T) {
+	old := catalogSrc
+	defer func() { catalogSrc = old }()
+	ResetCatalogSource()
+
+	cfg := createBasicTestConfig()
+	mgr := createInMemoryManager(t, cfg)
+	h := NewAdminRuntimeConfigHandler(mgr)
+
+	r := gin.New()
+	r.GET("/admin/runtime-config/catalog", h.GetCatalog)
+
+	req := httptest.NewRequest("GET", "/admin/runtime-config/catalog", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp catalog.CatalogView
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	// 无 source：空且 stale
+	assert.True(t, resp.Stale)
+	assert.Empty(t, resp.Providers)
+	assert.Empty(t, resp.GeneratedAt)
+}
+func TestCollectTestEndpoints_ProbesAllReachableEndpoints(t *testing.T) {
+	provider := config.ProviderConfig{
+		Endpoints: []config.EndpointConfig{
+			{URL: "https://chat.example.com", Protocols: []string{"openai.chat"}},
+			{URL: "https://msg.example.com", Protocols: []string{"anthropic.messages"}},
+		},
+	}
+
+	eps := collectTestEndpoints(provider)
+	require.Len(t, eps, 2)
+	assert.Equal(t, "https://chat.example.com", eps[0].url)
+	assert.Equal(t, "openai.chat", eps[0].protocol)
+	assert.Equal(t, "https://msg.example.com", eps[1].url)
+	assert.Equal(t, "anthropic.messages", eps[1].protocol)
 }

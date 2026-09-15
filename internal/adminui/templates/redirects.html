@@ -26,6 +26,17 @@
 
   @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.5} }
 
+  .drag-cell { width: 32px; padding-right: 0; }
+  tbody#redirectTableBody .row-drag-handle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px;
+    cursor: grab; color: var(--text-muted);
+    opacity: 0.5; transition: opacity 0.15s;
+  }
+  tbody#redirectTableBody tr:hover .row-drag-handle { opacity: 1; }
+  tbody#redirectTableBody .row-drag-handle:active { cursor: grabbing; }
+  tbody#redirectTableBody tr.sortable-ghost { background: var(--bg-hover); opacity: 0.6; }
+  tbody#redirectTableBody tr.sortable-chosen { background: var(--bg-elevated); }
 
   /* ═══ Table ═══ */
   .table-wrap {
@@ -122,6 +133,7 @@
   <table>
     <thead>
       <tr>
+        <th class="drag-cell"></th>
         <th style="width:22%">Alias</th>
         <th style="width:5%"></th>
         <th style="width:22%">Target</th>
@@ -156,7 +168,6 @@ window.draftBarConfig = {
   hasChanges: () => JSON.stringify(state.draft.redirect) !== JSON.stringify(originalRedirects),
   onApplySuccess: () => {
     originalRedirects = JSON.parse(JSON.stringify(state.draft.redirect));
-    updateNavBadges();
   }
 };
 
@@ -172,21 +183,8 @@ async function loadData() {
     }
     renderRedirects();
     updateDraftBar();
-    updateNavBadges();
   } catch (err) {
     showToast(err.message || 'Failed to load data.', 'error');
-  }
-}
-
-// ══════ Nav Badges ══════
-
-function updateNavBadges() {
-  const redirectBadge = document.querySelector('.nav-item[href="/admin/redirects"] .nav-badge');
-  if (redirectBadge) {
-    const count = state.draft.redirect.length;
-    redirectBadge.textContent = count;
-    const hasChanges = JSON.stringify(state.draft.redirect) !== JSON.stringify(originalRedirects);
-    redirectBadge.classList.toggle('has-changes', hasChanges);
   }
 }
 
@@ -200,13 +198,12 @@ function renderRedirects() {
   if (!redirects || redirects.length === 0) {
     tbody.innerHTML = '';
     empty.style.display = 'flex';
+    initRedirectTableSortable();
     return;
   }
   empty.style.display = 'none';
 
-  // redirect 现在是数组，每个元素包含 source, target, resolved_group, chain_length, exposure, context_length
-  const sortedRedirects = [...redirects].sort((a, b) => a.source.localeCompare(b.source));
-  tbody.innerHTML = sortedRedirects.map(r => {
+  tbody.innerHTML = redirects.map(r => {
     const source = r.source;
     const target = r.target;
     const chainLen = r.chain_length;
@@ -230,7 +227,12 @@ function renderRedirects() {
     const visHtml = exposureLabel(r.exposure);
 
     return `
-      <tr>
+      <tr data-source="${escapeAttr(source)}">
+        <td class="drag-cell">
+          <span class="row-drag-handle" title="Drag to reorder">
+            <i data-lucide="grip-vertical" style="width:14px;height:14px"></i>
+          </span>
+        </td>
         <td><span class="code">${escapeHtml(source)}</span></td>
         <td class="chain-arrow">→</td>
         <td><span class="code-accent">${escapeHtml(target)}</span></td>
@@ -250,6 +252,45 @@ function renderRedirects() {
       </tr>
     `;
   }).join('');
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+  initRedirectTableSortable();
+}
+
+let redirectTableSortable = null;
+
+function initRedirectTableSortable() {
+  if (redirectTableSortable) {
+    redirectTableSortable.destroy();
+    redirectTableSortable = null;
+  }
+  const tbody = document.getElementById('redirectTableBody');
+  if (!tbody || typeof Sortable === 'undefined') return;
+  redirectTableSortable = new Sortable(tbody, {
+    animation: 150,
+    handle: '.row-drag-handle',
+    ghostClass: 'sortable-ghost',
+    chosenClass: 'sortable-chosen',
+    onEnd: onRedirectTableSorted
+  });
+}
+
+async function onRedirectTableSorted() {
+  const tbody = document.getElementById('redirectTableBody');
+  const sources = Array.from(tbody.querySelectorAll('tr[data-source]')).map(tr => tr.dataset.source);
+  const current = (state.draft.redirect || []).map(r => r.source);
+  if (sources.length !== current.length || JSON.stringify(sources) === JSON.stringify(current)) return;
+  try {
+    await apiFetch('/admin/runtime-config/draft/redirects/order', {
+      method: 'PUT',
+      body: JSON.stringify({ sources })
+    });
+    const bySource = Object.fromEntries((state.draft.redirect || []).map(r => [r.source, r]));
+    state.draft.redirect = sources.map(s => bySource[s]);
+    updateDraftBar();
+  } catch (err) {
+    showToast(err.message || 'Failed to reorder redirects', 'error');
+    await loadData();
+  }
 }
 
 // ══════ Helpers ══════
@@ -297,11 +338,12 @@ function openRedirectModal(source) {
     </div>
     <div class="form-group">
       <label class="form-label">Exposure</label>
-      <select class="form-select" id="rdExposure" data-dropdown>
-        <option value="public">public</option>
-        <option value="hidden">hidden</option>
-        <option value="internal">internal</option>
-      </select>
+      ${renderEnumChips({
+        id: 'rdExposure',
+        mode: 'single',
+        options: ['public', 'hidden', 'internal'],
+        selected: exposureVal
+      })}
       <span class="form-hint">public：出现在 /v1/models 且可直调；hidden：不展示但可直调；internal：不展示且不可外部直调（仅内部引用）。</span>
     </div>
   `;
@@ -312,7 +354,6 @@ function openRedirectModal(source) {
   `;
 
   showModal(source ? 'Edit Redirect' : 'Create Redirect', body, footer);
-  document.getElementById('rdExposure').value = exposureVal;
 }
 
 // ══════ Save Redirect ══════
@@ -320,7 +361,7 @@ function openRedirectModal(source) {
 async function saveRedirect() {
   const source = document.getElementById('rdAlias').value.trim();
   const target = document.getElementById('rdTarget').value;
-  const exposure = document.getElementById('rdExposure').value;
+  const exposure = getEnumChipsValue('#rdExposure') || 'public';
 
   document.getElementById('rdAliasErr').textContent = '';
   document.getElementById('rdTargetErr').textContent = '';

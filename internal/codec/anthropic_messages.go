@@ -3,7 +3,6 @@ package codec
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
@@ -223,9 +222,9 @@ func (c *AnthropicMessagesCodec) EncodeRequest(outbound Format, req any, upstrea
 		return json.Marshal(&clone)
 	case FormatOpenAIChat:
 		openaiReq := convertAnthropicToOpenAIRequest(claudeReq, upstreamModel)
-		// DeepSeek 转换: OpenAI 格式需要补 reasoning_content
+		// DeepSeek 转换：补齐 reasoning_content，并仅在推理模式下降级强制工具选择。
 		if needsDeepSeekCompat {
-			openaiReq = cloneChatRequestWithDeepSeekCompat(openaiReq)
+			openaiReq = applyDeepSeekOpenAIChatRequestCompat(openaiReq, deepSeekClaudeThinkingEnabled(claudeReq, upstreamModel))
 		}
 		return json.Marshal(openaiReq)
 	case FormatOpenAIResponse:
@@ -235,6 +234,9 @@ func (c *AnthropicMessagesCodec) EncodeRequest(outbound Format, req any, upstrea
 		if err != nil {
 			return nil, WrapConversionError("encode_request", "anthropic_to_response_via_chat",
 				FormatAnthropicMessages, FormatOpenAIResponse, "request_conversion_second_hop", err)
+		}
+		if needsDeepSeekCompat {
+			responseReq = applyDeepSeekOpenAIResponseCompat(responseReq, deepSeekClaudeThinkingEnabled(claudeReq, upstreamModel))
 		}
 		return json.Marshal(responseReq)
 	case FormatOllamaChat:
@@ -252,31 +254,31 @@ func (c *AnthropicMessagesCodec) EncodeRequest(outbound Format, req any, upstrea
 }
 
 func (c *AnthropicMessagesCodec) WriteResponse(ctx *gin.Context, outbound Format, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
+	return c.WriteResponseTo(ctx.Writer, outbound, resp, isStream, counter, rmc)
+}
+
+func (c *AnthropicMessagesCodec) WriteResponseTo(w http.ResponseWriter, outbound Format, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
 	switch outbound {
 	case FormatAnthropicMessages:
-		return passThroughAnthropicResponse(ctx, resp, isStream, counter, rmc)
+		return passThroughAnthropicResponse(w, resp, isStream, counter, rmc)
 	case FormatOpenAIChat:
 		if isStream {
-			return writeOpenAIStreamAsAnthropic(ctx, resp, counter, rmc.RequestedModel)
+			return writeOpenAIStreamAsAnthropic(w, resp, counter, rmc.RequestedModel)
 		}
-		return writeOpenAIResponseAsAnthropic(ctx, resp, counter, rmc)
+		return writeOpenAIResponseAsAnthropic(w, resp, counter, rmc)
 	case FormatOpenAIResponse:
 		if isStream {
 			// Event-by-event bridge: ResponsesEvent -> ChatChunk -> ClaudeEvent -> flush
-			return writeResponsesStreamAsClaudeStream(ctx, resp, counter, rmc.RequestedModel)
+			return writeResponsesStreamAsClaudeStream(w, resp, counter, rmc.RequestedModel)
 		}
 		// 非流式：读取 response body -> chat 对象 -> claude 对象 -> 写回
-		body, err := io.ReadAll(resp.Body)
+		// 复用 readResponsesResponseForNonStream 以兼容上游返回 SSE 的场景（如本地代理）。
+		responsesResp, err := readResponsesResponseForNonStream(resp, counter)
 		if err != nil {
 			return WrapConversionError("write_response", "response_to_chat",
 				FormatOpenAIResponse, FormatAnthropicMessages, "response_read", err)
 		}
-		var responsesResp dto.ResponsesResponse
-		if err := json.Unmarshal(body, &responsesResp); err != nil {
-			return WrapConversionError("write_response", "response_to_chat",
-				FormatOpenAIResponse, FormatAnthropicMessages, "response_unmarshal", err)
-		}
-		chatResp, err := convertOpenAIResponseToChat(&responsesResp)
+		chatResp, err := convertOpenAIResponseToChat(responsesResp)
 		if err != nil {
 			return WrapConversionError("write_response", "response_to_chat",
 				FormatOpenAIResponse, FormatAnthropicMessages, "response_conversion", err)
@@ -285,13 +287,12 @@ func (c *AnthropicMessagesCodec) WriteResponse(ctx *gin.Context, outbound Format
 		if rmc.RequestedModel != "" {
 			claudeResp.Model = rmc.RequestedModel
 		}
-		ctx.JSON(http.StatusOK, claudeResp)
-		return nil
+		return writeJSON(w, http.StatusOK, claudeResp)
 	case FormatOllamaChat:
 		if isStream {
-			return writeOllamaChatStreamAsAnthropicStream(ctx, resp, counter, rmc)
+			return writeOllamaChatStreamAsAnthropicStream(w, resp, counter, rmc)
 		}
-		return writeOllamaChatResponseAsAnthropic(ctx, resp, counter, rmc)
+		return writeOllamaChatResponseAsAnthropic(w, resp, counter, rmc)
 	default:
 		return fmt.Errorf("unsupported outbound format: %s", outbound)
 	}

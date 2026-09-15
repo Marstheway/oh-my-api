@@ -2,10 +2,8 @@ package scheduler
 
 import (
 	"context"
-	"io"
 	"log/slog"
-	"net/http"
-	"strings"
+	"math/rand"
 	"time"
 
 	"github.com/Marstheway/oh-my-api/internal/health"
@@ -14,26 +12,35 @@ import (
 )
 
 type LoadBalanceStrategy struct {
-	client            *provider.Client
-	ratelimit         *ratelimit.Manager
-	health            *health.Checker
-	prefillTimeout    time.Duration
-	streamIdleTimeout time.Duration
+	leafRuntime
+	randIntn func(int) int
 }
 
-func NewLoadBalanceStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker, prefillTimeout time.Duration, streamIdleTimeout time.Duration) *LoadBalanceStrategy {
+func NewLoadBalanceStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker, prefillTimeout, streamIdleTimeout, nonStreamTimeout time.Duration) *LoadBalanceStrategy {
 	return &LoadBalanceStrategy{
-		client:            client,
-		ratelimit:         rl,
-		health:            h,
-		prefillTimeout:    prefillTimeout,
-		streamIdleTimeout: streamIdleTimeout,
+		leafRuntime: newLeafRuntime("loadbalance", client, rl, h, prefillTimeout, streamIdleTimeout, nonStreamTimeout),
 	}
 }
 
 func (s *LoadBalanceStrategy) Execute(ctx context.Context, tasks []Task) (*Result, error) {
+	return s.execute(ctx, "", nil, tasks)
+}
+
+// ExecuteSticky 在 sticky 启用时用 sticky/deficit 选路；否则与 Execute 相同。
+// 限流只在 executeTask 内 Allow 一次。
+func (s *LoadBalanceStrategy) ExecuteSticky(ctx context.Context, groupName string, sticky *StickyMeta, tasks []Task) (*Result, error) {
+	if sticky == nil || !sticky.Enabled {
+		return s.execute(ctx, "", nil, tasks)
+	}
+	return s.execute(ctx, groupName, sticky, tasks)
+}
+
+func (s *LoadBalanceStrategy) execute(ctx context.Context, groupName string, sticky *StickyMeta, tasks []Task) (*Result, error) {
 	if len(tasks) == 0 {
 		return nil, ErrNoTasks
+	}
+	if err := entryAbort(ctx, "load-balance"); err != nil {
+		return nil, err
 	}
 
 	now := time.Now().Local()
@@ -47,10 +54,22 @@ func (s *LoadBalanceStrategy) Execute(ctx context.Context, tasks []Task) (*Resul
 		return nil, ErrNoProviderAvailable
 	}
 
-	selector := NewWeightedSelector(healthyTasks)
+	if sticky != nil && sticky.Enabled {
+		return s.executeStickyLoop(ctx, groupName, sticky, healthyTasks, now)
+	}
+
+	randFn := s.randIntn
+	if randFn == nil {
+		randFn = rand.Intn
+	}
+	selector := newWeightedSelector(healthyTasks, randFn)
 	fallback := newSequentialFallback()
 
 	for !selector.IsEmpty() {
+		if stop, err := stopSequential(ctx, "load-balance", fallback, nil); stop {
+			return nil, err
+		}
+
 		task := selector.Select()
 		if task == nil {
 			break
@@ -84,6 +103,12 @@ func (s *LoadBalanceStrategy) Execute(ctx context.Context, tasks []Task) (*Resul
 		}
 
 		if err != nil {
+			if stop, retErr := stopSequential(ctx, "load-balance", fallback, err,
+				"provider", selectedTask.ProviderName,
+				"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+			); stop {
+				return nil, retErr
+			}
 			slog.Debug("load-balance request failed, removing candidate",
 				"provider", selectedTask.ProviderName,
 				"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
@@ -106,26 +131,166 @@ func (s *LoadBalanceStrategy) Execute(ctx context.Context, tasks []Task) (*Resul
 			continue
 		}
 
-		failureReason := result.FailureReason
-		if failureReason == "" && result.Response != nil && result.Response.StatusCode >= http.StatusBadRequest {
-			failureReason = summarizeUpstreamError(result.Response, 120)
-		}
-
-		slog.Debug("load-balance request failed, removing candidate",
+		logAttrs := []any{
 			"provider", selectedTask.ProviderName,
-			"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+			"upstream_identity", selectedTask.ProviderName + "/" + selectedTask.UpstreamModel,
 			"status", func() int {
 				if result.Response != nil {
 					return result.Response.StatusCode
 				}
 				return 0
 			}(),
-			"reason", failureReason,
-		)
+			"reason", result.FailureReason,
+		}
+		slog.Debug("load-balance request failed, removing candidate", upstreamErrorLogAttrs(logAttrs, result)...)
 		fallback.RecordHardResult(result)
 	}
 
 	return fallback.Final()
+}
+
+// executeStickyLoop 纯叶子 sticky/deficit 选路；与加权路径共用 executeTask（单次 Allow）。
+func (s *LoadBalanceStrategy) executeStickyLoop(ctx context.Context, groupName string, sticky *StickyMeta, healthyTasks []Task, now time.Time) (*Result, error) {
+	keyName := GetKeyName(ctx)
+	store := GetStickyStore()
+
+	remaining := make([]string, 0, len(healthyTasks))
+	weights := make(map[string]int, len(healthyTasks))
+	taskByKey := make(map[string]Task, len(healthyTasks))
+	for _, t := range healthyTasks {
+		key := adaptiveCandidateKey(t)
+		// 同键后者覆盖：与既有候选身份约定一致
+		if _, exists := taskByKey[key]; !exists {
+			remaining = append(remaining, key)
+		}
+		taskByKey[key] = t
+		weights[key] = t.Weight
+	}
+
+	fallback := newSequentialFallback()
+
+	for len(remaining) > 0 {
+		if stop, err := stopSequential(ctx, "load-balance", fallback, nil); stop {
+			return nil, err
+		}
+
+		// Lookup 用请求开始时刻；成功 Remember 用成功时刻
+		picked := pickStickyOrDeficit(store, groupName, keyName, sticky, now, remaining, weights)
+		if picked == "" {
+			break
+		}
+		selectedTask, ok := taskByKey[picked]
+		if !ok {
+			remaining = removeString(remaining, picked)
+			continue
+		}
+
+		slog.Debug("load-balance sticky/deficit selected candidate",
+			"group", groupName,
+			"key_name", keyName,
+			"provider", selectedTask.ProviderName,
+			"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+			"weight", selectedTask.Weight,
+			"remaining_candidates", len(remaining),
+		)
+
+		result, err := s.executeTask(ctx, &selectedTask)
+		if err == nil && result != nil && result.FailureKind == FailureKindSuccess {
+			slog.Debug("load-balance request succeeded",
+				"provider", selectedTask.ProviderName,
+				"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+				"status", result.Response.StatusCode,
+			)
+			fallback.DiscardSoftResult()
+			recordStickySuccess(store, groupName, keyName, picked, sticky.IdleTimeout, time.Now().Local())
+			return result, nil
+		}
+
+		remaining = removeString(remaining, picked)
+		remaining = removeUnhealthySiblingKeys(remaining, taskByKey, s.health, &selectedTask)
+
+		if IsRateLimitError(err) {
+			fallback.RecordRateLimit()
+			continue
+		}
+
+		if err != nil {
+			if stop, retErr := stopSequential(ctx, "load-balance", fallback, err,
+				"provider", selectedTask.ProviderName,
+				"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+			); stop {
+				return nil, retErr
+			}
+			slog.Debug("load-balance request failed, removing candidate",
+				"provider", selectedTask.ProviderName,
+				"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+				"error", err,
+			)
+			fallback.RecordHardError(err)
+			continue
+		}
+		if result == nil {
+			continue
+		}
+
+		if result.FailureKind == FailureKindSoft {
+			slog.Debug("content_filter_soft_failure",
+				"provider", selectedTask.ProviderName,
+				"upstream_identity", selectedTask.ProviderName+"/"+selectedTask.UpstreamModel,
+				"reason", result.FailureReason,
+			)
+			fallback.RecordSoftResult(result)
+			continue
+		}
+
+		logAttrs := []any{
+			"provider", selectedTask.ProviderName,
+			"upstream_identity", selectedTask.ProviderName + "/" + selectedTask.UpstreamModel,
+			"status", func() int {
+				if result.Response != nil {
+					return result.Response.StatusCode
+				}
+				return 0
+			}(),
+			"reason", result.FailureReason,
+		}
+		slog.Debug("load-balance request failed, removing candidate", upstreamErrorLogAttrs(logAttrs, result)...)
+		fallback.RecordHardResult(result)
+	}
+
+	return fallback.Final()
+}
+
+func removeString(keys []string, target string) []string {
+	out := keys[:0]
+	for _, k := range keys {
+		if k != target {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func removeUnhealthySiblingKeys(keys []string, taskByKey map[string]Task, h *health.Checker, task *Task) []string {
+	if h == nil || task == nil {
+		return keys
+	}
+	healthKey := health.MakeHealthKey(task.ProviderName, task.OutboundProtocol)
+	if h.IsHealthy(healthKey) {
+		return keys
+	}
+	out := keys[:0]
+	for _, k := range keys {
+		t, ok := taskByKey[k]
+		if !ok {
+			continue
+		}
+		if health.MakeHealthKey(t.ProviderName, t.OutboundProtocol) == healthKey {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
 }
 
 func (s *LoadBalanceStrategy) filterHealthy(tasks []Task, now time.Time) []Task {
@@ -133,6 +298,9 @@ func (s *LoadBalanceStrategy) filterHealthy(tasks []Task, now time.Time) []Task 
 	for _, t := range tasks {
 		// 注意：这里不能调用 Allow()，否则会为未选中的 provider 也消耗令牌
 		if isProviderDisabledAt(t, now) {
+			continue
+		}
+		if !cascadeLeafReady(s.client, t.ProviderName) {
 			continue
 		}
 		healthKey := health.MakeHealthKey(t.ProviderName, t.OutboundProtocol)
@@ -165,9 +333,8 @@ func (s *LoadBalanceStrategy) removeUnhealthySiblingTasks(selector *WeightedSele
 }
 
 func (s *LoadBalanceStrategy) executeTask(ctx context.Context, task *Task) (*Result, error) {
-	start := time.Now()
 	// 真正选中后才消耗令牌；限流时直接尝试下一个，避免单个 provider 阻塞整次请求
-	if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel) {
+	if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel, task.ModelQPM) {
 		slog.Warn("provider rate limited, trying next",
 			"provider", task.ProviderName,
 			"upstream_identity", task.ProviderName+"/"+task.UpstreamModel,
@@ -175,67 +342,5 @@ func (s *LoadBalanceStrategy) executeTask(ctx context.Context, task *Task) (*Res
 		return nil, &RateLimitError{Provider: task.ProviderName, Err: ErrAllRateLimited}
 	}
 
-	resp, err := s.client.Do(task.ProviderName, task.Request)
-	if err != nil {
-		recordAttemptMetric("loadbalance", *task, nil, err, time.Since(start))
-		s.health.ReportFailure(health.MakeHealthKey(task.ProviderName, task.OutboundProtocol))
-		return nil, err
-	}
-
-	healthKey := health.MakeHealthKey(task.ProviderName, task.OutboundProtocol)
-	result, err := s.parseResponse(resp, task.ProviderName, task.UpstreamModel, responseProtocol(*task), s.prefillTimeout, s.streamIdleTimeout)
-	if err != nil {
-		recordAttemptMetric("loadbalance", *task, nil, err, time.Since(start))
-		s.health.ReportFailure(healthKey)
-		return nil, err
-	}
-
-	// 统一应用 TokenHub 错误码分类（仅对硬失败重分级）
-	applyTokenHubClassification(result, resp, task.Request)
-
-	recordAttemptMetric("loadbalance", *task, result, nil, time.Since(start))
-
-	applyHealthAction(s.health, healthKey, result)
-	if result.HealthActionInfo.Action != HealthActionNone {
-		return result, nil
-	}
-
-	switch result.FailureKind {
-	case FailureKindSuccess:
-		s.health.ReportSuccess(healthKey)
-	case FailureKindHard:
-		if result.Response != nil && result.Response.StatusCode >= http.StatusInternalServerError {
-			s.health.ReportFailure(healthKey)
-		}
-	}
-
-	return result, nil
-}
-
-func (s *LoadBalanceStrategy) parseResponse(resp *http.Response, providerName, upstreamModel, protocol string, prefillTimeout time.Duration, streamIdleTimeout time.Duration) (*Result, error) {
-	return parseResponse(resp, providerName, upstreamModel, protocol, prefillTimeout, streamIdleTimeout)
-}
-
-func summarizeUpstreamError(resp *http.Response, maxRunes int) string {
-	if resp == nil || resp.Body == nil {
-		return ""
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "read error body failed"
-	}
-	resp.Body.Close()
-	resp.Body = io.NopCloser(strings.NewReader(string(body)))
-
-	trimmed := strings.TrimSpace(string(body))
-	if trimmed == "" {
-		return ""
-	}
-
-	runes := []rune(trimmed)
-	if maxRunes > 0 && len(runes) > maxRunes {
-		return string(runes[:maxRunes]) + "..."
-	}
-	return trimmed
+	return s.leafRuntime.executeTask(ctx, task)
 }

@@ -16,7 +16,7 @@
   }
 
   .time-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
-  .time-btn.active { background: var(--accent); color: #fff; }
+  .time-btn.active { background: var(--accent); color: var(--on-accent); }
 
   /* ═══ Section Header ═══ */
   .section-header {
@@ -255,6 +255,21 @@
   </div>
 </div>
 
+<!-- By Client Model -->
+<div class="section-header" style="margin-top:24px">
+  <span class="section-title">By Client Model</span>
+</div>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Model</th><th>Requests</th><th>Input Tokens</th><th>Output Tokens</th><th>Latency</th><th style="width:10%">Share</th></tr></thead>
+    <tbody id="dashUserModelTable"></tbody>
+  </table>
+  <div class="empty-state" id="userModelStatsEmpty" style="display:none">
+    <div class="empty-icon">&#x25A3;</div>
+    <div class="empty-title">No usage data for this period</div>
+  </div>
+</div>
+
 <!-- By Upstream Model -->
 <div class="section-header" style="margin-top:24px">
   <span class="section-title">By Upstream Model</span>
@@ -293,22 +308,8 @@ document.getElementById('timeRange').addEventListener('click', (e) => {
 });
 
 function getTimeRangeParams() {
-  const now = new Date();
-  let since;
-
-  if (timeRange === 'today') {
-    since = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  } else if (timeRange === 'week') {
-    since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  } else if (timeRange === 'month') {
-    since = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
-  }
-
-  if (since) {
-    const formatDate = (d) => d.toISOString().split('T')[0];
-    return `since=${encodeURIComponent(formatDate(since))}&until=${encodeURIComponent(formatDate(now))}`;
-  }
-  return '';
+  // 日期范围由后端按服务端时区解析，前端不参与日期计算，避免浏览器时区偏移
+  return timeRange ? `range=${encodeURIComponent(timeRange)}` : '';
 }
 
 async function loadStats() {
@@ -320,6 +321,7 @@ async function loadStats() {
     renderMetrics();
     renderProviderTable();
     renderKeyTable();
+    renderUserModelTable();
     renderModelTable();
     updateStatsRangeLabel();
   } catch (err) {
@@ -448,6 +450,45 @@ function renderKeyTable() {
   }).join('');
 }
 
+function renderUserModelTable() {
+  const tbody = document.getElementById('dashUserModelTable');
+  const empty = document.getElementById('userModelStatsEmpty');
+
+  if (!stats || !stats.by_user_model || stats.by_user_model.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  empty.style.display = 'none';
+
+  const totalInput = stats.total.input_tokens || 0;
+  const totalOutput = stats.total.output_tokens || 0;
+  const totalTokens = totalInput + totalOutput;
+
+  const itemsWithShare = stats.by_user_model.map(m => {
+    const mInput = m.input_tokens || 0;
+    const mOutput = m.output_tokens || 0;
+    const modelTokens = mInput + mOutput;
+    const sharePct = totalTokens > 0 ? (modelTokens / totalTokens * 100) : 0;
+    return { ...m, mInput, mOutput, modelTokens, sharePct };
+  }).sort((a, b) => b.sharePct - a.sharePct);
+
+  tbody.innerHTML = itemsWithShare.map(m => {
+    const avgLatency = m.request_count > 0 ? (m.latency_ms / m.request_count / 1000).toFixed(2) : '-';
+    return `
+      <tr>
+        <td class="code">${escapeHtml(m.user_model)}</td>
+        <td class="code">${m.request_count.toLocaleString()}</td>
+        <td class="code">${m.mInput.toLocaleString()}</td>
+        <td class="code">${m.mOutput.toLocaleString()}</td>
+        <td class="code-secondary">${avgLatency}s</td>
+        <td class="code">${m.sharePct.toFixed(1)}%</td>
+      </tr>
+    `;
+  }).join('');
+}
+
 function renderModelTable() {
   const tbody = document.getElementById('dashModelTable');
   const empty = document.getElementById('modelStatsEmpty');
@@ -490,19 +531,11 @@ function renderModelTable() {
 
 function updateStatsRangeLabel() {
   const label = document.getElementById('statsRangeLabel');
-  const now = new Date();
-
-  let since;
-  if (timeRange === 'today') {
-    since = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    label.textContent = since.toLocaleDateString() + ' – Today';
-  } else if (timeRange === 'week') {
-    since = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    label.textContent = since.toLocaleDateString() + ' – ' + now.toLocaleDateString();
-  } else if (timeRange === 'month') {
-    since = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
-    label.textContent = since.toLocaleDateString() + ' – ' + now.toLocaleDateString();
-  }
+  if (!stats || !stats.since || !stats.until) return;
+  // 直接使用后端返回的实际查询范围，与数据口径严格一致
+  label.textContent = stats.since === stats.until
+    ? stats.since + ' – Today'
+    : stats.since + ' – ' + stats.until;
 }
 
 // Initialize

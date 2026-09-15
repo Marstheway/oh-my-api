@@ -54,10 +54,10 @@ func TestAuth(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "valid query param",
+			name:       "query API key is rejected",
 			path:       "/v1/models",
 			query:      "api_key=sk-valid-1",
-			wantStatus: http.StatusOK,
+			wantStatus: http.StatusUnauthorized,
 		},
 		{
 			name:       "no auth",
@@ -211,9 +211,9 @@ func TestExtractAPIKey(t *testing.T) {
 			wantKey: "sk-xapi",
 		},
 		{
-			name:    "query param fallback",
+			name:    "query API key is ignored",
 			query:   "api_key=sk-query",
-			wantKey: "sk-query",
+			wantKey: "",
 		},
 		{
 			name:    "no key",

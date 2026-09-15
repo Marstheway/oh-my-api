@@ -115,7 +115,8 @@ func convertOpenAIToAnthropicRequest(req *dto.ChatCompletionRequest, upstreamMod
 	isFirstMessage := true
 
 	for _, msg := range formatMessages {
-		if msg.Role == "system" {
+		// system / developer 均归入 Anthropic system；多模态时仅保留 text 部分
+		if msg.Role == "system" || msg.Role == "developer" {
 			if msgIsStringContent(msg) {
 				if text := msgStringContent(msg); text != "" {
 					systemMessages = append(systemMessages, map[string]any{
@@ -155,7 +156,7 @@ func convertOpenAIToAnthropicRequest(req *dto.ChatCompletionRequest, upstreamMod
 			toolResult := dto.ContentBlock{
 				Type:      "tool_result",
 				ToolUseID: msg.ToolCallID,
-				Content:   msg.Content,
+				Content:   normalizeToolResultContentForAnthropic(msg.Content),
 			}
 			if len(claudeMessages) > 0 && claudeMessages[len(claudeMessages)-1].Role == "user" {
 				last := &claudeMessages[len(claudeMessages)-1]
@@ -173,7 +174,7 @@ func convertOpenAIToAnthropicRequest(req *dto.ChatCompletionRequest, upstreamMod
 				continue
 			}
 			claudeMsg = dto.ClaudeMessage{
-				Role: "user",
+				Role:    "user",
 				Content: []dto.ContentBlock{toolResult},
 			}
 		} else if msgIsStringContent(msg) && len(msg.ToolCalls) == 0 {
@@ -240,7 +241,9 @@ func mapToolChoice(toolChoice any, parallelToolCalls *bool) map[string]any {
 
 func handleReasoningEffort(effort string) *dto.Thinking {
 	var budget int
-	switch effort {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "none", "off", "disabled":
+		return &dto.Thinking{Type: "disabled"}
 	case "low":
 		budget = 1280
 	case "medium":
@@ -329,14 +332,13 @@ func preprocessOpenAIMessagesV2(msgs []dto.Message) []dto.Message {
 
 func convertOpenAIMessageToAnthropicV2(msg dto.Message, needsDeepSeekCompat bool) (dto.ClaudeMessage, error) {
 	if msg.Role == "tool" {
-		contentStr, _ := msg.Content.(string)
 		return dto.ClaudeMessage{
 			Role: "user",
 			Content: []dto.ContentBlock{
 				{
 					Type:      "tool_result",
 					ToolUseID: msg.ToolCallID,
-					Content:   contentStr,
+					Content:   normalizeToolResultContentForAnthropic(msg.Content),
 				},
 			},
 		}, nil
@@ -344,7 +346,7 @@ func convertOpenAIMessageToAnthropicV2(msg dto.Message, needsDeepSeekCompat bool
 
 	if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
 		blocks := make([]dto.ContentBlock, 0, len(msg.ToolCalls)+2)
-		
+
 		// 处理 reasoning_content -> thinking block
 		if msg.ReasoningContent != nil && *msg.ReasoningContent != "" {
 			blocks = append(blocks, dto.ContentBlock{
@@ -359,10 +361,12 @@ func convertOpenAIMessageToAnthropicV2(msg dto.Message, needsDeepSeekCompat bool
 				Thinking: &pad,
 			})
 		}
-		
-		textContent := extractTextContentV2(msg.Content)
-		if textContent != "" {
-			blocks = append(blocks, dto.ContentBlock{Type: "text", Text: textContent})
+
+		// content 与 tool_calls 解耦：多模态数组完整转换，避免静默丢图
+		var err error
+		blocks, err = appendOpenAIContentAsAnthropicBlocks(blocks, msg.Content)
+		if err != nil {
+			return dto.ClaudeMessage{}, err
 		}
 		for _, tc := range msg.ToolCalls {
 			var input map[string]any
@@ -381,18 +385,13 @@ func convertOpenAIMessageToAnthropicV2(msg dto.Message, needsDeepSeekCompat bool
 	}
 
 	// 处理多模态内容（数组格式）
-	if contentArray, ok := msg.Content.([]any); ok {
-		blocks := make([]dto.ContentBlock, 0, len(contentArray))
-		for _, item := range contentArray {
-			contentMap, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			block, err := convertOpenAIMediaContentToAnthropic(contentMap)
-			if err != nil {
-				return dto.ClaudeMessage{}, err
-			}
-			blocks = append(blocks, block)
+	if _, ok := msg.Content.([]any); ok {
+		blocks, err := appendOpenAIContentAsAnthropicBlocks(nil, msg.Content)
+		if err != nil {
+			return dto.ClaudeMessage{}, err
+		}
+		if len(blocks) == 0 {
+			return dto.ClaudeMessage{Role: msg.Role, Content: "..."}, nil
 		}
 		return dto.ClaudeMessage{Role: msg.Role, Content: blocks}, nil
 	}
@@ -402,6 +401,47 @@ func convertOpenAIMessageToAnthropicV2(msg dto.Message, needsDeepSeekCompat bool
 	}
 
 	return dto.ClaudeMessage{Role: msg.Role, Content: "..."}, nil
+}
+
+// appendOpenAIContentAsAnthropicBlocks 将 Chat content 转为 Anthropic ContentBlock 并追加。
+// []any 走媒体转换（text/image/file）；纯文本走 string 提取。
+func appendOpenAIContentAsAnthropicBlocks(blocks []dto.ContentBlock, content any) ([]dto.ContentBlock, error) {
+	if contentArray, ok := content.([]any); ok {
+		for _, item := range contentArray {
+			contentMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			block, err := convertOpenAIMediaContentToAnthropic(contentMap)
+			if err != nil {
+				return nil, err
+			}
+			blocks = append(blocks, block)
+		}
+		return blocks, nil
+	}
+	if textContent := extractTextContentV2(content); textContent != "" {
+		blocks = append(blocks, dto.ContentBlock{Type: "text", Text: textContent})
+	}
+	return blocks, nil
+}
+
+// normalizeToolResultContentForAnthropic 将 tool 消息 content 规范为 Anthropic tool_result 可用的值。
+// 纯字符串直用；多模态/结构化内容整体 JSON 序列化为字符串，避免 OpenAI image_url 块原样泄漏。
+func normalizeToolResultContentForAnthropic(content any) any {
+	switch c := content.(type) {
+	case nil:
+		return ""
+	case string:
+		return c
+	default:
+		b, err := json.Marshal(c)
+		if err != nil {
+			slog.Warn("failed to marshal tool result content, using empty string", "error", err)
+			return ""
+		}
+		return string(b)
+	}
 }
 
 func extractTextContentV2(content any) string {

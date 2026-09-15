@@ -20,11 +20,15 @@ type chatToClaudeStreamMapper struct {
 	thinkingIndex      int
 	nextIndex          int
 	toolIndexByChunk   map[int]int
+	usage              *dto.ClaudeUsage
+	pendingStopReason  string
+	stopSent           bool
 }
 
-func newChatToClaudeStreamMapper() *chatToClaudeStreamMapper {
+func newChatToClaudeStreamMapper(requestedModel string) *chatToClaudeStreamMapper {
 	return &chatToClaudeStreamMapper{
 		messageID:        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
+		requestedModel:   requestedModel,
 		textIndex:        -1,
 		thinkingIndex:    -1,
 		toolIndexByChunk: map[int]int{},
@@ -85,6 +89,30 @@ func (m *chatToClaudeStreamMapper) ensureThinkingBlockStart(events *[]dto.Claude
 	})
 }
 
+// closeOpenContentBlocks emits content_block_stop for any open blocks and clears open flags.
+func (m *chatToClaudeStreamMapper) closeOpenContentBlocks() []dto.ClaudeStreamEvent {
+	var events []dto.ClaudeStreamEvent
+	if m.thinkingBlockStart {
+		events = append(events, dto.ClaudeStreamEvent{Type: "content_block_stop", Index: m.thinkingIndex})
+		m.thinkingBlockStart = false
+	}
+	if m.textBlockStart {
+		events = append(events, dto.ClaudeStreamEvent{Type: "content_block_stop", Index: m.textIndex})
+		m.textBlockStart = false
+	}
+	toolIndices := make([]int, 0, len(m.toolIndexByChunk))
+	for _, idx := range m.toolIndexByChunk {
+		toolIndices = append(toolIndices, idx)
+	}
+	sort.Ints(toolIndices)
+	for _, idx := range toolIndices {
+		events = append(events, dto.ClaudeStreamEvent{Type: "content_block_stop", Index: idx})
+	}
+	// Prevent double-close on a subsequent finish/flush.
+	m.toolIndexByChunk = map[int]int{}
+	return events
+}
+
 func (m *chatToClaudeStreamMapper) Map(chunk dto.ChatCompletionChunk) ([]dto.ClaudeStreamEvent, error) {
 	var events []dto.ClaudeStreamEvent
 
@@ -94,139 +122,180 @@ func (m *chatToClaudeStreamMapper) Map(chunk dto.ChatCompletionChunk) ([]dto.Cla
 		m.model = chunk.Model
 	}
 
-	if len(chunk.Choices) == 0 || chunk.Choices[0].Delta == nil {
-		m.ensureMessageStart(chunk, &events)
+	// 必须先处理 usage（即使 Choices 为空）
+	if chunk.Usage != nil {
+		if m.usage == nil {
+			m.usage = &dto.ClaudeUsage{}
+		}
+		m.usage.InputTokens = chunk.Usage.PromptTokens
+		m.usage.OutputTokens = chunk.Usage.CompletionTokens
+		// usage-only：已有 pending finish 则立即收尾
+		if m.pendingStopReason != "" && !m.stopSent {
+			m.stopSent = true
+			events = append(events, m.emitStopWithUsage()...)
+			return events, nil
+		}
+	}
+
+	// 纯 usage-only（无 choices）
+	if len(chunk.Choices) == 0 {
 		return events, nil
 	}
 
-	delta := chunk.Choices[0].Delta
+	choice := chunk.Choices[0]
+	delta := choice.Delta
 
-	// Handle role delta (usually first chunk)
-	if delta.Role != "" {
-		m.ensureMessageStart(chunk, &events)
-	}
+	// delta 可为 nil（部分上游 finish 省略 delta）；仅在非 nil 时处理内容
+	if delta != nil {
+		if delta.Role != "" {
+			m.ensureMessageStart(chunk, &events)
+		}
 
-	if delta.ReasoningContent != "" {
-		m.ensureMessageStart(chunk, &events)
-		m.ensureThinkingBlockStart(&events)
-		events = append(events, dto.ClaudeStreamEvent{
-			Type:  "content_block_delta",
-			Index: m.thinkingIndex,
-			Delta: &dto.ClaudeDelta{Type: "thinking_delta", Thinking: delta.ReasoningContent},
-		})
-	}
+		if delta.ReasoningContent != "" {
+			m.ensureMessageStart(chunk, &events)
+			m.ensureThinkingBlockStart(&events)
+			events = append(events, dto.ClaudeStreamEvent{
+				Type:  "content_block_delta",
+				Index: m.thinkingIndex,
+				Delta: &dto.ClaudeDelta{Type: "thinking_delta", Thinking: delta.ReasoningContent},
+			})
+		}
 
-	if delta.Content != "" {
-		m.ensureMessageStart(chunk, &events)
-		// 检查是否为 Data URI 格式的多模态内容
-		mediaType, data, isDataURI := parseDataURI(delta.Content)
-		if isDataURI {
-			// 多模态内容：作为完整的 content_block_start 发送，不累积后续 delta
-			idx := m.nextIndex
-			m.nextIndex++
-			if isImageMediaType(mediaType) {
-				// 图片类型
-				events = append(events, dto.ClaudeStreamEvent{
-					Type:  "content_block_start",
-					Index: idx,
-					ContentBlock: &dto.ContentBlock{
-						Type: "image",
-						Source: &dto.MessageSource{
-							Type:      "base64",
-							MediaType: mediaType,
-							Data:      data,
+		if delta.Content != "" {
+			m.ensureMessageStart(chunk, &events)
+			mediaType, data, isDataURI := parseDataURI(delta.Content)
+			if isDataURI {
+				idx := m.nextIndex
+				m.nextIndex++
+				if isImageMediaType(mediaType) {
+					events = append(events, dto.ClaudeStreamEvent{
+						Type:  "content_block_start",
+						Index: idx,
+						ContentBlock: &dto.ContentBlock{
+							Type: "image",
+							Source: &dto.MessageSource{
+								Type:      "base64",
+								MediaType: mediaType,
+								Data:      data,
+							},
 						},
-					},
+					})
+				} else {
+					events = append(events, dto.ClaudeStreamEvent{
+						Type:  "content_block_start",
+						Index: idx,
+						ContentBlock: &dto.ContentBlock{
+							Type: "document",
+							Source: &dto.MessageSource{
+								Type:      "base64",
+								MediaType: mediaType,
+								Data:      data,
+							},
+						},
+					})
+				}
+				events = append(events, dto.ClaudeStreamEvent{
+					Type:  "content_block_stop",
+					Index: idx,
 				})
 			} else {
-				// 文档类型
+				m.ensureTextBlockStart(&events)
+				events = append(events, dto.ClaudeStreamEvent{
+					Type:  "content_block_delta",
+					Index: m.textIndex,
+					Delta: &dto.ClaudeDelta{Type: "text_delta", Text: delta.Content},
+				})
+			}
+		}
+
+		for _, tc := range delta.ToolCalls {
+			m.ensureMessageStart(chunk, &events)
+			idx, exists := m.toolIndexByChunk[tc.GetIndex()]
+			if !exists && tc.ID != "" {
+				idx = m.nextIndex
+				m.nextIndex++
+				m.toolIndexByChunk[tc.GetIndex()] = idx
+				exists = true
 				events = append(events, dto.ClaudeStreamEvent{
 					Type:  "content_block_start",
 					Index: idx,
 					ContentBlock: &dto.ContentBlock{
-						Type: "document",
-						Source: &dto.MessageSource{
-							Type:      "base64",
-							MediaType: mediaType,
-							Data:      data,
-						},
+						Type:  "tool_use",
+						ID:    tc.ID,
+						Name:  tc.Function.Name,
+						Input: map[string]any{},
 					},
 				})
 			}
-			// 多模态内容需要 content_block_stop
-			events = append(events, dto.ClaudeStreamEvent{
-				Type:  "content_block_stop",
-				Index: idx,
-			})
-		} else {
-			// 普通文本内容
-			m.ensureTextBlockStart(&events)
-			events = append(events, dto.ClaudeStreamEvent{
-				Type:  "content_block_delta",
-				Index: m.textIndex,
-				Delta: &dto.ClaudeDelta{Type: "text_delta", Text: delta.Content},
-			})
-		}
-	}
-
-	for _, tc := range delta.ToolCalls {
-		m.ensureMessageStart(chunk, &events)
-		idx, exists := m.toolIndexByChunk[tc.GetIndex()]
-		if !exists && tc.ID != "" {
-			idx = m.nextIndex
-			m.nextIndex++
-			m.toolIndexByChunk[tc.GetIndex()] = idx
-			exists = true
-			events = append(events, dto.ClaudeStreamEvent{
-				Type:  "content_block_start",
-				Index: idx,
-				ContentBlock: &dto.ContentBlock{
-					Type:  "tool_use",
-					ID:    tc.ID,
-					Name:  tc.Function.Name,
-					Input: map[string]any{},
-				},
-			})
-		}
-		if tc.Function.Arguments != "" {
-			if !exists {
-				continue
+			if tc.Function.Arguments != "" {
+				if !exists {
+					continue
+				}
+				events = append(events, dto.ClaudeStreamEvent{
+					Type:  "content_block_delta",
+					Index: idx,
+					Delta: &dto.ClaudeDelta{Type: "input_json_delta", PartialJSON: &tc.Function.Arguments},
+				})
 			}
-			events = append(events, dto.ClaudeStreamEvent{
-				Type:  "content_block_delta",
-				Index: idx,
-				Delta: &dto.ClaudeDelta{Type: "input_json_delta", PartialJSON: &tc.Function.Arguments},
-			})
 		}
 	}
 
-	if chunk.Choices[0].FinishReason != nil {
+	// finish_reason 不依赖 delta 是否存在
+	if choice.FinishReason != nil && m.pendingStopReason == "" && !m.stopSent {
 		m.ensureMessageStart(chunk, &events)
-		// content_block_stop for thinking
-		if m.thinkingBlockStart {
-			events = append(events, dto.ClaudeStreamEvent{Type: "content_block_stop", Index: m.thinkingIndex})
+		events = append(events, m.closeOpenContentBlocks()...)
+		m.pendingStopReason = finishReasonToStopReason(*choice.FinishReason)
+		// usage 已齐则立即收尾；否则 pending，等 usage-only 或 Flush
+		if m.usage != nil {
+			m.stopSent = true
+			events = append(events, m.emitStopWithUsage()...)
 		}
-		// content_block_stop for text
-		if m.textBlockStart {
-			events = append(events, dto.ClaudeStreamEvent{Type: "content_block_stop", Index: m.textIndex})
-		}
-		// content_block_stop for tools
-		toolIndices := make([]int, 0, len(m.toolIndexByChunk))
-		for _, idx := range m.toolIndexByChunk {
-			toolIndices = append(toolIndices, idx)
-		}
-		sort.Ints(toolIndices)
-		for _, idx := range toolIndices {
-			events = append(events, dto.ClaudeStreamEvent{Type: "content_block_stop", Index: idx})
-		}
+	}
 
-		stopReason := finishReasonToStopReason(*chunk.Choices[0].FinishReason)
+	return events, nil
+}
+
+func (m *chatToClaudeStreamMapper) emitStopWithUsage() []dto.ClaudeStreamEvent {
+	var events []dto.ClaudeStreamEvent
+	delta := &dto.ClaudeDelta{StopReason: m.pendingStopReason}
+	if m.usage != nil {
 		events = append(events, dto.ClaudeStreamEvent{
 			Type:  "message_delta",
-			Delta: &dto.ClaudeDelta{StopReason: stopReason},
+			Delta: delta,
+			Usage: &dto.ClaudeUsage{
+				InputTokens:  m.usage.InputTokens,
+				OutputTokens: m.usage.OutputTokens,
+			},
 		})
-		events = append(events, dto.ClaudeStreamEvent{Type: "message_stop"})
+	} else {
+		events = append(events, dto.ClaudeStreamEvent{
+			Type:  "message_delta",
+			Delta: delta,
+		})
 	}
+	events = append(events, dto.ClaudeStreamEvent{Type: "message_stop"})
+	return events
+}
 
+// Flush 在流结束时调用：仅在已 pending finish 时补发终态；
+// 若 message 已开始但从未 finish，先关闭打开中的 content_block 再收尾；
+// 空流（从未 message_start）不产出事件。幂等。
+func (m *chatToClaudeStreamMapper) Flush() ([]dto.ClaudeStreamEvent, error) {
+	if m.stopSent {
+		return nil, nil
+	}
+	if m.pendingStopReason != "" {
+		m.stopSent = true
+		return m.emitStopWithUsage(), nil
+	}
+	if !m.messageStarted {
+		return nil, nil
+	}
+	// 上游中断：补齐 content_block_stop，再发默认 end_turn 收尾
+	var events []dto.ClaudeStreamEvent
+	events = append(events, m.closeOpenContentBlocks()...)
+	m.pendingStopReason = "end_turn"
+	m.stopSent = true
+	events = append(events, m.emitStopWithUsage()...)
 	return events, nil
 }

@@ -73,10 +73,10 @@ model_groups:
 	}
 
 	timeout := 120 * time.Second
-	client := provider.NewClient(cfg.Providers.Items, timeout, 0)
+	client := provider.NewClient(cfg.Providers.Items, timeout, 0, 0)
 	rlManager := ratelimit.NewManager(cfg.Providers.Items)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0)
+	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0, 0)
 	handler.Init(cfg, resolver, sched)
 
 	// 创建 runtimeconfig manager
@@ -85,7 +85,7 @@ model_groups:
 			return model.NewResolver(c)
 		},
 		NewScheduler: func(c *config.Config, r *model.Resolver) (*scheduler.Scheduler, error) {
-			return scheduler.New(rlManager, client, healthChecker, timeout, 0), nil
+			return scheduler.New(ratelimit.NewManager(c.Providers.Items), client, healthChecker, timeout, 0, 0), nil
 		},
 	}
 	reinitHandler := &runtimeconfig.DefaultReinitHandler{
@@ -99,7 +99,7 @@ model_groups:
 	// 设置 Gin router
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	router.Setup(r, runtimeManager)
+	router.Setup(r, runtimeManager, nil)
 	router.SetupAdmin(r, cfg, runtimeManager, nil)
 
 	// === 1. Create model group ===
@@ -267,10 +267,10 @@ providers:
 	}
 
 	timeout := 120 * time.Second
-	client := provider.NewClient(cfg.Providers.Items, timeout, 0)
+	client := provider.NewClient(cfg.Providers.Items, timeout, 0, 0)
 	rlManager := ratelimit.NewManager(cfg.Providers.Items)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0)
+	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0, 0)
 	handler.Init(cfg, resolver, sched)
 
 	rebuilder := &runtimeconfig.DefaultRuntimeRebuilder{
@@ -278,7 +278,7 @@ providers:
 			return model.NewResolver(c)
 		},
 		NewScheduler: func(c *config.Config, r *model.Resolver) (*scheduler.Scheduler, error) {
-			return scheduler.New(rlManager, client, healthChecker, timeout, 0), nil
+			return scheduler.New(ratelimit.NewManager(c.Providers.Items), client, healthChecker, timeout, 0, 0), nil
 		},
 	}
 	reinitHandler := &runtimeconfig.DefaultReinitHandler{
@@ -291,7 +291,7 @@ providers:
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	router.Setup(r, runtimeManager)
+	router.Setup(r, runtimeManager, nil)
 	router.SetupAdmin(r, cfg, runtimeManager, nil)
 
 	// 无密码访问
@@ -359,10 +359,10 @@ providers:
 	}
 
 	timeout := 120 * time.Second
-	client := provider.NewClient(cfg.Providers.Items, timeout, 0)
+	client := provider.NewClient(cfg.Providers.Items, timeout, 0, 0)
 	rlManager := ratelimit.NewManager(cfg.Providers.Items)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0)
+	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0, 0)
 	handler.Init(cfg, resolver, sched)
 
 	rebuilder := &runtimeconfig.DefaultRuntimeRebuilder{
@@ -370,7 +370,7 @@ providers:
 			return model.NewResolver(c)
 		},
 		NewScheduler: func(c *config.Config, r *model.Resolver) (*scheduler.Scheduler, error) {
-			return scheduler.New(rlManager, client, healthChecker, timeout, 0), nil
+			return scheduler.New(ratelimit.NewManager(c.Providers.Items), client, healthChecker, timeout, 0, 0), nil
 		},
 	}
 	reinitHandler := &runtimeconfig.DefaultReinitHandler{
@@ -383,7 +383,7 @@ providers:
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	router.Setup(r, runtimeManager)
+	router.Setup(r, runtimeManager, nil)
 	router.SetupAdmin(r, cfg, runtimeManager, nil)
 
 	// /admin 路由应该不存在
@@ -438,10 +438,10 @@ model_groups:
 	}
 
 	timeout := 120 * time.Second
-	client := provider.NewClient(cfg.Providers.Items, timeout, 0)
+	client := provider.NewClient(cfg.Providers.Items, timeout, 0, 0)
 	rlManager := ratelimit.NewManager(cfg.Providers.Items)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0)
+	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0, 0)
 	handler.Init(cfg, resolver, sched)
 
 	rebuilder := &runtimeconfig.DefaultRuntimeRebuilder{
@@ -449,7 +449,7 @@ model_groups:
 			return model.NewResolver(c)
 		},
 		NewScheduler: func(c *config.Config, r *model.Resolver) (*scheduler.Scheduler, error) {
-			return scheduler.New(rlManager, client, healthChecker, timeout, 0), nil
+			return scheduler.New(ratelimit.NewManager(c.Providers.Items), client, healthChecker, timeout, 0, 0), nil
 		},
 	}
 	reinitHandler := &runtimeconfig.DefaultReinitHandler{
@@ -462,7 +462,7 @@ model_groups:
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	router.Setup(r, runtimeManager)
+	router.Setup(r, runtimeManager, nil)
 	router.SetupAdmin(r, cfg, runtimeManager, nil)
 
 	adminHeader := map[string]string{"X-Admin-Password": "test-password"}
@@ -593,5 +593,101 @@ model_groups:
 	}
 	if reloadCfg.Inbound.Auth.Keys[0].Name != "new" || reloadCfg.Inbound.Auth.Keys[0].Key != "sk-updated" {
 		t.Errorf("reloaded key = %+v, want {new sk-updated}", reloadCfg.Inbound.Auth.Keys[0])
+	}
+}
+
+// TestApplyRebuildsRateLimiter 验证 Apply 后 ratelimit.Manager 按新配置重建：
+// 修改 provider rate_limit.qpm 后 Apply，重建出的 scheduler 使用新配额
+// （而不是启动时闭包住的旧 rlManager）。
+func TestApplyRebuildsRateLimiter(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	initialYAML := `
+server:
+  listen: ":18000"
+inbound:
+  auth:
+    keys:
+      - name: "default"
+        key: "sk-test"
+providers:
+  openai:
+    endpoint: "https://api.openai.com/v1"
+    api_key: "sk-xxx"
+    protocols: ["openai.chat"]
+    rate_limit:
+      qpm: 1
+model_groups:
+  - name: "gpt-4o"
+    models:
+      - model: "openai/gpt-4o"
+`
+	if err := os.WriteFile(configPath, []byte(initialYAML), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	timeout := 120 * time.Second
+	client := provider.NewClient(cfg.Providers.Items, timeout, 0, 0)
+	healthChecker := health.NewChecker(3, 30*time.Second)
+
+	// 启动闭包：provider QPM=1 → burst=1，第二次 Allow 必须失败。
+	startupSched := scheduler.New(ratelimit.NewManager(cfg.Providers.Items), client, healthChecker, timeout, 0, 0)
+	if !startupSched.Allow("openai") {
+		t.Fatal("startup limiter should allow first request")
+	}
+	if startupSched.Allow("openai") {
+		t.Fatal("startup limiter QPM=1 burst must be exhausted on second Allow")
+	}
+
+	var rebuilt *scheduler.Scheduler
+	rebuilder := &runtimeconfig.DefaultRuntimeRebuilder{
+		NewResolver: func(c *config.Config) (*model.Resolver, error) {
+			return model.NewResolver(c)
+		},
+		NewScheduler: func(c *config.Config, r *model.Resolver) (*scheduler.Scheduler, error) {
+			return scheduler.New(ratelimit.NewManager(c.Providers.Items), client, healthChecker, timeout, 0, 0), nil
+		},
+	}
+	reinit := &runtimeconfig.DefaultReinitHandler{
+		InitFunc: func(c *config.Config, r *model.Resolver, s *scheduler.Scheduler) {
+			rebuilt = s
+		},
+	}
+	runtimeManager, err := runtimeconfig.NewManager(cfg, configPath, rebuilder, reinit)
+	if err != nil {
+		t.Fatalf("create runtimeconfig manager: %v", err)
+	}
+
+	// draft 中把 provider QPM 提到 120（burst=2），Apply 后新 limiter 生效。
+	err = runtimeManager.UpdateProvider("openai", &runtimeconfig.ProviderInput{
+		Name:      "openai",
+		Endpoint:  "https://api.openai.com/v1",
+		APIKey:    "sk-xxx",
+		Protocols: []string{"openai.chat"},
+		RateLimit: runtimeconfig.RateLimitInput{QPM: 120},
+	})
+	if err != nil {
+		t.Fatalf("update provider draft: %v", err)
+	}
+
+	applyResult := runtimeManager.Apply()
+	if !applyResult.Success {
+		t.Fatalf("apply failed: %s", applyResult.Message)
+	}
+
+	if rebuilt == nil {
+		t.Fatal("reinit must be invoked with the rebuilt scheduler after Apply")
+	}
+	if !rebuilt.Allow("openai") {
+		t.Fatal("rebuilt limiter should allow first request under new QPM=120")
+	}
+	if !rebuilt.Allow("openai") {
+		t.Fatal("rebuilt limiter QPM=120 burst=2 should allow second Allow; if blocked, Apply did not rebuild the limiter")
 	}
 }

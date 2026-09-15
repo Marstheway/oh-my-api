@@ -15,6 +15,7 @@ import (
 	errs "github.com/Marstheway/oh-my-api/internal/errors"
 	"github.com/Marstheway/oh-my-api/internal/metrics"
 	"github.com/Marstheway/oh-my-api/internal/model"
+	"github.com/Marstheway/oh-my-api/internal/rules"
 	"github.com/Marstheway/oh-my-api/internal/scheduler"
 	"github.com/Marstheway/oh-my-api/internal/stats"
 	"github.com/gin-gonic/gin"
@@ -68,35 +69,77 @@ func Embeddings(c *gin.Context) {
 			continue
 		}
 
-		// Build ollama embedding request
-		upstreamReq, err := adaptor.BuildOllamaEmbeddingRequest(
-			c.Request.Context(),
-			&t.Provider,
-			t.UpstreamModel,
-			&req,
-			normalizedInput,
-		)
+		// Get embedding protocol for this provider
+		proto, err := t.Provider.GetEmbeddingProtocol()
 		if err != nil {
 			errs.WriteError(c, errs.ProtocolOpenAI, http.StatusInternalServerError,
-				errs.ErrInternal, "invalid ollama.embed provider configuration: "+err.Error())
+				errs.ErrInternal, "invalid embedding provider configuration: "+err.Error())
 			return
 		}
 
-		embeddingTasks = append(embeddingTasks, scheduler.Task{
+		var upstreamReq *http.Request
+		switch proto {
+		case "ollama.embed":
+			upstreamReq, err = adaptor.BuildOllamaEmbeddingRequest(
+				c.Request.Context(),
+				&t.Provider,
+				t.UpstreamModel,
+				&req,
+				normalizedInput,
+			)
+		case "openai.embeddings":
+			upstreamReq, err = adaptor.BuildOpenAIEmbeddingRequest(
+				c.Request.Context(),
+				&t.Provider,
+				t.UpstreamModel,
+				&req,
+				normalizedInput,
+			)
+		default:
+			err = fmt.Errorf("unsupported embedding protocol: %s", proto)
+		}
+
+		if err != nil {
+			errs.WriteError(c, errs.ProtocolOpenAI, http.StatusInternalServerError,
+				errs.ErrInternal, "failed to build embedding request: "+err.Error())
+			return
+		}
+
+		// 调度层 action（qpm / 时段 / retries）对 embeddings 同样生效：match 用请求 model 作
+		// client-model、key_name、叶子 provider/upstreamModel。protocol/effort/thinking
+		// 不改变 embedding 请求，只消费 qpm、时段与 retries 字段。
+		matchCtx := rules.MatchContext{
+			ClientModel:   req.Model,
+			KeyName:       c.GetString("key_name"),
+			UpstreamModel: t.ProviderName + "/" + t.UpstreamModel,
+		}
+		merged := rules.Evaluate(cfg.Rules, matchCtx)
+
+		embeddingTask := scheduler.Task{
 			ProviderName:     t.ProviderName,
 			Provider:         t.Provider,
 			UpstreamModel:    t.UpstreamModel,
 			ModelGroup:       result.ModelGroup,
-			OutboundProtocol: "ollama.embed",
+			OutboundProtocol: proto,
 			Weight:           t.Weight,
 			Request:          upstreamReq,
-		})
+		}
+		if merged.QPM != nil {
+			embeddingTask.ModelQPM = *merged.QPM
+		}
+		if merged.Retries != nil {
+			embeddingTask.Retries = *merged.Retries
+		}
+		embeddingTask.EnableTimeRange = append([]string(nil), merged.EnableTimeRange...)
+		embeddingTask.DisableTimeRange = append([]string(nil), merged.DisableTimeRange...)
+
+		embeddingTasks = append(embeddingTasks, embeddingTask)
 	}
 
 	// Check if any embedding-capable tasks exist
 	if len(embeddingTasks) == 0 {
 		errs.WriteError(c, errs.ProtocolOpenAI, http.StatusInternalServerError,
-			errs.ErrInternal, fmt.Sprintf("no ollama.embed provider available for model group: %s", result.ModelGroup))
+			errs.ErrInternal, fmt.Sprintf("no embedding provider available for model group: %s", result.ModelGroup))
 		return
 	}
 
@@ -118,7 +161,19 @@ func Embeddings(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	defer cancel()
 
-	resp, err := sched.Execute(ctx, result.Mode, embeddingTasks)
+	// 注入 key_name 到 context
+	keyName := c.GetString("key_name")
+	if keyName != "" {
+		ctx = scheduler.WithKeyName(ctx, keyName)
+	}
+
+	// sticky 已由 resolver 解析；仅 load-balance 使用
+	var stickyMeta *scheduler.StickyMeta
+	if result.Mode == "load-balance" && result.Plan != nil {
+		stickyMeta = result.Plan.Sticky
+	}
+
+	resp, err := sched.ExecuteWithSticky(ctx, result.Mode, result.ModelGroup, stickyMeta, embeddingTasks)
 	metrics.DecConcurrent()
 	if err != nil {
 		recordEmbeddingMetrics(c, result.ModelGroup, "", "", "error", time.Since(start))
@@ -129,16 +184,47 @@ func Embeddings(c *gin.Context) {
 
 	// Handle non-2xx upstream responses
 	if resp.Response.StatusCode >= 400 {
-		recordEmbeddingMetrics(c, result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", time.Since(start))
+		// Find winner's outbound protocol for error parsing
+		var winnerProtocol string
+		for _, t := range embeddingTasks {
+			if t.ProviderName == resp.Winner && t.UpstreamModel == resp.UpstreamModel {
+				winnerProtocol = t.OutboundProtocol
+				break
+			}
+		}
+		if winnerProtocol == "" {
+			for _, t := range embeddingTasks {
+				if t.ProviderName == resp.Winner {
+					winnerProtocol = t.OutboundProtocol
+					break
+				}
+			}
+		}
+
+		recordEmbeddingMetricsWithProtocol(c, result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", time.Since(start), winnerProtocol)
+
 		// Read body to extract error message
 		bodyBytes, _ := io.ReadAll(resp.Response.Body)
 		errorMsg := "upstream error"
 		if len(bodyBytes) > 0 {
-			var ollamaResp struct {
-				Error string `json:"error"`
-			}
-			if err := json.Unmarshal(bodyBytes, &ollamaResp); err == nil && ollamaResp.Error != "" {
-				errorMsg = ollamaResp.Error
+			// Try parsing error based on protocol
+			switch winnerProtocol {
+			case "openai.embeddings":
+				var openaiErr struct {
+					Error struct {
+						Message string `json:"message"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(bodyBytes, &openaiErr); err == nil && openaiErr.Error.Message != "" {
+					errorMsg = openaiErr.Error.Message
+				}
+			case "ollama.embed":
+				var ollamaResp struct {
+					Error string `json:"error"`
+				}
+				if err := json.Unmarshal(bodyBytes, &ollamaResp); err == nil && ollamaResp.Error != "" {
+					errorMsg = ollamaResp.Error
+				}
 			}
 		}
 		errs.WriteError(c, errs.ProtocolOpenAI, resp.Response.StatusCode,
@@ -149,12 +235,56 @@ func Embeddings(c *gin.Context) {
 	c.Set("provider", resp.Winner)
 	latency := time.Since(start)
 
-	// Decode Ollama embedding response
-	ollamaResp, err := adaptor.DecodeOllamaEmbeddingResponse(resp.Response.Body, len(normalizedInput))
-	if err != nil {
-		recordEmbeddingMetrics(c, result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", latency)
+	// Find winner's outbound protocol
+	var winnerProtocol string
+	for _, t := range embeddingTasks {
+		if t.ProviderName == resp.Winner && t.UpstreamModel == resp.UpstreamModel {
+			winnerProtocol = t.OutboundProtocol
+			break
+		}
+	}
+	// If no winner found (should not happen), use empty string for metrics
+	if winnerProtocol == "" {
+		for _, t := range embeddingTasks {
+			if t.ProviderName == resp.Winner {
+				winnerProtocol = t.OutboundProtocol
+				break
+			}
+		}
+	}
+
+	// Decode response based on protocol
+	var embeddings [][]float64
+	var promptTokens int
+	var totalTokens int
+
+	switch winnerProtocol {
+	case "openai.embeddings":
+		openaiResp, err := adaptor.DecodeOpenAIEmbeddingResponse(resp.Response.Body, len(normalizedInput))
+		if err != nil {
+			recordEmbeddingMetricsWithProtocol(c, result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", latency, winnerProtocol)
+			errs.WriteError(c, errs.ProtocolOpenAI, http.StatusBadGateway,
+				errs.ErrUpstreamError, "invalid upstream response: "+err.Error())
+			return
+		}
+		embeddings = openaiResp.Embeddings
+		promptTokens = openaiResp.PromptTokens
+		totalTokens = openaiResp.TotalTokens
+	case "ollama.embed":
+		ollamaResp, err := adaptor.DecodeOllamaEmbeddingResponse(resp.Response.Body, len(normalizedInput))
+		if err != nil {
+			recordEmbeddingMetricsWithProtocol(c, result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", latency, winnerProtocol)
+			errs.WriteError(c, errs.ProtocolOpenAI, http.StatusBadGateway,
+				errs.ErrUpstreamError, "invalid upstream response: "+err.Error())
+			return
+		}
+		embeddings = ollamaResp.Embeddings
+		promptTokens = ollamaResp.PromptEvalCount
+		totalTokens = ollamaResp.PromptEvalCount
+	default:
+		recordEmbeddingMetricsWithProtocol(c, result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", latency, winnerProtocol)
 		errs.WriteError(c, errs.ProtocolOpenAI, http.StatusBadGateway,
-			errs.ErrUpstreamError, "invalid upstream response: "+err.Error())
+			errs.ErrUpstreamError, fmt.Sprintf("unknown embedding protocol: %s", winnerProtocol))
 		return
 	}
 
@@ -163,22 +293,22 @@ func Embeddings(c *gin.Context) {
 		"protocol", "openai.embeddings",
 		"latency", fmt.Sprintf("%.2fs", latency.Seconds()),
 		"model", resp.Winner+"/"+resp.UpstreamModel,
-		"embedding_count", len(ollamaResp.Embeddings),
+		"embedding_count", len(embeddings),
 	)
 
 	// Build OpenAI-compatible response
 	openaiResp := dto.EmbeddingResponse{
 		Object: "list",
 		Model:  requestedModel,
-		Data:   make([]dto.EmbeddingResponseItem, len(ollamaResp.Embeddings)),
+		Data:   make([]dto.EmbeddingResponseItem, len(embeddings)),
 		Usage: dto.Usage{
-			PromptTokens:     ollamaResp.PromptEvalCount,
+			PromptTokens:     promptTokens,
 			CompletionTokens: 0,
-			TotalTokens:      ollamaResp.PromptEvalCount,
+			TotalTokens:      totalTokens,
 		},
 	}
 
-	for i, embedding := range ollamaResp.Embeddings {
+	for i, embedding := range embeddings {
 		openaiResp.Data[i] = dto.EmbeddingResponseItem{
 			Object:    "embedding",
 			Index:     i,
@@ -186,7 +316,7 @@ func Embeddings(c *gin.Context) {
 		}
 	}
 
-	recordEmbeddingMetrics(c, result.ModelGroup, resp.Winner, resp.UpstreamModel, "success", latency)
+	recordEmbeddingMetricsWithProtocol(c, result.ModelGroup, resp.Winner, resp.UpstreamModel, "success", latency, winnerProtocol)
 	recordEmbeddingStats(c, resp.Winner, resp.UpstreamModel, latency)
 
 	c.JSON(http.StatusOK, openaiResp)
@@ -210,21 +340,25 @@ func recordEmbeddingStats(c *gin.Context, providerName, upstreamModel string, la
 	}
 }
 
-func recordEmbeddingMetrics(c *gin.Context, modelGroup, provider, upstreamModel, status string, latency time.Duration) {
+func recordEmbeddingMetricsWithProtocol(c *gin.Context, modelGroup, provider, upstreamModel, status string, latency time.Duration, outboundProtocol string) {
 	keyName := c.GetString("key_name")
 	if keyName == "" {
 		return
 	}
 
 	metrics.RecordRequest(context.Background(), metrics.RequestInfo{
-		InboundProtocol:   "openai.embeddings",
-		OutboundProtocol:  "ollama.embed",
-		Provider:          provider,
-		UpstreamModel:     upstreamModel,
-		ModelGroup:        modelGroup,
-		KeyName:           keyName,
-		Status:            status,
-		Duration:          latency.Seconds(),
+		InboundProtocol:    "openai.embeddings",
+		OutboundProtocol:   outboundProtocol,
+		Provider:           provider,
+		UpstreamModel:      upstreamModel,
+		ModelGroup:         modelGroup,
+		KeyName:            keyName,
+		Status:             status,
+		Duration:           latency.Seconds(),
 		FirstTokenDuration: 0,
 	})
+}
+
+func recordEmbeddingMetrics(c *gin.Context, modelGroup, provider, upstreamModel, status string, latency time.Duration) {
+	recordEmbeddingMetricsWithProtocol(c, modelGroup, provider, upstreamModel, status, latency, "")
 }

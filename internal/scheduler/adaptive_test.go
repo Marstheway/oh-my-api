@@ -667,10 +667,10 @@ func TestAdaptiveStrategy_SingleProvider(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -721,7 +721,7 @@ func TestAdaptiveStrategy_FirstCandidateFails_SecondSuccess(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 	resetLatencyTracker()
@@ -733,7 +733,7 @@ func TestAdaptiveStrategy_FirstCandidateFails_SecondSuccess(t *testing.T) {
 	tracker.RecordSelection("first/model", now)
 	tracker.RecordSelection("second/model", now)
 
-	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	firstReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, firstSrv.URL, nil)
 	secondReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, secondSrv.URL, nil)
@@ -760,10 +760,10 @@ func TestAdaptiveStrategy_FirstCandidateFails_SecondSuccess(t *testing.T) {
 }
 
 func TestAdaptiveStrategy_NoHealthyProvider(t *testing.T) {
-	client := provider.NewClient(nil, 120*time.Second, 0)
+	client := provider.NewClient(nil, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(nil)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	_, err := strategy.Execute(context.Background(), []Task{})
 	if err != ErrNoTasks {
@@ -779,22 +779,21 @@ func TestAdaptiveStrategy_AllDisabled(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled": {
-			Endpoint:           srv.URL,
-			APIKey:             "test-key",
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
-		{ProviderName: "disabled", Provider: providers["disabled"], UpstreamModel: "model", Request: req},
+		{ProviderName: "disabled", Provider: providers["disabled"], UpstreamModel: "model", Request: req, DisableTimeRange: []string{"00:00-24:00"}},
 	}
 
 	_, err := strategy.Execute(context.Background(), tasks)
@@ -824,10 +823,10 @@ func TestAdaptiveStrategy_AllProvidersUnhealthy(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	// 标记所有 provider 为不健康（设置足够长的 cooldown）
 	h.MarkUnhealthyFor(health.MakeHealthKey("a", "openai"), time.Hour)
@@ -868,7 +867,7 @@ func TestAdaptiveStrategy_RankOrderIsFixed(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 	resetLatencyTracker()
@@ -880,7 +879,7 @@ func TestAdaptiveStrategy_RankOrderIsFixed(t *testing.T) {
 	tracker.RecordSelection("fast/model", now)
 	tracker.RecordSelection("slow/model", now)
 
-	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	// 多次执行，验证 fast 总是被选为首选
 	for i := 0; i < 10; i++ {
@@ -921,13 +920,13 @@ func TestAdaptiveStrategy_MarkSelectedBeforeRequest(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 	resetLatencyTracker()
 	now := time.Now()
 
-	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -967,10 +966,10 @@ func TestExecuteNode_Adaptive_SingleProvider(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	node := &RunNode{
 		IsLeaf: false,
@@ -1035,10 +1034,10 @@ func TestExecuteNode_Adaptive_FirstFailsSecondSuccess(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	// 给两个候选预写样本，first 有更好的 score
 	now := time.Now()
@@ -1124,13 +1123,13 @@ func TestExecuteNode_Adaptive_RateLimitedThenSuccess(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	// 消耗 limited provider 的令牌
-	rl.Allow("limited", "model")
+	rl.Allow("limited", "model", 0)
 
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	// 给 limited 更好的 score
 	now := time.Now()
@@ -1220,10 +1219,10 @@ func TestExecuteNode_Adaptive_SoftFailureThenSuccess(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	// 给 soft 更好的 score，让它成为首选
 	now := time.Now()
@@ -1289,19 +1288,19 @@ func TestExecuteNode_Adaptive_HealthIsolation(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"shared": {
-			Endpoint: srv.URL,
-			APIKey:   "test-key",
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai.chat", "anthropic.messages"},
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 	// 将 shared 的 anthropic 协议侧标记为不健康
 	h.MarkUnhealthyFor("shared/anthropic", 0)
 
-	scheduler := New(rl, client, h, 500*time.Millisecond, 0)
+	scheduler := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	node := &RunNode{
 		IsLeaf: false,
@@ -1389,7 +1388,7 @@ func TestAdaptiveStrategy_UnhealthyMidIteration(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(1, 30*time.Second) // 阈值 1，一次失败就标记 unhealthy
 	resetLatencyTracker()
@@ -1404,7 +1403,7 @@ func TestAdaptiveStrategy_UnhealthyMidIteration(t *testing.T) {
 	tracker.RecordSelection("prov-b/m2", now)
 	tracker.RecordSelection("prov-c/m3", now)
 
-	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	reqA, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	reqB, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
@@ -1468,7 +1467,7 @@ func TestAdaptiveStrategy_SiblingSkippedWhenUnhealthy(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(1, 30*time.Second)
 	resetLatencyTracker()
@@ -1482,7 +1481,7 @@ func TestAdaptiveStrategy_SiblingSkippedWhenUnhealthy(t *testing.T) {
 	tracker.RecordSelection("same-prov/model-b", now)
 	tracker.RecordSelection("other-prov/model-c", now)
 
-	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewAdaptiveStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	reqA, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	reqB, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)

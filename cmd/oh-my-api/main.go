@@ -29,6 +29,8 @@ func main() {
 		runTest(*configPath, args[1])
 	case "stats":
 		runStats(*configPath, args[1:])
+	case "migrate-rules":
+		runMigrateRules(*configPath, args[1:])
 	default:
 		fmt.Printf("Unknown command: %s\n", args[0])
 		printUsage()
@@ -45,7 +47,8 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  serve    Start API gateway server")
 	fmt.Println("  test     Test a provider model connectivity")
-	fmt.Println("  stats    Show API usage statistics")
+	fmt.Println("  stats          Show API usage statistics")
+	fmt.Println("  migrate-rules  One-shot migration of deprecated provider protocol/effort fields to top-level rules")
 	fmt.Println()
 	fmt.Println("Global Options:")
 	fmt.Println("  --config string   Path to config file (default: config.yaml)")
@@ -58,4 +61,6 @@ func printUsage() {
 	fmt.Println("  oh-my-api stats --today")
 	fmt.Println("  oh-my-api stats --since \"2026-04-01\" --until \"2026-04-25\"")
 	fmt.Println("  oh-my-api stats --reset")
+	fmt.Println("  oh-my-api migrate-rules")
+	fmt.Println("  oh-my-api migrate-rules --write")
 }

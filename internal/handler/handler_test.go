@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -127,7 +129,7 @@ func setupTestHandler(qpm int) (*gin.Engine, *httptest.Server, *httptest.Server)
 		},
 	}
 
-	catalogIdx = nil
+	ResetCatalogSource()
 
 	cfg = &config.Config{
 		Providers: config.ProvidersConfig{Items: providers},
@@ -142,10 +144,10 @@ func setupTestHandler(qpm int) (*gin.Engine, *httptest.Server, *httptest.Server)
 	if err != nil {
 		panic(err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/chat/completions", Chat)
@@ -191,11 +193,11 @@ func TestChat_DeepSeekAutoCompat(t *testing.T) {
 	}))
 	defer openaiSrv.Close()
 
-	catalogIdx = nil
+	ResetCatalogSource()
 	providers := map[string]config.ProviderConfig{
 		"deepseek-provider": {
-			Endpoint: openaiSrv.URL,
-			APIKey:   "test-key",
+			Endpoint:  openaiSrv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai.chat"},
 		},
 	}
@@ -211,10 +213,10 @@ func TestChat_DeepSeekAutoCompat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/chat/completions", Chat)
@@ -438,6 +440,45 @@ func TestHandleUpstreamError_GenericError(t *testing.T) {
 	}
 }
 
+func TestHandleUpstreamError_ClientCanceled(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/test", nil)
+
+	handleUpstreamError(c, errs.ProtocolOpenAI, context.Canceled)
+
+	// gin buffers status until WriteHeaderNow (called by Engine in production);
+	// assert via Writer.Status, not the raw recorder Code.
+	if c.Writer.Status() != statusClientClosed {
+		t.Errorf("status = %d, want %d", c.Writer.Status(), statusClientClosed)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("body should be empty on client cancel, got %q", w.Body.String())
+	}
+	// Must not masquerade as OpenAI-style upstream_error.
+	if strings.Contains(w.Body.String(), "upstream connection failed") {
+		t.Fatal("must not write upstream connection failed body on client cancel")
+	}
+	if !c.IsAborted() {
+		t.Fatal("context should be aborted")
+	}
+}
+
+func TestHandleUpstreamError_ClientCanceledWrapped(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/test", nil)
+
+	handleUpstreamError(c, errs.ProtocolOpenAI, fmt.Errorf("wrap: %w", context.Canceled))
+
+	if c.Writer.Status() != statusClientClosed {
+		t.Errorf("status = %d, want %d", c.Writer.Status(), statusClientClosed)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("body should be empty, got %q", w.Body.String())
+	}
+}
+
 func TestHandleUpstreamResponseError_WithBody(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -513,10 +554,10 @@ func TestChat_ContextCanceled(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/chat/completions", Chat)
@@ -542,6 +583,20 @@ func TestChat_ContextCanceled(t *testing.T) {
 }
 
 func TestChat_StreamStartsBeforeUpstreamCompletes(t *testing.T) {
+	// recordStats 依赖 stats recorder；本测试直接经过 Chat 的 key_name 统计路径，
+	// 需自包含初始化，避免受其它测试执行顺序影响。
+	testDBPath := filepath.Join(t.TempDir(), "handler-stream-stats.db")
+	if err := stats.Init(testDBPath); err != nil {
+		t.Fatalf("Init stats error: %v", err)
+	}
+	defer stats.Reset()
+
+	// 因果握手：真实 HTTP 客户端首次读到首 chunk 时关闭 clientGotChunk；
+	// 上游仅在收到该信号后才发送 DONE。于是"首 token 先于流结束"成为跨进程的
+	// happens-before 顺序，可被 race 构建同样严格校验，而不依赖易失真的墙钟时延。
+	clientGotChunk := make(chan struct{})
+	upstreamTimedOut := make(chan struct{})
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -554,7 +609,13 @@ func TestChat_StreamStartsBeforeUpstreamCompletes(t *testing.T) {
 		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n"))
 		flusher.Flush()
 
-		time.Sleep(200 * time.Millisecond)
+		// 流式实现应在客户端收到首 chunk 后被放行；若实现退化为缓冲，
+		// 客户端直到 DONE 后才收到任何数据，等待将超时（回归）。
+		select {
+		case <-clientGotChunk:
+		case <-time.After(5 * time.Second):
+			close(upstreamTimedOut)
+		}
 
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 		flusher.Flush()
@@ -582,37 +643,102 @@ func TestChat_StreamStartsBeforeUpstreamCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
+	metrics.ResetForTest()
 	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set("key_name", "test-key")
+		c.Next()
+	})
 	router.POST("/v1/chat/completions", Chat)
 
+	// 经真实 HTTP 网关与客户端验证流式语义：httptest.ResponseRecorder 会缓冲
+	// 全部响应，无法观测增量写入，故使用真实 TCP 流读取。
+	gateway := httptest.NewServer(router)
+	defer gateway.Close()
+
 	body := `{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"Hello"}]}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", gateway.URL+"/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
-	w := newTimedRecorder()
 	start := time.Now()
-	router.ServeHTTP(w, req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request: %v", err)
+	}
+	defer resp.Body.Close()
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	if resp.StatusCode != http.StatusOK {
+		all, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body: %s", resp.StatusCode, all)
 	}
 
-	if !strings.Contains(w.Body.String(), "data: [DONE]") {
-		t.Fatalf("missing stream done marker, body: %s", w.Body.String())
+	// 逐行读取 SSE：首行到达即认定首 token 已送达客户端。
+	reader := bufio.NewReader(resp.Body)
+	var received strings.Builder
+	first := true
+	for {
+		line, readErr := reader.ReadString('\n')
+		received.WriteString(line)
+		if first {
+			first = false
+			select {
+			case <-clientGotChunk:
+			default:
+				close(clientGotChunk)
+			}
+		}
+		if strings.Contains(line, "[DONE]") {
+			break
+		}
+		if readErr != nil {
+			t.Fatalf("read stream: %v (received: %s)", readErr, received.String())
+		}
+	}
+	requestDuration := time.Since(start)
+
+	if !strings.Contains(received.String(), "data: [DONE]") {
+		t.Fatalf("missing stream done marker, body: %s", received.String())
 	}
 
-	firstWrite := w.FirstWriteTime()
-	if firstWrite.IsZero() {
-		t.Fatal("expected first write timestamp to be recorded")
+	// 关键事件顺序（race 构建同样校验）：首 chunk 必须在流结束（DONE）之前送达客户端。
+	select {
+	case <-clientGotChunk:
+	default:
+		t.Fatal("first chunk was not delivered to the client")
+	}
+	select {
+	case <-upstreamTimedOut:
+		t.Fatal("upstream stream completed without the client receiving the first chunk: response was buffered instead of streamed")
+	default:
 	}
 
-	if firstWrite.Sub(start) >= 350*time.Millisecond {
-		t.Fatalf("first write happened too late: %v (expected < 350ms)", firstWrite.Sub(start))
+	// 时延 sanity：流式请求应在握手超时（5s）内完成；缓冲回归会等到超时。
+	// 上限留足 race 检测器的执行放大余量，同时严格排除 5s 级缓冲回归。
+	if requestDuration >= 2*time.Second {
+		t.Fatalf("request took too long: %v (buffered responses must be rejected by the ordering check; sane streaming should finish well under 2s)", requestDuration)
+	}
+
+	// 流式解码时长指标应被记录（handler 在写回完成后记账，客户端读完可能存在
+	// 极小窗口，轮询等待记账落盘）。原 0.15-0.5s 的固定窗口依赖固定的 200ms 上游
+	// 停顿，与因果握手时序不兼容；此处保留"已记录"这一严格断言。
+	deadline := time.Now().Add(2 * time.Second)
+	decodeDuration := 0.0
+	for time.Now().Before(deadline) {
+		decodeDuration = testutil.ToFloat64(metrics.GetStreamDecodeDurationSecondsTotal().WithLabelValues(
+			"test-provider", "gpt-4", "gpt-4", "test-key",
+		))
+		if decodeDuration > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if decodeDuration <= 0 {
+		t.Fatalf("decode duration metric was not recorded, got %fs", decodeDuration)
 	}
 }
 
@@ -655,10 +781,10 @@ func TestMessages_WithEndpointsProtocol(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/messages", Messages)
@@ -724,10 +850,10 @@ func TestChat_WithEndpointsProtocol(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/chat/completions", Chat)
@@ -818,10 +944,10 @@ func runIntegrationTest(t *testing.T, tc integrationTestCase) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	testClient := provider.NewClient(providers, 120*time.Second, 0)
+	testClient := provider.NewClient(providers, 120*time.Second, 0, 0)
 	testRLManager := ratelimit.NewManager(providers)
 	testHealthChecker := health.NewChecker(3, 30*time.Second)
-	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0)
+	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/chat/completions", Chat)
@@ -1048,9 +1174,9 @@ func TestIntegration_Redirect_VisibleTarget(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "internal-backend",
+				Name:     "internal-backend",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "openai/gpt-4", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "openai/gpt-4", Weight: 1}},
 			},
 		},
 		Redirect: config.RedirectConfigs{
@@ -1063,10 +1189,10 @@ func TestIntegration_Redirect_VisibleTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/chat/completions", Chat)
@@ -1099,8 +1225,8 @@ func TestIntegration_Redirect_ModelsEndpoint(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"openai": {
-			Endpoint: "https://api.openai.com/v1",
-			APIKey:   "test-key",
+			Endpoint:  "https://api.openai.com/v1",
+			APIKey:    "test-key",
 			Protocols: []string{"openai.chat"},
 		},
 	}
@@ -1109,9 +1235,9 @@ func TestIntegration_Redirect_ModelsEndpoint(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "internal-model",
+				Name:     "internal-model",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "openai/gpt-4", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "openai/gpt-4", Weight: 1}},
 			},
 			{
 				Name:   "visible-model",
@@ -1128,10 +1254,10 @@ func TestIntegration_Redirect_ModelsEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.GET("/v1/models", Models)
@@ -1191,9 +1317,9 @@ func TestIntegration_Visible_ModelInternal(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "internal-model",
+				Name:     "internal-model",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "openai/gpt-4", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "openai/gpt-4", Weight: 1}},
 			},
 		},
 	}
@@ -1203,10 +1329,10 @@ func TestIntegration_Visible_ModelInternal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/chat/completions", Chat)
@@ -1258,10 +1384,10 @@ func TestIntegration_Exposure_InternalAndHidden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/chat/completions", Chat)
@@ -1373,10 +1499,10 @@ func TestIntegration_Redirect_ChainedRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/chat/completions", Chat)
@@ -1446,10 +1572,10 @@ func setupResponsesTestHandler(responsesBody string, chatBody string) (*gin.Engi
 	if err != nil {
 		panic(err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 
 	router := gin.New()
 	router.POST("/v1/responses", Responses)
@@ -1505,6 +1631,27 @@ func TestResponsesHandler_ToOpenAIChat(t *testing.T) {
 	}
 }
 
+// chat-only provider 需要 responses→chat 转换：reasoning input item 必须被跳过而不是 502。
+func TestResponsesHandler_ToOpenAIChat_WithReasoningInput(t *testing.T) {
+	router, upstream := setupResponsesTestHandler("", "")
+	defer upstream.Close()
+
+	reqBody := `{"model":"chat-model","input":[
+		{"type":"message","role":"user","content":"Hello"},
+		{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking..."}]},
+		{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_1","output":"sunny"}
+	]}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+}
+
 func TestResponsesHandler_InvalidRequest(t *testing.T) {
 	router, upstream := setupResponsesTestHandler("", "")
 	defer upstream.Close()
@@ -1555,10 +1702,10 @@ func setupChatResponseProviderHandler(t *testing.T, upstreamBody string) (*gin.E
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 	cfg = testCfg
 
 	router := gin.New()
@@ -1662,10 +1809,10 @@ func setupMessagesResponseProviderHandler(t *testing.T, upstreamBody string) (*g
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 	cfg = testCfg
 
 	router := gin.New()
@@ -1715,6 +1862,110 @@ func TestMessagesHandler_ConversionFailure502(t *testing.T) {
 
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want %d, body: %s", w.Code, http.StatusBadGateway, w.Body.String())
+	}
+}
+
+func TestHandleWriteResponseError_ClassifiesStreamInterruptions(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		status   string
+		wantCode int
+		wantBody bool
+	}{
+		// Client cancel: bare 499, no synthetic upstream 502 JSON.
+		{name: "client canceled", err: context.Canceled, status: "client_canceled", wantCode: statusClientClosed, wantBody: false},
+		{name: "upstream timeout", err: context.DeadlineExceeded, status: "upstream_timeout", wantCode: http.StatusBadGateway, wantBody: true},
+		{name: "upstream eof", err: io.ErrUnexpectedEOF, status: "upstream_eof", wantCode: http.StatusBadGateway, wantBody: true},
+		{name: "upstream read error", err: errors.New("read failure"), status: "upstream_read_error", wantCode: http.StatusBadGateway, wantBody: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metrics.ResetForTest()
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest("POST", "/test", nil)
+
+			status, recordMetrics := handleWriteResponseError(c, errs.ProtocolOpenAI, tt.err, true, "test-provider", "test-model", "openai.responses")
+			if !recordMetrics {
+				t.Fatal("recordMetrics = false, want true")
+			}
+			if status != tt.status {
+				t.Errorf("status = %q, want %q", status, tt.status)
+			}
+			// gin buffers status until WriteHeaderNow; use Writer.Status for bare-status paths.
+			gotCode := c.Writer.Status()
+			if tt.wantBody {
+				// WriteError flushes to the recorder immediately.
+				gotCode = w.Code
+			}
+			if gotCode != tt.wantCode {
+				t.Errorf("status code = %d, want %d", gotCode, tt.wantCode)
+			}
+			if tt.wantBody {
+				if w.Body.Len() == 0 {
+					t.Fatal("expected error body")
+				}
+			} else if w.Body.Len() != 0 {
+				t.Errorf("body should be empty, got %q", w.Body.String())
+			}
+
+			count := testutil.ToFloat64(metrics.GetStreamInterruptedTotal().WithLabelValues(
+				"test-provider", "test-model", "openai.responses", tt.status,
+			))
+			if count != 1 {
+				t.Errorf("stream interruption count = %f, want 1", count)
+			}
+		})
+	}
+}
+
+func TestHandleWriteResponseError_NonStreamDoesNotRecordInterruption(t *testing.T) {
+	metrics.ResetForTest()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/test", nil)
+
+	status, recordMetrics := handleWriteResponseError(c, errs.ProtocolOpenAI, io.ErrUnexpectedEOF, false, "test-provider", "test-model", "openai.responses")
+	if !recordMetrics {
+		t.Fatal("recordMetrics = false, want true")
+	}
+	if status != "upstream_eof" {
+		t.Errorf("status = %q, want upstream_eof", status)
+	}
+	if got := testutil.CollectAndCount(metrics.GetStreamInterruptedTotal()); got != 0 {
+		t.Errorf("stream interruption metrics = %d, want 0", got)
+	}
+}
+
+func TestHandleWriteResponseError_ConversionErrorUsesCodecPath(t *testing.T) {
+	metrics.ResetForTest()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/test", nil)
+
+	err := &codec.ConversionError{
+		Phase:          "write_response",
+		Step:           "response_to_chat",
+		InboundFormat:  string(codec.FormatOpenAIResponse),
+		OutboundFormat: string(codec.FormatOpenAIChat),
+		Reason:         "unsupported_output_item",
+		Err:            errors.New("unsupported output item: reasoning"),
+	}
+
+	status, recordMetrics := handleWriteResponseError(c, errs.ProtocolOpenAI, err, true, "test-provider", "test-model", "openai.responses")
+	if recordMetrics {
+		t.Fatal("recordMetrics = true, want false")
+	}
+	if status != "conversion_error" {
+		t.Errorf("status = %q, want conversion_error", status)
+	}
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
+	}
+	if got := testutil.CollectAndCount(metrics.GetStreamInterruptedTotal()); got != 0 {
+		t.Errorf("stream interruption metrics = %d, want 0", got)
 	}
 }
 
@@ -1809,9 +2060,9 @@ func setupAliasTestHandler(t *testing.T, upstreamPath string, upstreamBody strin
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "real-model-group",
+				Name:     "real-model-group",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "real-provider/upstream-model", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "real-provider/upstream-model", Weight: 1}},
 			},
 		},
 		Redirect: config.RedirectConfigs{
@@ -1824,10 +2075,10 @@ func setupAliasTestHandler(t *testing.T, upstreamPath string, upstreamBody strin
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 	cfg = testCfg
 
 	return upstream, func() { upstream.Close() }
@@ -1905,8 +2156,8 @@ func setupFailoverAliasHandler(t *testing.T, router *gin.Engine, primaryProtocol
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "model-backend",
-				Mode:    "failover",
+				Name:     "model-backend",
+				Mode:     "failover",
 				Exposure: exposurePtr(falseVal),
 				Models: config.ModelEntries{
 					{Model: "primary-provider/primary-upstream", Weight: 1},
@@ -1924,10 +2175,10 @@ func setupFailoverAliasHandler(t *testing.T, router *gin.Engine, primaryProtocol
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 	cfg = testCfg
 
 	return primarySrv, secondarySrv, func() {
@@ -2129,10 +2380,10 @@ func setupOllamaProviderHandler(t *testing.T, inboundPath string, handler gin.Ha
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 	cfg = testCfg
 
 	router := gin.New()
@@ -2245,9 +2496,9 @@ func TestOllamaChat_AliasModelEchoedInResponse(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "llama3-backend",
+				Name:     "llama3-backend",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "ollama-provider/llama3", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "ollama-provider/llama3", Weight: 1}},
 			},
 		},
 		Redirect: config.RedirectConfigs{
@@ -2260,10 +2511,10 @@ func TestOllamaChat_AliasModelEchoedInResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 	cfg = testCfg
 
 	reqBody := `{"model":"my-llama","messages":[{"role":"user","content":"Hello"}]}`
@@ -2316,10 +2567,10 @@ func TestOllamaChat_MultimodalConversionFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 	cfg = testCfg
 
 	router := gin.New()
@@ -2401,10 +2652,10 @@ func TestChat_RequestSuccessButAttemptFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	testClient := provider.NewClient(providers, 120*time.Second, 0)
+	testClient := provider.NewClient(providers, 120*time.Second, 0, 0)
 	testRLManager := ratelimit.NewManager(providers)
 	testHealthChecker := health.NewChecker(3, 30*time.Second)
-	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0)
+	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0, 0)
 
 	// 初始化 stats recorder，使用临时文件让 migration 和当前连接共享同一数据库
 	testDBPath := filepath.Join(t.TempDir(), "handler-stats.db")
@@ -2461,7 +2712,7 @@ func TestChat_RequestSuccessButAttemptFailed(t *testing.T) {
 
 	// 验证首个 provider 的 402 硬失败 attempt 指标
 	failCount := testutil.ToFloat64(metrics.GetProviderAttemptTotal().WithLabelValues(
-		"failover", "primary-provider", "gpt-4", "test-model", "openai.chat", "hard_failure", "tokenhub_quota_exceeded", "402",
+		"failover", "primary-provider", "gpt-4", "test-model", "openai.chat", "hard_failure", "quota_exceeded", "402",
 	))
 	if failCount != 1 {
 		t.Errorf("expected 1 hard_failure attempt for primary-provider, got %f", failCount)
@@ -2516,17 +2767,23 @@ func TestChat_UsesModelLevelAllowedProtocol(t *testing.T) {
 				{URL: anthropicSrv.URL, Protocols: []string{"anthropic.messages"}},
 				{URL: openAISrv.URL, Protocols: []string{"openai.chat"}},
 			},
-			APIKey:   "test-key",
+			APIKey:    "test-key",
 			Protocols: []string{"openai.chat", "anthropic.messages"},
-			UpstreamModels: []config.UpstreamModelConfig{
-				{Model: "glm-5.2", AllowedProtocols: []string{"openai.chat"}},
-			},
 			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 	}
 
 	testCfg := &config.Config{
 		Providers: config.ProvidersConfig{Items: providers},
+		Rules: []config.RuleConfig{{
+			Match: config.RuleMatch{
+				UpstreamModel: &config.RuleCondition{
+					Op:    "equals",
+					Value: "mixed-provider/glm-5.2",
+				},
+			},
+			Action: config.RuleAction{Protocol: "openai.chat"},
+		}},
 		ModelGroups: []config.ModelGroupConfig{{
 			Name:   "glm-5.2",
 			Models: config.ModelEntries{{Model: "mixed-provider/glm-5.2", Weight: 1}},
@@ -2537,10 +2794,10 @@ func TestChat_UsesModelLevelAllowedProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	testClient := provider.NewClient(providers, 120*time.Second, 0)
+	testClient := provider.NewClient(providers, 120*time.Second, 0, 0)
 	testRLManager := ratelimit.NewManager(providers)
 	testHealthChecker := health.NewChecker(3, 30*time.Second)
-	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0)
+	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0, 0)
 
 	testDBPath := filepath.Join(t.TempDir(), "handler-model-protocol-stats.db")
 	if err := stats.Init(testDBPath); err != nil {
@@ -2626,16 +2883,16 @@ func TestChat_NestedGroupScheduling(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "child-a",
-				Mode:    "concurrent",
+				Name:     "child-a",
+				Mode:     "concurrent",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "provider-a/model-a", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "provider-a/model-a", Weight: 1}},
 			},
 			{
-				Name:    "child-b",
-				Mode:    "concurrent",
+				Name:     "child-b",
+				Mode:     "concurrent",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "provider-b/model-b", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "provider-b/model-b", Weight: 1}},
 			},
 			{
 				Name: "nested-top",
@@ -2652,10 +2909,10 @@ func TestChat_NestedGroupScheduling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	testClient := provider.NewClient(providers, 120*time.Second, 0)
+	testClient := provider.NewClient(providers, 120*time.Second, 0, 0)
 	testRLManager := ratelimit.NewManager(providers)
 	testHealthChecker := health.NewChecker(3, 30*time.Second)
-	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0)
+	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0, 0)
 
 	oldCfg, oldResolver, oldSched := cfg, resolver, sched
 	cfg, resolver, sched = testCfg, testResolver, testSched
@@ -2735,16 +2992,16 @@ func TestMessages_NestedGroupScheduling(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "child-a",
-				Mode:    "concurrent",
+				Name:     "child-a",
+				Mode:     "concurrent",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "provider-a/model-a", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "provider-a/model-a", Weight: 1}},
 			},
 			{
-				Name:    "child-b",
-				Mode:    "concurrent",
+				Name:     "child-b",
+				Mode:     "concurrent",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "provider-b/model-b", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "provider-b/model-b", Weight: 1}},
 			},
 			{
 				Name: "nested-top",
@@ -2761,10 +3018,10 @@ func TestMessages_NestedGroupScheduling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	testClient := provider.NewClient(providers, 120*time.Second, 0)
+	testClient := provider.NewClient(providers, 120*time.Second, 0, 0)
 	testRLManager := ratelimit.NewManager(providers)
 	testHealthChecker := health.NewChecker(3, 30*time.Second)
-	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0)
+	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0, 0)
 
 	oldCfg, oldResolver, oldSched := cfg, resolver, sched
 	cfg, resolver, sched = testCfg, testResolver, testSched
@@ -2808,8 +3065,14 @@ func TestMessages_NestedGroupScheduling(t *testing.T) {
 // Task 2: /v1/models context_length 测试
 // ============================================================================
 
+// setTestCatalogSource 注入一个基于 map 的测试 catalog source。
+func setTestCatalogSource(entries catalogContextIndex) {
+	src := entries // catalogContextIndex 实现了 CatalogSource 接口
+	SetCatalogSource(src)
+}
+
 // setupModelsContextRouter 构建只含 /v1/models 路由的测试 router，同时接受外部注入的
-// catalogIdx，用于覆盖包级全局状态。
+// catalog source，用于覆盖包级全局状态。
 func setupModelsContextRouter(t *testing.T, testCfg *config.Config) (*gin.Engine, func()) {
 	t.Helper()
 
@@ -2819,7 +3082,7 @@ func setupModelsContextRouter(t *testing.T, testCfg *config.Config) (*gin.Engine
 	}
 
 	oldCfg, oldResolver := cfg, resolver
-	oldCatalogIdx := catalogIdx
+	oldCatalogSrc := catalogSrc
 
 	cfg = testCfg
 	resolver = testResolver
@@ -2829,7 +3092,7 @@ func setupModelsContextRouter(t *testing.T, testCfg *config.Config) (*gin.Engine
 
 	cleanup := func() {
 		cfg, resolver = oldCfg, oldResolver
-		catalogIdx = oldCatalogIdx
+		catalogSrc = oldCatalogSrc
 	}
 	return router, cleanup
 }
@@ -2856,7 +3119,7 @@ func TestModels_ContextLength_ConfigOverride(t *testing.T) {
 	defer cleanup()
 
 	// catalog 中有一个不同的值，应被配置覆盖忽略
-	catalogIdx = catalogContextIndex{"openai/gpt-4": 8192}
+	setTestCatalogSource(catalogContextIndex{"openai/gpt-4": 8192})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -2902,7 +3165,7 @@ func TestModels_ContextLength_CatalogHit(t *testing.T) {
 	router, cleanup := setupModelsContextRouter(t, testCfg)
 	defer cleanup()
 
-	catalogIdx = catalogContextIndex{"anthropic/claude-3-opus-20240229": 200000}
+	setTestCatalogSource(catalogContextIndex{"anthropic/claude-3-opus-20240229": 200000})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -2950,10 +3213,10 @@ func TestModels_ContextLength_MinAcrossLeaves(t *testing.T) {
 	defer cleanup()
 
 	// provider-a 报告 128000，provider-b 报告 64000，应取最小值 64000
-	catalogIdx = catalogContextIndex{
+	setTestCatalogSource(catalogContextIndex{
 		"provider-a/model-x": 128000,
 		"provider-b/model-x": 64000,
-	}
+	})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -2990,9 +3253,9 @@ func TestModels_ContextLength_AliasInheritsFinalGroup(t *testing.T) {
 		}},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "gpt-4-backend",
+				Name:     "gpt-4-backend",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "openai/gpt-4-turbo", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "openai/gpt-4-turbo", Weight: 1}},
 				ModelMetadata: config.ModelMetadataConfig{
 					ContextLength: &cl,
 				},
@@ -3007,7 +3270,7 @@ func TestModels_ContextLength_AliasInheritsFinalGroup(t *testing.T) {
 	defer cleanup()
 
 	// catalog 有不同值，但配置覆盖应生效（继承自 gpt-4-backend group）
-	catalogIdx = catalogContextIndex{"openai/gpt-4-turbo": 128000}
+	setTestCatalogSource(catalogContextIndex{"openai/gpt-4-turbo": 128000})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -3079,10 +3342,10 @@ func TestModels_ContextLength_CompositeGroup(t *testing.T) {
 	defer cleanup()
 
 	// catalog 中有叶子值，但子 group 有配置应覆盖（不查叶子）
-	catalogIdx = catalogContextIndex{
-		"openai/gpt-4o-mini":    128000,
+	setTestCatalogSource(catalogContextIndex{
+		"openai/gpt-4o-mini":     128000,
 		"deepseek/deepseek-chat": 64000,
-	}
+	})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -3125,8 +3388,8 @@ func TestModels_ContextLength_CompositeGroupPartialConfig(t *testing.T) {
 	cheapCL := 100000
 	testCfg := &config.Config{
 		Providers: config.ProvidersConfig{Items: map[string]config.ProviderConfig{
-			"openai":    {Endpoint: "https://api.openai.com", APIKey: "k", Protocols: []string{"openai.chat"}},
-			"deepseek":  {Endpoint: "https://api.deepseek.com", APIKey: "k", Protocols: []string{"openai.chat"}},
+			"openai":   {Endpoint: "https://api.openai.com", APIKey: "k", Protocols: []string{"openai.chat"}},
+			"deepseek": {Endpoint: "https://api.deepseek.com", APIKey: "k", Protocols: []string{"openai.chat"}},
 		}},
 		ModelGroups: []config.ModelGroupConfig{
 			{
@@ -3154,10 +3417,10 @@ func TestModels_ContextLength_CompositeGroupPartialConfig(t *testing.T) {
 	defer cleanup()
 
 	// catalog 叶子值
-	catalogIdx = catalogContextIndex{
-		"openai/gpt-4o-mini":    200000, // 被 cheap-group 配置覆盖，不参与
-		"deepseek/deepseek-chat": 64000, // scout-group 无配置，参与计算
-	}
+	setTestCatalogSource(catalogContextIndex{
+		"openai/gpt-4o-mini":     200000, // 被 cheap-group 配置覆盖，不参与
+		"deepseek/deepseek-chat": 64000,  // scout-group 无配置，参与计算
+	})
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -3235,16 +3498,16 @@ func TestResponses_NestedGroupScheduling(t *testing.T) {
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "child-a",
-				Mode:    "concurrent",
+				Name:     "child-a",
+				Mode:     "concurrent",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "provider-a/model-a", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "provider-a/model-a", Weight: 1}},
 			},
 			{
-				Name:    "child-b",
-				Mode:    "concurrent",
+				Name:     "child-b",
+				Mode:     "concurrent",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "provider-b/model-b", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "provider-b/model-b", Weight: 1}},
 			},
 			{
 				Name: "nested-top",
@@ -3261,10 +3524,10 @@ func TestResponses_NestedGroupScheduling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	testClient := provider.NewClient(providers, 120*time.Second, 0)
+	testClient := provider.NewClient(providers, 120*time.Second, 0, 0)
 	testRLManager := ratelimit.NewManager(providers)
 	testHealthChecker := health.NewChecker(3, 30*time.Second)
-	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0)
+	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0, 0)
 
 	oldCfg, oldResolver, oldSched := cfg, resolver, sched
 	cfg, resolver, sched = testCfg, testResolver, testSched
@@ -3342,10 +3605,10 @@ func TestChat_DeepseekModelTokenizerIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewResolver: %v", err)
 	}
-	testClient := provider.NewClient(providers, 120*time.Second, 0)
+	testClient := provider.NewClient(providers, 120*time.Second, 0, 0)
 	testRLManager := ratelimit.NewManager(providers)
 	testHealthChecker := health.NewChecker(3, 30*time.Second)
-	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0)
+	testSched := scheduler.New(testRLManager, testClient, testHealthChecker, 500*time.Millisecond, 0, 0)
 
 	oldCfg, oldResolver, oldSched := cfg, resolver, sched
 	cfg, resolver, sched = testCfg, testResolver, testSched
@@ -3420,19 +3683,19 @@ func setupSmartRouteTestHandler(t *testing.T, upstreamHandler http.HandlerFunc) 
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "reason-backend",
+				Name:     "reason-backend",
 				Exposure: exposurePtr(trueVal), // 可见，方便测试 disabled 场景
-				Models:  config.ModelEntries{{Model: "upstream-provider/gpt-4", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "upstream-provider/gpt-4", Weight: 1}},
 			},
 			{
-				Name:    "scout-backend",
+				Name:     "scout-backend",
 				Exposure: exposurePtr(trueVal), // 可见，方便测试 scout 场景
-				Models:  config.ModelEntries{{Model: "upstream-provider/gpt-3.5", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "upstream-provider/gpt-3.5", Weight: 1}},
 			},
 			{
-				Name:    "cheap-backend",
+				Name:     "cheap-backend",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "upstream-provider/gpt-3.5-turbo", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "upstream-provider/gpt-3.5-turbo", Weight: 1}},
 			},
 		},
 		Redirect: config.RedirectConfigs{
@@ -3450,10 +3713,10 @@ func setupSmartRouteTestHandler(t *testing.T, upstreamHandler http.HandlerFunc) 
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 	cfg = testCfg
 
 	router := gin.New()
@@ -3818,8 +4081,8 @@ func setupAdaptiveAliasHandler(t *testing.T, router *gin.Engine, firstStatus int
 		Providers: config.ProvidersConfig{Items: providers},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "adaptive-backend",
-				Mode:    "adaptive",
+				Name:     "adaptive-backend",
+				Mode:     "adaptive",
 				Exposure: exposurePtr(falseVal),
 				Models: config.ModelEntries{
 					{Model: "first-provider/first-model", Weight: 1},
@@ -3837,10 +4100,10 @@ func setupAdaptiveAliasHandler(t *testing.T, router *gin.Engine, firstStatus int
 	if err != nil {
 		t.Fatalf("NewResolver error: %v", err)
 	}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rlManager := ratelimit.NewManager(providers)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
 	cfg = testCfg
 
 	return firstSrv, secondSrv, func() {
@@ -3915,5 +4178,361 @@ func TestChat_AdaptiveMode_AllSucceed(t *testing.T) {
 
 	if out.Model != "adaptive-model" {
 		t.Errorf("model = %q, want %q (should echo requested alias)", out.Model, "adaptive-model")
+	}
+}
+
+// ============================================================================
+// Remote Bridge Provider 集成测试
+// ============================================================================
+
+// standardBridgeResponse 返回标准的 OpenAI Responses 格式响应体。
+func standardBridgeResponse() string {
+	return `{"id":"resp-bridge-1","object":"response","created_at":1234567890,"model":"grok-4","status":"completed","output":[{"type":"message","id":"msg-bridge-1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello from bridge!"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`
+}
+
+// setupBridgeTestHandler 构建一个带 mock bridge server 的测试环境，
+// 用于验证 remote bridge provider 从 /v1/responses 入口到 bridge 转发的完整链路。
+// bridgeHandler 由调用方提供，模拟真实 bridge 行为。
+func setupBridgeTestHandler(t *testing.T, bridgeHandler http.HandlerFunc) (*gin.Engine, *httptest.Server, func()) {
+	t.Helper()
+
+	bridgeSrv := httptest.NewServer(http.HandlerFunc(bridgeHandler))
+
+	providers := map[string]config.ProviderConfig{
+		"xai-oauth-bridge": {
+			Endpoint:  bridgeSrv.URL,
+			APIKey:    "", // bridge provider 的 api_key 留空，鉴权 token 通过 RemoteBridge.Token 提供
+			Protocols: []string{"openai.responses"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+			RemoteBridge: &config.RemoteBridgeConfig{
+				Enabled:  true,
+				Provider: "xai-oauth",
+				Token:    "test-bridge-token",
+			},
+		},
+	}
+
+	testCfg := &config.Config{
+		Providers: config.ProvidersConfig{Items: providers},
+		ModelGroups: []config.ModelGroupConfig{
+			{Name: "grok-model", Models: config.ModelEntries{{Model: "xai-oauth-bridge/grok-4", Weight: 1}}},
+		},
+	}
+
+	var err error
+	resolver, err = model.NewResolver(testCfg)
+	if err != nil {
+		t.Fatalf("NewResolver error: %v", err)
+	}
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
+	rlManager := ratelimit.NewManager(providers)
+	healthChecker := health.NewChecker(3, 30*time.Second)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
+	cfg = testCfg
+
+	router := gin.New()
+	router.POST("/v1/responses", Responses)
+
+	return router, bridgeSrv, func() {
+		bridgeSrv.Close()
+	}
+}
+
+// TestBridgeResponses_Success 验证 remote bridge provider 非流式成功路径：
+// mock bridge 收到正确的路径 /v1/responses、Authorization 头为 bridge token、
+// X-Oh-My-API-Bridge-Provider 头为 xai-oauth、body 是原始 Responses 请求 JSON；
+// 客户端看到的是标准 Responses 输出（200 且响应结构正确）。
+func TestBridgeResponses_Success(t *testing.T) {
+	var (
+		receivedPath           string
+		receivedAuth           string
+		receivedBridgeProvider string
+		receivedBody           []byte
+	)
+
+	router, _, cleanup := setupBridgeTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+		receivedBridgeProvider = r.Header.Get("X-Oh-My-API-Bridge-Provider")
+		receivedBody, _ = io.ReadAll(r.Body)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(standardBridgeResponse()))
+	})
+	defer cleanup()
+
+	reqBody := `{"model":"grok-model","input":[{"type":"message","role":"user","content":"Hello"}]}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	// 验证 oh-my-api 返回 200
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	// 验证 mock bridge 收到的请求路径
+	if receivedPath != "/v1/responses" {
+		t.Errorf("bridge path = %q, want %q", receivedPath, "/v1/responses")
+	}
+
+	// 验证 bridge 鉴权头
+	if receivedAuth != "Bearer test-bridge-token" {
+		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer test-bridge-token")
+	}
+
+	// 验证 provider 类型头
+	if receivedBridgeProvider != "xai-oauth" {
+		t.Errorf("X-Oh-My-API-Bridge-Provider = %q, want %q", receivedBridgeProvider, "xai-oauth")
+	}
+
+	// 验证请求体是有效的 Responses JSON
+	var upstreamReq dto.ResponsesRequest
+	if err := json.Unmarshal(receivedBody, &upstreamReq); err != nil {
+		t.Errorf("bridge received invalid Responses JSON: %v, body=%s", err, string(receivedBody))
+	}
+	if upstreamReq.Model != "grok-4" {
+		t.Errorf("upstream model = %q, want %q", upstreamReq.Model, "grok-4")
+	}
+
+	// 验证客户端看到的是标准 Responses 响应格式
+	var out dto.ResponsesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("failed to parse response: %v, body=%s", err, w.Body.String())
+	}
+	if out.Object != "response" {
+		t.Errorf("object = %q, want %q", out.Object, "response")
+	}
+	if out.Status != "completed" {
+		t.Errorf("status = %q, want %q", out.Status, "completed")
+	}
+}
+
+// TestBridgeResponses_Bridge401 验证 bridge 返回 401 时 oh-my-api 正确透传错误状态码，
+// 不会把 bridge 本地错误误包装成其它协议错误（如 502）。
+func TestBridgeResponses_Bridge401(t *testing.T) {
+	router, _, cleanup := setupBridgeTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":{"message":"invalid bridge token","type":"authentication_error","code":"unauthorized"}}`))
+	})
+	defer cleanup()
+
+	reqBody := `{"model":"grok-model","input":[{"type":"message","role":"user","content":"Hello"}]}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	// oh-my-api 应透传 bridge 的 401，不包装成 502
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d, body: %s", w.Code, http.StatusUnauthorized, w.Body.String())
+	}
+}
+
+// TestBridgeResponses_Bridge502 验证 bridge 返回 502 时 oh-my-api 正确透传错误状态码，
+// 不会把 bridge 本地错误误包装成其它协议错误。
+func TestBridgeResponses_Bridge502(t *testing.T) {
+	router, _, cleanup := setupBridgeTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{"error":{"message":"upstream unreachable","type":"server_error","code":"bad_gateway"}}`))
+	})
+	defer cleanup()
+
+	reqBody := `{"model":"grok-model","input":[{"type":"message","role":"user","content":"Hello"}]}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	// oh-my-api 应透传 bridge 返回的错误状态码
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d, body: %s", w.Code, http.StatusBadGateway, w.Body.String())
+	}
+}
+
+// TestBridgeResponses_Stream 验证 stream=true 的透传场景，
+// mock bridge 返回标准 Responses SSE 流，oh-my-api 不破坏事件流和 [DONE] 终止行为。
+func TestBridgeResponses_Stream(t *testing.T) {
+	var (
+		receivedAuth           string
+		receivedBridgeProvider string
+	)
+
+	router, _, cleanup := setupBridgeTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		receivedBridgeProvider = r.Header.Get("X-Oh-My-API-Bridge-Provider")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("bridge server should support Flusher")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		// 模拟标准 Responses SSE 流事件序列
+		w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-stream-1\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"grok-4\",\"output\":[]}}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]},\"output_index\":0}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("data: {\"type\":\"response.content_part.added\",\"item_id\":\"msg-1\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg-1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello from bridge stream!\"}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-stream-1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4\",\"output\":[]}}\n\n"))
+		flusher.Flush()
+
+		w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	})
+	defer cleanup()
+
+	reqBody := `{"model":"grok-model","input":[{"type":"message","role":"user","content":"Hello"}],"stream":true}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	// 验证 bridge 鉴权头
+	if receivedAuth != "Bearer test-bridge-token" {
+		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer test-bridge-token")
+	}
+	if receivedBridgeProvider != "xai-oauth" {
+		t.Errorf("X-Oh-My-API-Bridge-Provider = %q, want %q", receivedBridgeProvider, "xai-oauth")
+	}
+
+	// 验证 SSE 内容类型
+	contentType := w.Header().Get("Content-Type")
+	if contentType != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want %q", contentType, "text/event-stream")
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("stream missing [DONE] marker, body: %s", body)
+	}
+	if !strings.Contains(body, "response.output_text.delta") {
+		t.Errorf("stream missing output text delta, body: %s", body)
+	}
+	if !strings.Contains(body, "Hello from bridge stream!") {
+		t.Errorf("stream missing expected text content, body: %s", body)
+	}
+}
+
+// setupBridgeChatTestHandler 构建一个带 mock bridge server 的测试环境，
+// 用于验证 remote bridge provider 从 /v1/chat/completions 入口到 bridge 转发的完整链路。
+func setupBridgeChatTestHandler(t *testing.T, bridgeHandler http.HandlerFunc) (*gin.Engine, *httptest.Server, func()) {
+	t.Helper()
+
+	bridgeSrv := httptest.NewServer(http.HandlerFunc(bridgeHandler))
+
+	providers := map[string]config.ProviderConfig{
+		"xai-oauth-bridge": {
+			Endpoint:  bridgeSrv.URL,
+			APIKey:    "",
+			Protocols: []string{"openai.chat"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+			RemoteBridge: &config.RemoteBridgeConfig{
+				Enabled:  true,
+				Provider: "xai-oauth",
+				Token:    "test-bridge-token",
+			},
+		},
+	}
+
+	testCfg := &config.Config{
+		Providers: config.ProvidersConfig{Items: providers},
+		ModelGroups: []config.ModelGroupConfig{
+			{Name: "grok-model", Models: config.ModelEntries{{Model: "xai-oauth-bridge/grok-4", Weight: 1}}},
+		},
+	}
+
+	var err error
+	resolver, err = model.NewResolver(testCfg)
+	if err != nil {
+		t.Fatalf("NewResolver error: %v", err)
+	}
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
+	rlManager := ratelimit.NewManager(providers)
+	healthChecker := health.NewChecker(3, 30*time.Second)
+	sched = scheduler.New(rlManager, client, healthChecker, 500*time.Millisecond, 0, 0)
+	cfg = testCfg
+
+	router := gin.New()
+	router.POST("/v1/chat/completions", Chat)
+
+	return router, bridgeSrv, func() {
+		bridgeSrv.Close()
+	}
+}
+
+// TestBridgeChatCompletions_Success 验证 remote bridge provider Chat 非流式成功路径：
+// mock bridge 收到 /v1/chat/completions、bridge 鉴权头与 provider 头、OpenAI Chat 请求体；
+// 客户端看到标准 Chat 响应。
+func TestBridgeChatCompletions_Success(t *testing.T) {
+	var (
+		receivedPath           string
+		receivedAuth           string
+		receivedBridgeProvider string
+		receivedBody           []byte
+	)
+
+	router, _, cleanup := setupBridgeChatTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+		receivedBridgeProvider = r.Header.Get("X-Oh-My-API-Bridge-Provider")
+		receivedBody, _ = io.ReadAll(r.Body)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"chatcmpl-bridge-1","object":"chat.completion","created":1234567890,"model":"grok-4","choices":[{"index":0,"message":{"role":"assistant","content":"Hello from bridge!"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	})
+	defer cleanup()
+
+	reqBody := `{"model":"grok-model","messages":[{"role":"user","content":"Hello"}]}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	if receivedPath != "/v1/chat/completions" {
+		t.Errorf("bridge path = %q, want %q", receivedPath, "/v1/chat/completions")
+	}
+	if receivedAuth != "Bearer test-bridge-token" {
+		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer test-bridge-token")
+	}
+	if receivedBridgeProvider != "xai-oauth" {
+		t.Errorf("X-Oh-My-API-Bridge-Provider = %q, want %q", receivedBridgeProvider, "xai-oauth")
+	}
+
+	var upstreamReq dto.ChatCompletionRequest
+	if err := json.Unmarshal(receivedBody, &upstreamReq); err != nil {
+		t.Errorf("bridge received invalid Chat JSON: %v, body=%s", err, string(receivedBody))
+	}
+	if upstreamReq.Model != "grok-4" {
+		t.Errorf("upstream model = %q, want %q", upstreamReq.Model, "grok-4")
+	}
+
+	var out dto.ChatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("failed to parse response: %v, body=%s", err, w.Body.String())
+	}
+	if out.Object != "chat.completion" {
+		t.Errorf("object = %q, want %q", out.Object, "chat.completion")
 	}
 }

@@ -1,8 +1,10 @@
 package runtimeconfig
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -349,6 +351,138 @@ func TestManagerApply(t *testing.T) {
 		t.Error("new model group should exist in config file after apply")
 	}
 }
+
+func TestManagerApply_OnCommittedReceivesBuiltResolver(t *testing.T) {
+	cfg, configPath := createTestConfig(t)
+
+	rebuilder := &mockRebuilder{shouldSucceed: true}
+	reinit := &mockReinit{}
+
+	mgr, err := NewManager(cfg, configPath, rebuilder, reinit)
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+
+	var committedCfg *config.Config
+	var committedResolver *model.Resolver
+	mgr.OnCommitted = func(newCfg *config.Config, newResolver *model.Resolver) {
+		committedCfg = newCfg
+		committedResolver = newResolver
+	}
+
+	_, err = mgr.CreateModelGroup(&ModelGroupInput{Name: "new-model", Model: "openai/gpt-4"})
+	if err != nil {
+		t.Fatalf("create model group: %v", err)
+	}
+
+	result := mgr.Apply()
+	if !result.Success {
+		t.Fatalf("apply failed: %s", result.Message)
+	}
+
+	if committedResolver == nil {
+		t.Fatal("OnCommitted must receive the resolver built by Apply")
+	}
+	if committedCfg == nil {
+		t.Fatal("OnCommitted must receive the committed active config")
+	}
+	found := false
+	for _, g := range committedCfg.ModelGroups {
+		if g.Name == "new-model" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("committed config should contain the applied model group")
+	}
+}
+
+// TestManagerApply_RejectsOversizedSpokeCallableEntries 验证启用顶层 Spoke Cascade 时，
+// 超过 1,000 个 public/hidden 可调用入口的 draft 在 runtime Apply 阶段被拒绝。
+func TestManagerApply_RejectsOversizedSpokeCallableEntries(t *testing.T) {
+	cfg, configPath := createTestConfig(t)
+	cfg.Cascade = &config.SpokeCascadeConfig{
+		Hub:   "https://api.example.com",
+		Token: "spoke-secret",
+		Peer:  "openai",
+	}
+
+	rebuilder := &mockRebuilder{shouldSucceed: true}
+	reinit := &mockReinit{}
+	mgr, err := NewManager(cfg, configPath, rebuilder, reinit)
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+
+	// 初始 2 个 group + 1 个 redirect 已计入；再添加 MaxMetadataSnapshotEntries 个
+	// public group，使入口总数必然超过 1,000。
+	for i := 0; i < config.MaxMetadataSnapshotEntries; i++ {
+		if _, err := mgr.CreateModelGroup(&ModelGroupInput{
+			Name:  fmt.Sprintf("group-%05d", i),
+			Model: "openai/gpt-4o",
+		}); err != nil {
+			t.Fatalf("create group %d: %v", i, err)
+		}
+	}
+
+	result := mgr.Apply()
+	if result.Success {
+		t.Fatal("apply must reject over-limit public/hidden callable entries")
+	}
+	if !strings.Contains(result.Message, "callable") {
+		t.Fatalf("apply message = %q, want callable entries rejection", result.Message)
+	}
+}
+
+func TestManagerApply_RejectsDeprecatedFieldsInAST(t *testing.T) {
+	cfg, configPath := createTestConfig(t)
+
+	rebuilder := &mockRebuilder{shouldSucceed: true}
+	reinit := &mockReinit{}
+
+	mgr, err := NewManager(cfg, configPath, rebuilder, reinit)
+	if err != nil {
+		t.Fatalf("create manager: %v", err)
+	}
+
+	deprecatedYAML := `
+server:
+  listen: ":18000"
+inbound:
+  auth:
+    keys:
+      - name: "test"
+        key: "sk-test"
+providers:
+  openai:
+    endpoint: "https://api.openai.com/v1"
+    api_key: "sk-xxx"
+    protocols: ["openai.chat"]
+    default_protocols: ["openai.chat"]
+model_groups:
+  - name: "gpt-4o"
+    models:
+      - "openai/gpt-4o"
+redirect:
+  gpt-4: gpt-4o
+`
+	if err := os.WriteFile(configPath, []byte(deprecatedYAML), 0644); err != nil {
+		t.Fatalf("write deprecated config: %v", err)
+	}
+	if err := mgr.store.Reload(); err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+
+	result := mgr.Apply()
+	if result.Success {
+		t.Fatal("expected apply to fail for deprecated AST fields")
+	}
+	if !strings.Contains(result.Message, "default_protocols") {
+		t.Fatalf("apply message = %q, want default_protocols rejection", result.Message)
+	}
+}
+
 func TestManagerApplyValidationFailed(t *testing.T) {
 	cfg, configPath := createTestConfig(t)
 
@@ -709,8 +843,8 @@ func TestToOutput(t *testing.T) {
 	contextLength := 4096
 
 	cfgGroup := config.ModelGroupConfig{
-		Name:    "test-group",
-		Mode:    "concurrent",
+		Name:     "test-group",
+		Mode:     "concurrent",
 		Exposure: exposurePtr(visible),
 		Models: []config.ModelEntry{
 			{Model: "openai/gpt-4", Weight: 2},
@@ -792,6 +926,97 @@ func TestManagerActiveKeys(t *testing.T) {
 	}
 	if !found {
 		t.Error("new key not found in ActiveKeys after apply")
+	}
+}
+
+func TestDeepCopyConfigRulesIsolation(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.RuleConfig{
+			{
+				Match: config.RuleMatch{
+					ClientModel: &config.RuleCondition{Op: "equals", Value: "gpt-4"},
+				},
+				Action: config.RuleAction{Protocol: "openai.chat"},
+			},
+			{
+				Match: config.RuleMatch{
+					ClientModel: &config.RuleCondition{Op: "equals", Value: "gpt-4"},
+				},
+				Action: config.RuleAction{Effort: []string{"high", "max"}},
+			},
+		},
+	}
+
+	copy := deepCopyConfig(cfg)
+
+	cfg.Rules[0].Action.Protocol = "anthropic.messages"
+	cfg.Rules[1].Action.Effort[0] = "low"
+	cfg.Rules = append(cfg.Rules, config.RuleConfig{
+		Action: config.RuleAction{Thinking: "on"},
+	})
+
+	if len(copy.Rules) != 2 {
+		t.Fatalf("copy rules len = %d, want 2", len(copy.Rules))
+	}
+	if copy.Rules[0].Action.Protocol != "openai.chat" {
+		t.Errorf("copy protocol = %q, want openai.chat", copy.Rules[0].Action.Protocol)
+	}
+	if copy.Rules[1].Action.Effort[0] != "high" {
+		t.Errorf("copy effort[0] = %q, want high", copy.Rules[1].Action.Effort[0])
+	}
+}
+
+func TestDeepCopyRuleAction_MaxTokensIsolation(t *testing.T) {
+	n := 2000
+	src := config.RuleAction{MaxTokens: &n}
+	got := deepCopyRuleAction(src)
+	n = 9
+	if got.MaxTokens == nil || *got.MaxTokens != 2000 {
+		t.Fatalf("deepCopyRuleAction aliases MaxTokens: got %v", got.MaxTokens)
+	}
+}
+
+func TestDeepCopyConfigCascadeIsolation(t *testing.T) {
+	cfg := &config.Config{
+		Cascade: &config.SpokeCascadeConfig{
+			Hub:   "https://hub.example.com",
+			Token: "spoke-token",
+			Peer:  "openai",
+		},
+		Providers: config.ProvidersConfig{
+			Items: map[string]config.ProviderConfig{
+				"corp-dev": {
+					Protocols: []string{"openai.chat", "openai.responses", "anthropic.messages"},
+					Cascade: &config.ProviderCascadeConfig{
+						Enabled: true,
+						Token:   "hub-token",
+					},
+				},
+			},
+		},
+	}
+
+	copy := deepCopyConfig(cfg)
+
+	cfg.Cascade.Hub = "https://modified.example.com"
+	cfg.Providers.Items["corp-dev"].Cascade.Token = "modified-token"
+
+	if copy.Cascade == nil {
+		t.Fatal("expected top-level cascade copy")
+	}
+	if copy.Cascade.Hub != "https://hub.example.com" {
+		t.Errorf("top-level hub = %q, want https://hub.example.com", copy.Cascade.Hub)
+	}
+
+	providerCopy := copy.Providers.Items["corp-dev"]
+	if providerCopy.Cascade == nil {
+		t.Fatal("expected provider cascade copy")
+	}
+	if providerCopy.Cascade.Token != "hub-token" {
+		t.Errorf("provider cascade token = %q, want hub-token", providerCopy.Cascade.Token)
+	}
+	if !providerCopy.Cascade.Enabled {
+		t.Error("expected provider cascade.enabled=true")
 	}
 }
 

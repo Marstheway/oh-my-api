@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,10 +40,10 @@ func TestLoadBalanceStrategy_SingleProvider(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -80,7 +83,7 @@ func TestLoadBalanceStrategy_NoHealthyProvider(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 
@@ -92,7 +95,7 @@ func TestLoadBalanceStrategy_NoHealthyProvider(t *testing.T) {
 	h.ReportFailure(health.MakeHealthKey("test", ""))
 	h.ReportFailure(health.MakeHealthKey("test", ""))
 
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -127,10 +130,10 @@ func TestLoadBalanceStrategy_ProtocolGranularityIsolation(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	// Mark response channel unhealthy only.
 	respKey := health.MakeHealthKey("token-hub", "openai.response")
@@ -158,7 +161,7 @@ func TestLoadBalanceStrategy_ProtocolGranularityIsolation(t *testing.T) {
 }
 
 func TestLoadBalanceStrategy_ProbeReadFailureMarksProviderUnhealthy(t *testing.T) {
-	rand.Seed(1)
+	rng := rand.New(rand.NewSource(1))
 
 	srv := newProbeReadFailureServer(t)
 	defer srv.Close()
@@ -172,10 +175,11 @@ func TestLoadBalanceStrategy_ProbeReadFailureMarksProviderUnhealthy(t *testing.T
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(1, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
+	strategy.randIntn = rng.Intn
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	_, err := strategy.Execute(context.Background(), []Task{{
@@ -221,10 +225,10 @@ func TestLoadBalanceStrategy_FailoverToNext(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, failSrv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
@@ -278,10 +282,10 @@ func TestLoadBalanceStrategy_WeightDistribution(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	// 执行多次请求，验证权重分布（随机策略用大样本）
 	for i := 0; i < 2000; i++ {
@@ -341,10 +345,10 @@ func TestLoadBalanceStrategy_WeightDistribution_FourProviders(t *testing.T) {
 		"venus-5":     {Endpoint: srvV5.URL, APIKey: "k", Protocols: []string{"openai"}, RateLimit: config.RateLimitConfig{QPM: 0}},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	for i := 0; i < 4000; i++ {
 		reqCP, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srvCP.URL, nil)
@@ -396,13 +400,13 @@ func TestLoadBalanceStrategy_AllRateLimited(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	// 消耗限流令牌
-	rl.Allow("test", "model")
+	rl.Allow("test", "model", 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -435,34 +439,28 @@ func TestLoadBalanceStrategy_RateLimitShouldNotBurnUnselectedTokens(t *testing.T
 
 	providers := map[string]config.ProviderConfig{
 		"a": {
-			Endpoint: srvA.URL,
-			APIKey:   "test-key",
+			Endpoint:  srvA.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			UpstreamModels: []config.UpstreamModelConfig{
-				{Model: "model", QPM: 60000},
-			},
 		},
 		"b": {
-			Endpoint: srvB.URL,
-			APIKey:   "test-key",
+			Endpoint:  srvB.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			UpstreamModels: []config.UpstreamModelConfig{
-				{Model: "model", QPM: 60000},
-			},
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	for i := 0; i < 20; i++ {
 		reqA, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srvA.URL, nil)
 		reqB, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srvB.URL, nil)
 		tasks := []Task{
-			{ProviderName: "a", Provider: providers["a"], UpstreamModel: "model", Request: reqA, Weight: 1},
-			{ProviderName: "b", Provider: providers["b"], UpstreamModel: "model", Request: reqB, Weight: 1},
+			{ProviderName: "a", Provider: providers["a"], UpstreamModel: "model", Request: reqA, Weight: 1, ModelQPM: 60000},
+			{ProviderName: "b", Provider: providers["b"], UpstreamModel: "model", Request: reqB, Weight: 1, ModelQPM: 60000},
 		}
 
 		result, err := strategy.Execute(context.Background(), tasks)
@@ -484,10 +482,10 @@ func TestLoadBalanceStrategy_NoTasks(t *testing.T) {
 	defer srv.Close()
 
 	providers := map[string]config.ProviderConfig{}
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	_, err := strategy.Execute(context.Background(), nil)
 	if err != ErrNoTasks {
@@ -511,10 +509,10 @@ func TestLoadBalanceStrategy_HealthReport(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	// 先标记为不健康
 	h.ReportFailure(health.MakeHealthKey("test", ""))
@@ -562,10 +560,10 @@ func TestLoadBalance_LogsProviderUpstreamPair(t *testing.T) {
 	slog.SetDefault(logger)
 	defer slog.SetDefault(old)
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -608,7 +606,7 @@ func TestLoadBalance_LogsProviderUpstreamPair(t *testing.T) {
 }
 
 func TestLoadBalanceStrategy_ContentFilterRetriesToNextSuccess(t *testing.T) {
-	rand.Seed(1)
+	rng := rand.New(rand.NewSource(1))
 
 	softSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -637,10 +635,11 @@ func TestLoadBalanceStrategy_ContentFilterRetriesToNextSuccess(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
+	strategy.randIntn = rng.Intn
 
 	softReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv.URL, nil)
 	successReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
@@ -664,7 +663,7 @@ func TestLoadBalanceStrategy_ContentFilterRetriesToNextSuccess(t *testing.T) {
 }
 
 func TestLoadBalanceStrategy_StreamSoftFailureClosesAbandonedBodyOnSuccess(t *testing.T) {
-	rand.Seed(1)
+	rng := rand.New(rand.NewSource(1))
 
 	softContinue := make(chan struct{}, 1)
 	softClosed := make(chan struct{}, 1)
@@ -729,10 +728,11 @@ func TestLoadBalanceStrategy_StreamSoftFailureClosesAbandonedBodyOnSuccess(t *te
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
+	strategy.randIntn = rng.Intn
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -777,7 +777,7 @@ func TestLoadBalanceStrategy_StreamSoftFailureClosesAbandonedBodyOnSuccess(t *te
 }
 
 func TestLoadBalanceStrategy_SoftFailureReturnsLaterHardFailureAndKeepsHealth(t *testing.T) {
-	rand.Seed(1)
+	rng := rand.New(rand.NewSource(1))
 
 	softSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -806,10 +806,11 @@ func TestLoadBalanceStrategy_SoftFailureReturnsLaterHardFailureAndKeepsHealth(t 
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
+	strategy.randIntn = rng.Intn
 
 	softReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv.URL, nil)
 	hardReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, hardSrv.URL, nil)
@@ -839,7 +840,7 @@ func TestLoadBalanceStrategy_SoftFailureReturnsLaterHardFailureAndKeepsHealth(t 
 }
 
 func TestLoadBalanceStrategy_SoftFailureWithRateLimitedCandidatesReturnsSoft(t *testing.T) {
-	rand.Seed(1)
+	rng := rand.New(rand.NewSource(1))
 
 	softSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -868,12 +869,13 @@ func TestLoadBalanceStrategy_SoftFailureWithRateLimitedCandidatesReturnsSoft(t *
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
+	strategy.randIntn = rng.Intn
 
-	if !rl.Allow("rate-limited", "model") {
+	if !rl.Allow("rate-limited", "model", 0) {
 		t.Fatal("failed to exhaust rate-limited provider token")
 	}
 
@@ -899,7 +901,7 @@ func TestLoadBalanceStrategy_SoftFailureWithRateLimitedCandidatesReturnsSoft(t *
 }
 
 func TestLoadBalanceStrategy_SoftFailureRemovesSelectedCandidateOnly(t *testing.T) {
-	rand.Seed(1)
+	rng := rand.New(rand.NewSource(1))
 
 	softCalls := 0
 	softSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -926,10 +928,11 @@ func TestLoadBalanceStrategy_SoftFailureRemovesSelectedCandidateOnly(t *testing.
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
+	strategy.randIntn = rng.Intn
 
 	successReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
 	softReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv.URL, nil)
@@ -981,10 +984,10 @@ func TestLoadBalanceStrategy_ProviderUnhealthyRemovesSiblingTasksInSameRequest(t
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(1, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	failingReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, failingSrv.URL, nil)
 	siblingReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, siblingSrv.URL, nil)
@@ -1056,10 +1059,10 @@ func TestLoadBalanceStrategy_ProviderUnhealthyRemovesInterleavedSiblingTasksInSa
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(1, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	failingReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, failingSrv.URL, nil)
 	otherReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, otherSrv.URL, nil)
@@ -1160,10 +1163,10 @@ func TestLoadBalanceStrategy_SoftFailureReturnsLastSoftFailureResponse(t *testin
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv1.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv2.URL, nil)
@@ -1190,7 +1193,7 @@ func TestLoadBalanceStrategy_SoftFailureReturnsLastSoftFailureResponse(t *testin
 }
 
 func TestLoadBalanceStrategy_SoftFailureDoesNotResetOrIncreaseHealthCount(t *testing.T) {
-	rand.Seed(1)
+	rng := rand.New(rand.NewSource(1))
 
 	softSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1213,10 +1216,11 @@ func TestLoadBalanceStrategy_SoftFailureDoesNotResetOrIncreaseHealthCount(t *tes
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
+	strategy.randIntn = rng.Intn
 	healthKey := health.MakeHealthKey("soft-neutral", "")
 
 	h.ReportFailure(healthKey)
@@ -1298,10 +1302,10 @@ func TestLoadBalanceStrategy_AttemptMetrics_HardFailureThenSuccess(t *testing.T)
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, failSrv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
@@ -1360,10 +1364,10 @@ func TestLoadBalanceStrategy_AttemptMetrics_SoftFailure(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, softSrv.URL, nil)
 	tasks := []Task{
@@ -1389,9 +1393,9 @@ func TestLoadBalanceStrategy_AttemptMetrics_SoftFailure(t *testing.T) {
 	}
 }
 
-// TestLoadBalanceStrategy_TokenHubQuotaError_FiltersUnhealthyProvider 验证 load-balance 模式下
-// TokenHub provider 被标记为不健康后，filterHealthy 将其排除
-func TestLoadBalanceStrategy_TokenHubQuotaError_FiltersUnhealthyProvider(t *testing.T) {
+// TestLoadBalanceStrategy_TencentQuotaError_FiltersUnhealthyProvider 验证 load-balance 模式下
+// 腾讯云 provider 被标记为不健康后，filterHealthy 将其排除
+func TestLoadBalanceStrategy_TencentQuotaError_FiltersUnhealthyProvider(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"id":"ok"}`))
@@ -1413,15 +1417,15 @@ func TestLoadBalanceStrategy_TokenHubQuotaError_FiltersUnhealthyProvider(t *test
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
 
-	// 模拟 TokenHub 额度错误后标记为 1 小时不健康
+	// 模拟腾讯云额度错误后标记为不健康
 	healthKey := health.MakeHealthKey("token-hub", "openai")
 	h.MarkUnhealthyFor(healthKey, 1*time.Hour)
 
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -1454,30 +1458,28 @@ func TestLoadBalanceStrategy_AllHealthyProvidersDisabled(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-1": {
-			Endpoint:           srv.URL,
-			APIKey:             "test-key",
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 		"disabled-2": {
-			Endpoint:           srv.URL,
-			APIKey:             "test-key",
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
-		{ProviderName: "disabled-1", Provider: providers["disabled-1"], UpstreamModel: "model", Request: req, Weight: 1},
-		{ProviderName: "disabled-2", Provider: providers["disabled-2"], UpstreamModel: "model", Request: req, Weight: 1},
+		{ProviderName: "disabled-1", Provider: providers["disabled-1"], UpstreamModel: "model", Request: req, Weight: 1, DisableTimeRange: []string{"00:00-24:00"}},
+		{ProviderName: "disabled-2", Provider: providers["disabled-2"], UpstreamModel: "model", Request: req, Weight: 1, DisableTimeRange: []string{"00:00-24:00"}},
 	}
 
 	_, err := strategy.Execute(context.Background(), tasks)
@@ -1503,11 +1505,10 @@ func TestLoadBalanceStrategy_FilterDisabledProvider(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-prov": {
-			Endpoint:           disabledSrv.URL,
-			APIKey:             "test-key",
+			Endpoint:  disabledSrv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 		"enabled-prov": {
 			Endpoint:  successSrv.URL,
@@ -1517,15 +1518,15 @@ func TestLoadBalanceStrategy_FilterDisabledProvider(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewLoadBalanceStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	disabledReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, disabledSrv.URL, nil)
 	successReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
 	tasks := []Task{
-		{ProviderName: "disabled-prov", Provider: providers["disabled-prov"], UpstreamModel: "model", Request: disabledReq, Weight: 100},
+		{ProviderName: "disabled-prov", Provider: providers["disabled-prov"], UpstreamModel: "model", Request: disabledReq, Weight: 100, DisableTimeRange: []string{"00:00-24:00"}},
 		{ProviderName: "enabled-prov", Provider: providers["enabled-prov"], UpstreamModel: "model", Request: successReq, Weight: 1},
 	}
 
@@ -1538,4 +1539,273 @@ func TestLoadBalanceStrategy_FilterDisabledProvider(t *testing.T) {
 	if result.Winner != "enabled-prov" {
 		t.Errorf("winner = %q, want %q (disabled provider should be filtered out)", result.Winner, "enabled-prov")
 	}
+}
+
+func TestUpstreamErrorLogAttrs_SummarizesAndRestoresBody(t *testing.T) {
+	response := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Body:       io.NopCloser(strings.NewReader("{\n  \"error\": \"bad request\"\n}")),
+	}
+	result := &Result{Response: response}
+
+	attrs := upstreamErrorLogAttrs([]any{"reason", failureReasonHTTPStatus}, result)
+	if len(attrs) != 4 || attrs[2] != "upstream_error" || attrs[3] != `{ "error": "bad request" }` {
+		t.Fatalf("unexpected log attributes: %#v", attrs)
+	}
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read restored response body: %v", err)
+	}
+	if string(body) != "{\n  \"error\": \"bad request\"\n}" {
+		t.Errorf("restored response body = %q", body)
+	}
+}
+
+func TestParseRequestBodyDiagAttrs_ExtractsToolAndThinking(t *testing.T) {
+	body := []byte(`{
+		"model":"deepseek-v4-pro",
+		"tool_choice":"required",
+		"thinking":{"type":"enabled"},
+		"reasoning_effort":"high",
+		"parallel_tool_calls":true,
+		"tools":[{"type":"function","function":{"name":"a"}},{"type":"function","function":{"name":"b"}}],
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	attrs := ParseRequestBodyDiagAttrs(body)
+	got := attrsToMap(attrs)
+
+	// json.Compact 保留 JSON string 的引号
+	if got["req_tool_choice"] != `"required"` {
+		t.Fatalf("req_tool_choice = %#v, want %q", got["req_tool_choice"], `"required"`)
+	}
+	if got["req_thinking"] != `{"type":"enabled"}` {
+		t.Fatalf("req_thinking = %#v, want compact object", got["req_thinking"])
+	}
+	if got["req_reasoning_effort"] != `"high"` {
+		t.Fatalf("req_reasoning_effort = %#v, want %q", got["req_reasoning_effort"], `"high"`)
+	}
+	if got["req_parallel_tool_calls"] != "true" {
+		t.Fatalf("req_parallel_tool_calls = %#v, want true", got["req_parallel_tool_calls"])
+	}
+	if got["req_tools_count"] != 2 {
+		t.Fatalf("req_tools_count = %#v, want 2", got["req_tools_count"])
+	}
+	if got["req_messages_count"] != 1 {
+		t.Fatalf("req_messages_count = %#v, want 1", got["req_messages_count"])
+	}
+	if got["req_body_bytes"] != len(body) {
+		t.Fatalf("req_body_bytes = %#v, want %d", got["req_body_bytes"], len(body))
+	}
+	// 不应把 messages 正文塞进 attr key
+	for k := range got {
+		if strings.Contains(k, "content") {
+			t.Fatalf("unexpected content-related attr key %q", k)
+		}
+	}
+}
+
+func TestParseRequestBodyDiagAttrs_NonArrayToolsAndMessages(t *testing.T) {
+	body := []byte(`{"tools":{"type":"broken"},"messages":"not-an-array"}`)
+	got := attrsToMap(ParseRequestBodyDiagAttrs(body))
+	if _, ok := got["req_tools_count"]; ok {
+		t.Fatalf("req_tools_count should be omitted for non-array, got %#v", got["req_tools_count"])
+	}
+	if got["req_tools_kind"] != "non_array" {
+		t.Fatalf("req_tools_kind = %#v, want non_array", got["req_tools_kind"])
+	}
+	if _, ok := got["req_messages_count"]; ok {
+		t.Fatalf("req_messages_count should be omitted for non-array, got %#v", got["req_messages_count"])
+	}
+	if got["req_messages_kind"] != "non_array" {
+		t.Fatalf("req_messages_kind = %#v, want non_array", got["req_messages_kind"])
+	}
+}
+
+func TestParseRequestBodyDiagAttrs_ResponsesInputReasoningCounts(t *testing.T) {
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"function_call","call_id":"call-1","name":"a","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call-1","output":"x"}
+		]
+	}`)
+	got := attrsToMap(ParseRequestBodyDiagAttrs(body))
+	if got["req_input_count"] != 3 {
+		t.Fatalf("req_input_count = %#v, want 3", got["req_input_count"])
+	}
+	if got["req_input_reasoning_count"] != 0 {
+		t.Fatalf("req_input_reasoning_count = %#v, want 0", got["req_input_reasoning_count"])
+	}
+	if got["req_input_function_call_count"] != 1 {
+		t.Fatalf("req_input_function_call_count = %#v, want 1", got["req_input_function_call_count"])
+	}
+}
+
+func TestParseRequestBodyDiagAttrs_ResponsesInputWithReasoning(t *testing.T) {
+	body := []byte(`{
+		"model":"deepseek-v4-flash",
+		"input":[
+			{"type":"reasoning","id":"rs-1","content":[{"type":"reasoning_text","text":"think"}]},
+			{"type":"function_call","call_id":"call-1","name":"a","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call-1","output":"x"}
+		]
+	}`)
+	got := attrsToMap(ParseRequestBodyDiagAttrs(body))
+	if got["req_input_reasoning_count"] != 1 {
+		t.Fatalf("req_input_reasoning_count = %#v, want 1", got["req_input_reasoning_count"])
+	}
+	if got["req_input_function_call_count"] != 1 {
+		t.Fatalf("req_input_function_call_count = %#v, want 1", got["req_input_function_call_count"])
+	}
+}
+
+func TestParseRequestBodyDiagAttrs_ResponsesInputStringNoCounts(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-flash","input":"hello"}`)
+	got := attrsToMap(ParseRequestBodyDiagAttrs(body))
+	if got["req_input_count"] != nil {
+		t.Fatalf("req_input_count should be omitted for string input, got %#v", got["req_input_count"])
+	}
+	if got["req_input_kind"] != "non_array" {
+		t.Fatalf("req_input_kind = %#v, want non_array", got["req_input_kind"])
+	}
+	if got["req_input_reasoning_count"] != nil {
+		t.Fatalf("req_input_reasoning_count should be omitted for string input, got %#v", got["req_input_reasoning_count"])
+	}
+}
+
+func TestUpstreamErrorLogAttrs_IncludesRequestDiag(t *testing.T) {
+	reqBody := []byte(`{"tool_choice":{"type":"function","function":{"name":"run"}},"thinking":{"type":"enabled"},"tools":[{}]}`)
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyCopy := append([]byte(nil), reqBody...)
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(bodyCopy)), nil
+	}
+
+	response := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Body:       io.NopCloser(strings.NewReader(`{"error":"Thinking mode does not support this tool_choice"}`)),
+		Request:    req,
+	}
+	attrs := upstreamErrorLogAttrs(nil, &Result{Response: response})
+	got := attrsToMap(attrs)
+	if got["upstream_error"] == nil || !strings.Contains(fmt.Sprint(got["upstream_error"]), "tool_choice") {
+		t.Fatalf("upstream_error = %#v", got["upstream_error"])
+	}
+	if !strings.Contains(fmt.Sprint(got["req_tool_choice"]), "function") {
+		t.Fatalf("req_tool_choice = %#v", got["req_tool_choice"])
+	}
+	if !strings.Contains(fmt.Sprint(got["req_thinking"]), "enabled") {
+		t.Fatalf("req_thinking = %#v", got["req_thinking"])
+	}
+	if got["req_tools_count"] != 1 {
+		t.Fatalf("req_tools_count = %#v", got["req_tools_count"])
+	}
+}
+
+func attrsToMap(attrs []any) map[string]any {
+	m := make(map[string]any, len(attrs)/2)
+	for i := 0; i+1 < len(attrs); i += 2 {
+		k, ok := attrs[i].(string)
+		if !ok {
+			continue
+		}
+		m[k] = attrs[i+1]
+	}
+	return m
+}
+
+func TestUpstreamErrorLogAttrs_Truncates(t *testing.T) {
+	if got := summarizeUpstreamError([]byte("abcdef"), 4); got != "abcd..." {
+		t.Errorf("upstream_error = %q, want %q", got, "abcd...")
+	}
+}
+
+func TestUpstreamErrorLogAttrs_BoundsReadAndPreservesBody(t *testing.T) {
+	body := strings.Repeat("x", maxUpstreamErrorLogBytes*2)
+	original := &trackingReadCloser{reader: strings.NewReader(body)}
+	response := &http.Response{StatusCode: http.StatusBadGateway, Body: original}
+
+	upstreamErrorLogAttrs(nil, &Result{Response: response})
+	if original.readBytes > maxUpstreamErrorLogBytes {
+		t.Fatalf("log read %d bytes, want at most %d", original.readBytes, maxUpstreamErrorLogBytes)
+	}
+
+	restored, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read restored response body: %v", err)
+	}
+	if string(restored) != body {
+		t.Fatal("restored response body does not match original")
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatalf("close restored response body: %v", err)
+	}
+	if !original.closed {
+		t.Fatal("original response body was not closed")
+	}
+}
+
+func TestUpstreamErrorLogAttrs_PreservesPartialBodyOnReadError(t *testing.T) {
+	original := &partialErrorReadCloser{data: []byte("partial upstream error")}
+	response := &http.Response{StatusCode: http.StatusBadGateway, Body: original}
+
+	attrs := upstreamErrorLogAttrs(nil, &Result{Response: response})
+	if len(attrs) != 2 || attrs[0] != "upstream_error" || attrs[1] != "partial upstream error" {
+		t.Fatalf("unexpected log attributes: %#v", attrs)
+	}
+
+	restored, err := io.ReadAll(response.Body)
+	if string(restored) != "partial upstream error" {
+		t.Errorf("restored response body = %q", restored)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("read restored response body error = %v, want %v", err, io.ErrUnexpectedEOF)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatalf("close restored response body: %v", err)
+	}
+	if !original.closed {
+		t.Fatal("original response body was not closed")
+	}
+}
+
+type trackingReadCloser struct {
+	reader    *strings.Reader
+	readBytes int
+	closed    bool
+}
+
+func (r *trackingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.readBytes += n
+	return n, err
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
+type partialErrorReadCloser struct {
+	data   []byte
+	read   bool
+	closed bool
+}
+
+func (r *partialErrorReadCloser) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, io.ErrUnexpectedEOF
+	}
+	r.read = true
+	return copy(p, r.data), nil
+}
+
+func (r *partialErrorReadCloser) Close() error {
+	r.closed = true
+	return nil
 }

@@ -221,6 +221,20 @@ func TestOpenAIAdaptor_BuildRequest_UsesResponsePath(t *testing.T) {
 	}
 }
 
+func TestOpenAIAdaptor_BuildRequest_NoKey(t *testing.T) {
+	adaptor := &OpenAIAdaptor{}
+	provider := &config.ProviderConfig{
+		Endpoint: "http://127.0.0.1:35527/responses",
+		APIKey:   "",
+	}
+
+	httpReq := adaptor.BuildRequest(context.Background(), provider, "hy3-ioa", bytes.NewReader([]byte(`{"model":"hy3-ioa"}`)), ProtocolOpenAIResponse)
+
+	if got := httpReq.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization should not be set when api_key is empty, got %q", got)
+	}
+}
+
 func TestAnthropicAdaptor_BuildRequest(t *testing.T) {
 	adaptor := &AnthropicAdaptor{}
 	provider := &config.ProviderConfig{
@@ -398,6 +412,12 @@ func TestBuildURL(t *testing.T) {
 		{
 			name:     "anthropic with trailing slash",
 			endpoint: "https://api.anthropic.com/",
+			protocol: ProtocolAnthropic,
+			want:     "https://api.anthropic.com/v1/messages",
+		},
+		{
+			name:     "anthropic with v1 path",
+			endpoint: "https://api.anthropic.com/v1",
 			protocol: ProtocolAnthropic,
 			want:     "https://api.anthropic.com/v1/messages",
 		},
@@ -745,6 +765,103 @@ func TestBuildURL_OllamaChat_TrailingSlash(t *testing.T) {
 	want := "http://localhost:11434/api/chat"
 	if got != want {
 		t.Fatalf("BuildURL() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildCatalogURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		protocol Protocol
+		want     string
+	}{
+		{
+			name:     "openai without path",
+			endpoint: "https://api.openai.com",
+			protocol: ProtocolOpenAI,
+			want:     "https://api.openai.com/v1/models",
+		},
+		{
+			name:     "openai with v1 path",
+			endpoint: "https://api.openai.com/v1",
+			protocol: ProtocolOpenAI,
+			want:     "https://api.openai.com/v1/models",
+		},
+		{
+			name:     "openai with custom path",
+			endpoint: "https://api.example.com/v3",
+			protocol: ProtocolOpenAI,
+			want:     "https://api.example.com/v3/models",
+		},
+		{
+			name:     "openai full chat/completions URL",
+			endpoint: "https://api.openai.com/v1/chat/completions",
+			protocol: ProtocolOpenAI,
+			want:     "https://api.openai.com/v1/models",
+		},
+		{
+			name:     "anthropic without path",
+			endpoint: "https://api.anthropic.com",
+			protocol: ProtocolAnthropic,
+			want:     "https://api.anthropic.com/v1/models",
+		},
+		{
+			name:     "anthropic with v1 path",
+			endpoint: "https://api.anthropic.com/v1",
+			protocol: ProtocolAnthropic,
+			want:     "https://api.anthropic.com/v1/models",
+		},
+		{
+			name:     "anthropic with custom path",
+			endpoint: "https://api.lkeap.cloud.tencent.com/coding/anthropic",
+			protocol: ProtocolAnthropic,
+			want:     "https://api.lkeap.cloud.tencent.com/coding/anthropic/v1/models",
+		},
+		{
+			name:     "ollama root",
+			endpoint: "http://127.0.0.1:11434",
+			protocol: ProtocolOllamaChat,
+			want:     "http://127.0.0.1:11434/api/tags",
+		},
+		{
+			name:     "ollama with /api/chat path",
+			endpoint: "http://127.0.0.1:11434/api/chat",
+			protocol: ProtocolOllamaChat,
+			want:     "http://127.0.0.1:11434/api/tags",
+		},
+		{
+			name:     "openai response protocol",
+			endpoint: "https://api.openai.com",
+			protocol: ProtocolOpenAIResponse,
+			want:     "https://api.openai.com/v1/models",
+		},
+		{
+			name:     "openai response with full URL",
+			endpoint: "https://api.openai.com/v1/responses",
+			protocol: ProtocolOpenAIResponse,
+			want:     "https://api.openai.com/v1/models",
+		},
+		{
+			name:     "non-standard full chat URL (venus)",
+			endpoint: "http://v2.open.venus.oa.com/llmproxy/chat/completions",
+			protocol: ProtocolOpenAI,
+			want:     "http://v2.open.venus.oa.com/llmproxy/models",
+		},
+		{
+			name:     "endpoint already has /v1/models",
+			endpoint: "https://api.openai.com/v1/models",
+			protocol: ProtocolOpenAI,
+			want:     "https://api.openai.com/v1/models",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildCatalogURL(tt.endpoint, tt.protocol)
+			if got != tt.want {
+				t.Errorf("BuildCatalogURL(%q, %q) = %q, want %q", tt.endpoint, tt.protocol, got, tt.want)
+			}
+		})
 	}
 }
 

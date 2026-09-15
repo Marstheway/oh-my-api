@@ -8,44 +8,44 @@ import (
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
-	"github.com/gin-gonic/gin"
 )
 
-func writeClaudeEvent(c *gin.Context, event dto.ClaudeStreamEvent) error {
+func writeClaudeEvent(w http.ResponseWriter, event dto.ClaudeStreamEvent) error {
 	data, err := json.Marshal(event)
 	if err != nil {
 		return err
 	}
 	if event.Type != "" {
-		if _, err := fmt.Fprintf(c.Writer, "event: %s\n", event.Type); err != nil {
+		if _, err := fmt.Fprintf(w, "event: %s\n", event.Type); err != nil {
 			return err
 		}
 	}
-	if _, err := fmt.Fprintf(c.Writer, "data: %s\n\n", data); err != nil {
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
 		return err
 	}
-	if flusher, ok := c.Writer.(http.Flusher); ok {
+	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
 	return nil
 }
 
-func writeResponsesStreamAsClaudeStream(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
+func writeResponsesStreamAsClaudeStream(w http.ResponseWriter, resp *http.Response, counter TokenCounter, requestedModel string) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	mapper1 := newResponsesToChatStreamMapper("", requestedModel, 0)
-	mapper2 := newChatToClaudeStreamMapper()
-	mapper2.requestedModel = requestedModel
+	mapper2 := newChatToClaudeStreamMapper(requestedModel)
 
 	err := scanSSEData(resp.Body, func(data string) error {
-		var event dto.ResponsesStreamEvent
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
+		res, err := normalizeResponsesEventData([]byte(data))
+		if err != nil {
 			return WrapConversionError("stream_event", "response_to_chat_stream", FormatOpenAIResponse, FormatAnthropicMessages, "invalid_stream_event", err)
 		}
+		event := res.Event
+
 		if counter != nil {
 			if sc, ok := counter.(*token.StreamCounter); ok {
 				switch event.Type {
@@ -60,7 +60,7 @@ func writeResponsesStreamAsClaudeStream(c *gin.Context, resp *http.Response, cou
 				}
 			}
 		}
-		chunks, err := mapper1.Map(event)
+		chunks, err := mapper1.Map(*event)
 		if err != nil {
 			return err
 		}
@@ -70,7 +70,7 @@ func writeResponsesStreamAsClaudeStream(c *gin.Context, resp *http.Response, cou
 				return err
 			}
 			for _, out := range events {
-				if err := writeClaudeEvent(c, out); err != nil {
+				if err := writeClaudeEvent(w, out); err != nil {
 					return err
 				}
 			}
@@ -81,6 +81,19 @@ func writeResponsesStreamAsClaudeStream(c *gin.Context, resp *http.Response, cou
 		var convErr *ConversionError
 		if !errors.As(err, &convErr) {
 			err = WrapConversionError("write_response", "response_to_chat", FormatOpenAIResponse, FormatAnthropicMessages, "stream_read", err)
+		}
+	}
+
+	// 流结束，调用 mapper2 Flush 发送剩余的 message_stop
+	if err == nil {
+		events, flushErr := mapper2.Flush()
+		if flushErr != nil {
+			return flushErr
+		}
+		for _, out := range events {
+			if writeErr := writeClaudeEvent(w, out); writeErr != nil {
+				return writeErr
+			}
 		}
 	}
 

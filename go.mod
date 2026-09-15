@@ -4,6 +4,7 @@ go 1.25.7
 
 require (
 	github.com/gin-gonic/gin v1.12.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/prometheus/client_golang v1.21.1

@@ -69,13 +69,14 @@ type ResponsesResponse struct {
 
 // ResponsesUsage 记录 token 用量。
 type ResponsesUsage struct {
-	InputTokens             int                       `json:"input_tokens"`
-	OutputTokens            int                       `json:"output_tokens"`
-	TotalTokens             int                       `json:"total_tokens"`
-	ReasoningTokens         int                       `json:"reasoning_tokens,omitempty"`
-	CachedTokens            int                       `json:"cached_tokens,omitempty"`
-	InputTokensDetails      *ResponsesUsageDetails    `json:"input_tokens_details,omitempty"`
-	CompletionTokensDetails *ResponsesUsageDetails    `json:"completion_tokens_details,omitempty"`
+	InputTokens             int                    `json:"input_tokens"`
+	OutputTokens            int                    `json:"output_tokens"`
+	TotalTokens             int                    `json:"total_tokens"`
+	ReasoningTokens         int                    `json:"reasoning_tokens,omitempty"`
+	CachedTokens            int                    `json:"cached_tokens,omitempty"`
+	InputTokensDetails      *ResponsesUsageDetails `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails     *ResponsesUsageDetails `json:"output_tokens_details,omitempty"`
+	CompletionTokensDetails *ResponsesUsageDetails `json:"completion_tokens_details,omitempty"`
 }
 
 // ResponsesUsageDetails 记录 Responses usage 细节字段。
@@ -133,11 +134,14 @@ type ResponsesContentPart struct {
 type ResponsesStreamEvent struct {
 	Type         string          `json:"type"`
 	Delta        json.RawMessage `json:"delta,omitempty"`
+	Text         *string         `json:"text,omitempty"`
 	ItemID       string          `json:"item_id,omitempty"`
 	OutputIndex  *int            `json:"output_index,omitempty"`
 	ContentIndex *int            `json:"content_index,omitempty"`
 	Response     json.RawMessage `json:"response,omitempty"`
 	Item         json.RawMessage `json:"item,omitempty"`
+	// Error 仅用于 response.failed 等事件，部分上游会在顶层携带错误结构。
+	Error json.RawMessage `json:"error,omitempty"`
 }
 
 // IncompleteDetails 说明响应未完成的原因。

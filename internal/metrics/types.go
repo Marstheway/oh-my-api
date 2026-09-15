@@ -2,15 +2,15 @@ package metrics
 
 // RequestInfo 请求埋点信息
 type RequestInfo struct {
-	InboundProtocol  string // 例如 "openai.chat" / "anthropic.messages" / "openai.response"
-	OutboundProtocol string // 例如 "openai" / "anthropic" / "openai.response"
-	Provider         string
-	UpstreamModel    string
-	ModelGroup       string
-	KeyName          string
-	Status              string  // "success" / "error"
-	Duration            float64 // 秒（端到端延迟）
-	FirstTokenDuration  float64 // 秒（首 token 延迟，仅流式请求；0 表示无）
+	InboundProtocol    string // 例如 "openai.chat" / "anthropic.messages" / "openai.response"
+	OutboundProtocol   string // 例如 "openai" / "anthropic" / "openai.response"
+	Provider           string
+	UpstreamModel      string
+	ModelGroup         string
+	KeyName            string
+	Status             string  // "success" / "error"
+	Duration           float64 // 秒（端到端延迟）
+	FirstTokenDuration float64 // 秒（单次上游尝试端到端首个 SSE 事件延迟，仅流式请求；0 表示无）
 }
 
 // ProviderAttemptInfo Provider 尝试埋点信息

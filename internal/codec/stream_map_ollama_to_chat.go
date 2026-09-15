@@ -12,7 +12,6 @@ import (
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
-	"github.com/gin-gonic/gin"
 )
 
 // scanOllamaChatStream 按行扫描 Ollama /api/chat 流式响应，每行是一个完整 JSON chunk。
@@ -148,17 +147,17 @@ func buildOpenAIStreamUsageChunk(base dto.ChatCompletionChunk, usage dto.Usage) 
 }
 
 // writeOllamaChatStreamAsOpenAIStream 读取 Ollama 行流，转换为 OpenAI Chat SSE 流写回客户端。
-func writeOllamaChatStreamAsOpenAIStream(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
-	flusher, ok := c.Writer.(http.Flusher)
+func writeOllamaChatStreamAsOpenAIStream(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
 	}
 
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	err := scanOllamaChatStream(resp.Body, func(chunk dto.ChatCompletionChunk) error {
 		if rmc.RequestedModel != "" {
@@ -187,7 +186,7 @@ func writeOllamaChatStreamAsOpenAIStream(c *gin.Context, resp *http.Response, co
 		if marshalErr != nil {
 			return marshalErr
 		}
-		if _, writeErr := fmt.Fprintf(c.Writer, "data: %s\n\n", data); writeErr != nil {
+		if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", data); writeErr != nil {
 			return writeErr
 		}
 		if usageChunk != nil {
@@ -195,7 +194,7 @@ func writeOllamaChatStreamAsOpenAIStream(c *gin.Context, resp *http.Response, co
 			if usageMarshalErr != nil {
 				return usageMarshalErr
 			}
-			if _, writeErr := fmt.Fprintf(c.Writer, "data: %s\n\n", usageData); writeErr != nil {
+			if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", usageData); writeErr != nil {
 				return writeErr
 			}
 		}
@@ -207,7 +206,7 @@ func writeOllamaChatStreamAsOpenAIStream(c *gin.Context, resp *http.Response, co
 	}
 
 	// 发送 [DONE] 终止标记
-	_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
+	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
 	if counter != nil {
@@ -220,15 +219,14 @@ func writeOllamaChatStreamAsOpenAIStream(c *gin.Context, resp *http.Response, co
 }
 
 // writeOllamaChatStreamAsAnthropicStream 读取 Ollama 行流，转换为 Anthropic SSE 流写回客户端。
-func writeOllamaChatStreamAsAnthropicStream(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
+func writeOllamaChatStreamAsAnthropicStream(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	mapper := newChatToClaudeStreamMapper()
-	mapper.requestedModel = rmc.RequestedModel
+	mapper := newChatToClaudeStreamMapper(rmc.RequestedModel)
 
 	err := scanOllamaChatStream(resp.Body, func(chunk dto.ChatCompletionChunk) error {
 		if counter != nil {
@@ -241,12 +239,25 @@ func writeOllamaChatStreamAsAnthropicStream(c *gin.Context, resp *http.Response,
 			return mapErr
 		}
 		for _, event := range events {
-			if writeErr := writeClaudeEvent(c, event); writeErr != nil {
+			if writeErr := writeClaudeEvent(w, event); writeErr != nil {
 				return writeErr
 			}
 		}
 		return nil
 	})
+
+	// 流结束，调用 Flush 发送剩余的 message_stop
+	if err == nil {
+		events, flushErr := mapper.Flush()
+		if flushErr != nil {
+			return flushErr
+		}
+		for _, event := range events {
+			if writeErr := writeClaudeEvent(w, event); writeErr != nil {
+				return writeErr
+			}
+		}
+	}
 
 	if counter != nil {
 		if sc, ok := counter.(*token.StreamCounter); ok {
@@ -258,12 +269,13 @@ func writeOllamaChatStreamAsAnthropicStream(c *gin.Context, resp *http.Response,
 }
 
 // writeOllamaChatStreamAsResponsesStream 读取 Ollama 行流，转换为 OpenAI Responses API SSE 流写回客户端。
-func writeOllamaChatStreamAsResponsesStream(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
+func writeOllamaChatStreamAsResponsesStream(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
 
 	mapper := newChatToResponsesStreamMapper("", rmc.RequestedModel)
+	writer := newResponsesStreamWriter(w)
 
 	err := scanOllamaChatStream(resp.Body, func(chunk dto.ChatCompletionChunk) error {
 		if counter != nil {
@@ -276,12 +288,25 @@ func writeOllamaChatStreamAsResponsesStream(c *gin.Context, resp *http.Response,
 			return mapErr
 		}
 		for _, event := range events {
-			if writeErr := writeResponsesEvent(c, event); writeErr != nil {
+			if writeErr := writer.writeEvent(event); writeErr != nil {
 				return writeErr
 			}
 		}
 		return nil
 	})
+
+	// 流结束，调用 Flush 发送剩余的 response.completed
+	if err == nil {
+		events, flushErr := mapper.Flush()
+		if flushErr != nil {
+			return flushErr
+		}
+		for _, event := range events {
+			if writeErr := writer.writeEvent(event); writeErr != nil {
+				return writeErr
+			}
+		}
+	}
 
 	if counter != nil {
 		if sc, ok := counter.(*token.StreamCounter); ok {

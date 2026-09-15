@@ -44,6 +44,15 @@ func runTest(configPath, internalName string) {
 		os.Exit(1)
 	}
 
+	// OAuth bridge provider 不能通过 cmd test 直接测试，
+	// 它仅支持通过 /v1/responses 网关路径验证。
+	if providerCfg.RemoteBridge != nil && providerCfg.RemoteBridge.Enabled {
+		fmt.Printf("Error: provider '%s' is an OAuth bridge provider.\n", providerName)
+		fmt.Println("OAuth bridge providers only support requests through the gateway /v1/responses path.")
+		fmt.Println("Please use an actual /v1/responses request or a dedicated test method instead.")
+		os.Exit(1)
+	}
+
 	// 默认 120 秒
 	timeout := 120 * time.Second
 	if cfg.Server.Timeout != "" {
@@ -54,7 +63,7 @@ func runTest(configPath, internalName string) {
 
 	client := provider.NewClient(map[string]config.ProviderConfig{
 		providerName: providerCfg,
-	}, timeout, 0)
+	}, timeout, 0, 0)
 
 	testReq := &dto.ChatCompletionRequest{
 		Model: upstreamModel,

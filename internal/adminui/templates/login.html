@@ -1,9 +1,23 @@
 {{ define "title" }}Login{{ end }}
 
 {{ define "styles" }}
+  /* 登录页装饰强度按主题微调 */
+  :root {
+    --halo: rgba(180,83,9,0.07);
+    --grid-dot: rgba(180,83,9,0.09);
+    --geo-opacity: 0.15;
+    --geo-line: rgba(180,83,9,0.55);
+  }
+  :root[data-theme="dark"] {
+    --halo: rgba(107,159,255,0.06);
+    --grid-dot: rgba(107,159,255,0.08);
+    --geo-opacity: 0.08;
+    --geo-line: rgba(107,159,255,0.6);
+  }
+
   /* Override layout body for login page */
   body {
-    background: #040508 !important;
+    background: var(--bg-root) !important;
     font-weight: 300 !important;
   }
 
@@ -20,12 +34,24 @@
     width: 100% !important;
   }
 
+  /* ═══ Theme Switch ═══ */
+  .theme-switch {
+    position: fixed; top: 16px; right: 16px; z-index: 50;
+    width: 36px; height: 36px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg-surface); border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm); color: var(--text-secondary);
+    cursor: pointer; transition: all 0.2s;
+  }
+  .theme-switch:hover { color: var(--text-primary); border-color: var(--border-active); }
+  .theme-switch svg { width: 16px; height: 16px; }
+
   /* ═══ Ambient halo ═══ */
   .halo {
     position: fixed;
     width: 640px; height: 640px;
     border-radius: 50%;
-    background: radial-gradient(circle, rgba(107,159,255,0.06) 0%, transparent 70%);
+    background: radial-gradient(circle, var(--halo) 0%, transparent 70%);
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
     pointer-events: none;
@@ -39,7 +65,7 @@
   /* ═══ Grid dots ═══ */
   .grid-dots {
     position: fixed; inset: 0;
-    background-image: radial-gradient(circle, rgba(107,159,255,0.08) 1px, transparent 1px);
+    background-image: radial-gradient(circle, var(--grid-dot) 1px, transparent 1px);
     background-size: 40px 40px;
     pointer-events: none;
   }
@@ -48,10 +74,10 @@
   .geo-line {
     position: fixed;
     pointer-events: none;
-    opacity: 0.08;
+    opacity: var(--geo-opacity);
   }
-  .geo-line.h { height: 1px; background: var(--accent); }
-  .geo-line.v { width:  1px; background: var(--accent); }
+  .geo-line.h { height: 1px; background: var(--geo-line); }
+  .geo-line.v { width:  1px; background: var(--geo-line); }
   .geo-line:nth-child(1) { top: 20%; left: 0; width: 100%; }
   .geo-line:nth-child(2) { top: 80%; left: 0; width: 100%; }
   .geo-line:nth-child(3) { top: 0; left: 15%; height: 100%; }
@@ -62,12 +88,10 @@
     position: relative; z-index: 1;
     width: 420px;
     padding: 56px 48px 48px;
-    background: #0a0c14;
-    border: 1px solid #1a1d2e;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
     border-radius: 2px;
-    box-shadow:
-      0 0 0 1px rgba(107,159,255,0.04),
-      0 24px 80px rgba(0,0,0,0.6);
+    box-shadow: var(--shadow-modal);
     animation: cardEnter 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
   @keyframes cardEnter {
@@ -80,7 +104,7 @@
     content: '';
     position: absolute; top: 0; left: 40px; right: 40px;
     height: 1px;
-    background: linear-gradient(90deg, transparent, #4466aa, transparent);
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
     opacity: 0.4;
   }
 
@@ -92,17 +116,17 @@
     font-family: 'DM Serif Display', Georgia, serif;
     font-size: 32px;
     font-weight: 400;
-    color: #e4e5eb;
+    color: var(--text-primary);
     letter-spacing: -0.3px;
     line-height: 1;
   }
   .brand-name span {
-    color: #6b9fff;
+    color: var(--accent);
   }
   .brand-desc {
     font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
     font-size: 12px;
-    color: #3d4052;
+    color: var(--text-muted);
     letter-spacing: 2px;
     text-transform: uppercase;
     margin-top: 10px;
@@ -115,7 +139,7 @@
     font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
     font-size: 12px;
     font-weight: 500;
-    color: #6b6e7e;
+    color: var(--text-secondary);
     letter-spacing: 1.5px;
     text-transform: uppercase;
     margin-bottom: 10px;
@@ -126,20 +150,20 @@
     position: relative;
     display: flex;
     align-items: center;
-    background: #040508;
-    border: 1px solid #1a1d2e;
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
     border-radius: 2px;
     transition: border-color 0.3s ease, box-shadow 0.3s ease;
   }
   .input-wrap:focus-within {
-    border-color: #4466aa;
+    border-color: var(--border-focus);
     box-shadow:
-      0 0 0 4px rgba(107,159,255,0.06),
-      inset 0 0 20px rgba(107,159,255,0.03);
+      0 0 0 4px var(--accent-glow),
+      inset 0 0 20px var(--accent-glow);
   }
   .input-wrap.error {
-    border-color: #e0556a;
-    box-shadow: 0 0 0 4px rgba(224,85,106,0.08);
+    border-color: var(--danger);
+    box-shadow: 0 0 0 4px var(--danger-glow);
     animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97);
   }
   @keyframes shake {
@@ -154,7 +178,7 @@
     background: none;
     border: none;
     padding: 14px 16px;
-    color: #e4e5eb;
+    color: var(--text-primary);
     font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
     font-size: 15px;
     font-weight: 400;
@@ -163,7 +187,7 @@
     width: 100%;
   }
   .input-wrap input::placeholder {
-    color: #3d4052;
+    color: var(--text-muted);
     letter-spacing: 0;
     font-weight: 300;
   }
@@ -175,19 +199,19 @@
     width: 40px; height: 40px;
     display: flex; align-items: center; justify-content: center;
     background: none; border: none;
-    color: #3d4052;
+    color: var(--text-muted);
     cursor: pointer;
     transition: color 0.2s;
     margin-right: 4px;
   }
-  .toggle-vis:hover { color: #6b6e7e; }
+  .toggle-vis:hover { color: var(--text-secondary); }
   .toggle-vis svg { width: 18px; height: 18px; }
 
   /* Error message */
   .error-msg {
     font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
     font-size: 12px;
-    color: #e0556a;
+    color: var(--danger);
     margin-top: 10px;
     min-height: 16px;
     opacity: 0;
@@ -202,7 +226,7 @@
     padding: 32px 0 8px;
   }
   .hint-icon {
-    color: #6b9fff;
+    color: var(--accent);
     opacity: 0.4;
     margin-bottom: 20px;
   }
@@ -210,21 +234,21 @@
     font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
     font-size: 14px;
     font-weight: 500;
-    color: #6b6e7e;
+    color: var(--text-secondary);
     letter-spacing: 1px;
     margin-bottom: 12px;
   }
   .hint-desc {
     font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
     font-size: 12px;
-    color: #4a4d5e;
+    color: var(--text-secondary);
     line-height: 1.6;
   }
   .hint-desc code {
-    background: #0d0f16;
+    background: var(--bg-elevated);
     padding: 2px 6px;
     border-radius: 2px;
-    color: #6b9fff;
+    color: var(--accent);
     font-size: 11px;
   }
 
@@ -234,9 +258,9 @@
     margin-top: 24px;
     padding: 14px;
     background: transparent;
-    border: 1px solid #4466aa;
+    border: 1px solid var(--accent);
     border-radius: 2px;
-    color: #6b9fff;
+    color: var(--accent);
     font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
     font-size: 12px;
     font-weight: 500;
@@ -250,14 +274,14 @@
   .btn::before {
     content: '';
     position: absolute; inset: 0;
-    background: #6b9fff;
+    background: var(--accent);
     opacity: 0;
     transition: opacity 0.3s ease;
   }
   .btn:hover::before { opacity: 0.06; }
   .btn:hover {
-    border-color: #6b9fff;
-    box-shadow: 0 0 30px rgba(107,159,255,0.12);
+    border-color: var(--accent-strong);
+    box-shadow: 0 0 30px var(--accent-glow);
   }
   .btn:active { transform: scale(0.985); }
 
@@ -270,8 +294,8 @@
     position: absolute; top: 50%; left: 50%;
     width: 18px; height: 18px;
     margin: -9px 0 0 -9px;
-    border: 2px solid #4466aa;
-    border-top-color: #6b9fff;
+    border: 2px solid var(--border-focus);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
   }
@@ -282,13 +306,13 @@
     display: inline-block;
     width: 5px; height: 5px;
     border-radius: 50%;
-    background: #3d4052;
+    background: var(--text-muted);
     margin-right: 8px;
     vertical-align: middle;
     transition: background 0.4s;
   }
-  .status-dot.active { background: #6b9fff; box-shadow: 0 0 6px rgba(107,159,255,0.5); }
-  .status-dot.error-dot { background: #e0556a; box-shadow: 0 0 6px rgba(224,85,106,0.5); }
+  .status-dot.active { background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 50%, transparent); }
+  .status-dot.error-dot { background: var(--danger); box-shadow: 0 0 6px color-mix(in srgb, var(--danger) 50%, transparent); }
 
   /* ═══ Footer ═══ */
   .footer {
@@ -299,7 +323,7 @@
   .footer-text {
     font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
     font-size: 12px;
-    color: #3d4052;
+    color: var(--text-muted);
     letter-spacing: 1px;
   }
 
@@ -309,10 +333,10 @@
     transform: translateY(-50%);
     font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
     font-size: 12px;
-    color: #3d4052;
+    color: var(--text-muted);
     letter-spacing: 0.5px;
     padding: 2px 6px;
-    border: 1px solid #1a1d2e;
+    border: 1px solid var(--border-default);
     border-radius: 2px;
     opacity: 0;
     transition: opacity 0.3s;
@@ -338,6 +362,11 @@
 <div class="geo-line h"></div>
 <div class="geo-line v"></div>
 <div class="geo-line v"></div>
+
+<button class="theme-switch" onclick="toggleTheme()" aria-label="Toggle theme">
+  <i data-lucide="moon" id="loginThemeMoon" style="width:16px;height:16px"></i>
+  <i data-lucide="sun" id="loginThemeSun" style="width:16px;height:16px;display:none"></i>
+</button>
 
 <div class="card">
   <div class="brand">
@@ -456,9 +485,9 @@ if (input) {
       // Login successful, redirect to admin page
       statusDot.classList.add('active');
       submitBtn.textContent = 'Access Granted';
-      submitBtn.style.color = '#10b981';
-      submitBtn.style.borderColor = '#10b981';
-      submitBtn.style.boxShadow = '0 0 30px rgba(16,185,129,0.15)';
+      submitBtn.style.color = 'var(--success)';
+      submitBtn.style.borderColor = 'var(--success)';
+      submitBtn.style.boxShadow = '0 0 30px var(--success-glow)';
       submitBtn.classList.remove('loading');
 
       // 读取 redirect 参数

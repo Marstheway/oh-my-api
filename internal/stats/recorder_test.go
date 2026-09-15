@@ -94,3 +94,91 @@ func TestRecorderTodayDate(t *testing.T) {
 		t.Errorf("expected date %s, got %s", today, date)
 	}
 }
+
+func TestRecorderRecordUserModel(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	if err := Init(dbPath); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer Close()
+
+	rec := GetRecorder()
+	if rec == nil {
+		t.Fatal("GetRecorder returned nil")
+	}
+
+	err := rec.RecordUserModel("gpt-4o", 100, 50, 150)
+	if err != nil {
+		t.Fatalf("RecordUserModel failed: %v", err)
+	}
+
+	var count int64
+	err = db.QueryRow("SELECT COUNT(*) FROM user_model_stats").Scan(&count)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 row, got %d", count)
+	}
+}
+
+func TestRecorderAccumulateUserModel(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	if err := Init(dbPath); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer Close()
+
+	rec := GetRecorder()
+
+	_ = rec.RecordUserModel("gpt-4o", 100, 50, 100)
+	err := rec.RecordUserModel("gpt-4o", 200, 100, 200)
+	if err != nil {
+		t.Fatalf("second RecordUserModel failed: %v", err)
+	}
+
+	var inputTokens, outputTokens, requestCount, latencyMs int64
+	err = db.QueryRow(`
+		SELECT input_tokens, output_tokens, request_count, latency_ms
+		FROM user_model_stats
+		WHERE user_model = 'gpt-4o'
+	`).Scan(&inputTokens, &outputTokens, &requestCount, &latencyMs)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+
+	if inputTokens != 300 {
+		t.Errorf("expected input_tokens 300, got %d", inputTokens)
+	}
+	if outputTokens != 150 {
+		t.Errorf("expected output_tokens 150, got %d", outputTokens)
+	}
+	if requestCount != 2 {
+		t.Errorf("expected request_count 2, got %d", requestCount)
+	}
+	if latencyMs != 300 {
+		t.Errorf("expected latency_ms 300, got %d", latencyMs)
+	}
+}
+
+func TestRecorderUserModelTodayDate(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	if err := Init(dbPath); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer Close()
+
+	rec := GetRecorder()
+	_ = rec.RecordUserModel("gpt-4o", 100, 50, 150)
+
+	var date string
+	err := db.QueryRow("SELECT date FROM user_model_stats").Scan(&date)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+
+	today := timeNow().Format("2006-01-02")
+	if date != today {
+		t.Errorf("expected date %s, got %s", today, date)
+	}
+}

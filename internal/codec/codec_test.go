@@ -30,6 +30,10 @@ func (t testCodec) WriteResponse(*gin.Context, Format, *http.Response, bool, Tok
 	return nil
 }
 
+func (t testCodec) WriteResponseTo(http.ResponseWriter, Format, *http.Response, bool, TokenCounter, ResponseModelContext) error {
+	return nil
+}
+
 func TestGetCodec_OpenAIChat(t *testing.T) {
 	original := registry
 	registry = map[Format]Codec{}
@@ -113,7 +117,6 @@ func TestNormalizeProviderFormat(t *testing.T) {
 	}
 }
 
-
 func TestFormatConstants(t *testing.T) {
 	if FormatOpenAIChat != "openai.chat" {
 		t.Fatalf("FormatOpenAIChat = %q, want %q", FormatOpenAIChat, "openai.chat")
@@ -128,7 +131,6 @@ func TestFormatConstants_OpenAIResponse(t *testing.T) {
 		t.Fatalf("FormatOpenAIResponse = %q, want %q", FormatOpenAIResponse, "openai.responses")
 	}
 }
-
 
 func TestConversionCost_Directional(t *testing.T) {
 	forward, err := ConversionCost(FormatOpenAIChat, FormatAnthropicMessages)
@@ -578,6 +580,60 @@ func TestIntegration_AnthropicToOpenAI(t *testing.T) {
 		}
 	})
 
+	t.Run("json-unmarshaled base64 image does not panic", func(t *testing.T) {
+		// Content 经 JSON 解码是 []any/map，不是 []dto.ContentBlock。
+		// base64 source 没有 url 字段，裸断言会 panic。
+		raw := []byte(`{
+			"model": "vision",
+			"max_tokens": 256,
+			"messages": [{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "describe"},
+					{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "/9j/xxxx"}}
+				]
+			}]
+		}`)
+		var req dto.ClaudeRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+
+		openAIReq := convertAnthropicToOpenAIRequest(&req, "gpt-4o")
+		jsonData, err := json.Marshal(openAIReq)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(jsonData), "data:image/jpeg;base64,/9j/xxxx") {
+			t.Errorf("converted request missing data URI, got %s", jsonData)
+		}
+	})
+
+	t.Run("json-unmarshaled url image does not panic", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "vision",
+			"messages": [{
+				"role": "user",
+				"content": [
+					{"type": "image", "source": {"type": "url", "url": "https://example.com/a.jpg"}}
+				]
+			}]
+		}`)
+		var req dto.ClaudeRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+
+		openAIReq := convertAnthropicToOpenAIRequest(&req, "gpt-4o")
+		jsonData, err := json.Marshal(openAIReq)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(jsonData), "https://example.com/a.jpg") {
+			t.Errorf("converted request missing image URL, got %s", jsonData)
+		}
+	})
+
 	t.Run("multimodal request with image URL", func(t *testing.T) {
 		req := &dto.ClaudeRequest{
 			Model:     "gpt-4-vision",
@@ -669,6 +725,55 @@ func TestIntegration_AnthropicToOpenAI(t *testing.T) {
 			t.Errorf("First message role = %q, want system", openAIReq.Messages[0].Role)
 		}
 	})
+}
+
+func TestConvertMapToMessageSource_MissingFields(t *testing.T) {
+	if got := convertMapToMessageSource(nil); got != nil {
+		t.Fatalf("nil map: got %#v, want nil", got)
+	}
+
+	base64Src := convertMapToMessageSource(map[string]any{
+		"type":       "base64",
+		"media_type": "image/jpeg",
+		"data":       "abc",
+	})
+	if base64Src == nil || base64Src.Type != "base64" || base64Src.Data != "abc" || base64Src.Url != "" {
+		t.Fatalf("base64 source = %#v", base64Src)
+	}
+
+	urlSrc := convertMapToMessageSource(map[string]any{
+		"type": "url",
+		"url":  "https://example.com/a.jpg",
+	})
+	if urlSrc == nil || urlSrc.Type != "url" || urlSrc.Url != "https://example.com/a.jpg" || urlSrc.Data != "" {
+		t.Fatalf("url source = %#v", urlSrc)
+	}
+}
+
+func TestAnthropicEncodeRequest_JSONImageToChat(t *testing.T) {
+	raw := []byte(`{
+		"model": "vision",
+		"messages": [{
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "hi"},
+				{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "abc"}}
+			]
+		}]
+	}`)
+	var req dto.ClaudeRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	c := &AnthropicMessagesCodec{}
+	body, err := c.EncodeRequest(FormatOpenAIChat, &req, "gpt-4o", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest: %v", err)
+	}
+	if !strings.Contains(string(body), "data:image/jpeg;base64,abc") {
+		t.Errorf("encoded body missing data URI: %s", body)
+	}
 }
 
 func TestIntegration_Response(t *testing.T) {
@@ -1308,8 +1413,8 @@ func TestResponseToChat_CustomToolCallOutput(t *testing.T) {
 func TestResponseToChat_ParallelToolCalls(t *testing.T) {
 	// 测试 parallel_tool_calls 字段透传
 	req := &dto.ResponsesRequest{
-		Model:           "gpt-4o",
-		Input:           json.RawMessage(`"test"`),
+		Model:             "gpt-4o",
+		Input:             json.RawMessage(`"test"`),
 		ParallelToolCalls: json.RawMessage(`true`),
 	}
 
@@ -1450,6 +1555,62 @@ func TestResponseToChat_AdditionalTools(t *testing.T) {
 	}
 }
 
+func TestResponseToChat_ReasoningItemSkipped(t *testing.T) {
+	// reasoning item 在 Chat API 无对应输入语义，应跳过且不打乱 tool_call 与 output 的交错排列。
+	req := &dto.ResponsesRequest{
+		Model: "deepseek-v4-flash",
+		Input: json.RawMessage(`[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking..."}]},
+			{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"beijing\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"sunny"},
+			{"type":"reasoning","id":"rs_2","content":[{"type":"reasoning_text","text":"done"}]}
+		]`),
+	}
+
+	chatReq, err := convertResponseRequestToChatRequest(req, "deepseek-v4-flash")
+	if err != nil {
+		t.Fatalf("convertResponseRequestToChatRequest error: %v", err)
+	}
+
+	if len(chatReq.Messages) != 3 {
+		t.Fatalf("expected 3 messages (reasoning skipped), got %d: %+v", len(chatReq.Messages), chatReq.Messages)
+	}
+	if chatReq.Messages[0].Role != "user" {
+		t.Errorf("messages[0].Role = %q, want user", chatReq.Messages[0].Role)
+	}
+	if chatReq.Messages[1].Role != "assistant" || len(chatReq.Messages[1].ToolCalls) != 1 {
+		t.Errorf("messages[1] = %+v, want assistant with 1 tool call", chatReq.Messages[1])
+	}
+	if chatReq.Messages[2].Role != "tool" || chatReq.Messages[2].ToolCallID != "call_1" {
+		t.Errorf("messages[2] = %+v, want tool call_1", chatReq.Messages[2])
+	}
+}
+
+func TestResponseToChat_ReasoningItemEncodesToChat(t *testing.T) {
+	// responses -> chat 的出站编码不应因 reasoning item 报 conversion error。
+	req := &dto.ResponsesRequest{
+		Model: "coding",
+		Input: json.RawMessage(`[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking..."}]}
+		]`),
+	}
+
+	body, err := (&OpenAIResponseCodec{}).EncodeRequest(FormatOpenAIChat, req, "coding", false)
+	if err != nil {
+		t.Fatalf("EncodeRequest error: %v", err)
+	}
+
+	var encoded dto.ChatCompletionRequest
+	if err := json.Unmarshal(body, &encoded); err != nil {
+		t.Fatalf("unmarshal encoded body: %v", err)
+	}
+	if len(encoded.Messages) != 1 || encoded.Messages[0].Role != "user" {
+		t.Fatalf("messages = %+v, want single user message", encoded.Messages)
+	}
+}
+
 func TestResponseToChat_FunctionCallInterleaved(t *testing.T) {
 	// 测试 function_call 和 function_call_output 交错排列
 	inputItems := []dto.ResponsesInputItem{
@@ -1458,9 +1619,9 @@ func TestResponseToChat_FunctionCallInterleaved(t *testing.T) {
 			Content: json.RawMessage(`"call func"`),
 		},
 		{
-			Type:   "function_call",
-			CallID: "call_1",
-			Name:   "get_weather",
+			Type:      "function_call",
+			CallID:    "call_1",
+			Name:      "get_weather",
 			Arguments: `{"city":"beijing"}`,
 		},
 		{
@@ -1520,9 +1681,9 @@ func TestResponseToChat_McpToolCallInterleaved(t *testing.T) {
 			Content: json.RawMessage(`"mcp call"`),
 		},
 		{
-			Type:   "mcp_tool_call",
-			CallID: "mcp_1",
-			Name:   "read_file",
+			Type:      "mcp_tool_call",
+			CallID:    "mcp_1",
+			Name:      "read_file",
 			Arguments: `{"path":"/tmp/test"}`,
 		},
 		{
@@ -1565,9 +1726,9 @@ func TestResponseToChat_CustomToolCallInterleaved(t *testing.T) {
 			Content: json.RawMessage(`"custom tool"`),
 		},
 		{
-			Type:   "custom_tool_call",
-			CallID: "custom_1",
-			Name:   "my_tool",
+			Type:      "custom_tool_call",
+			CallID:    "custom_1",
+			Name:      "my_tool",
 			Arguments: `{"key":"val"}`,
 		},
 		{
@@ -1606,9 +1767,9 @@ func TestResponseToChat_MultipleToolCallsInterleaved(t *testing.T) {
 	// 测试多个不同类型的 tool_call 交错排列
 	inputItems := []dto.ResponsesInputItem{
 		{
-			Type:   "function_call",
-			CallID: "fc_1",
-			Name:   "get_weather",
+			Type:      "function_call",
+			CallID:    "fc_1",
+			Name:      "get_weather",
 			Arguments: `{"city":"bj"}`,
 		},
 		{
@@ -1617,9 +1778,9 @@ func TestResponseToChat_MultipleToolCallsInterleaved(t *testing.T) {
 			Output: json.RawMessage(`"sunny"`),
 		},
 		{
-			Type:   "mcp_tool_call",
-			CallID: "mcp_1",
-			Name:   "read_file",
+			Type:      "mcp_tool_call",
+			CallID:    "mcp_1",
+			Name:      "read_file",
 			Arguments: `{"path":"/tmp/x"}`,
 		},
 		{

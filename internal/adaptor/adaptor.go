@@ -72,6 +72,8 @@ func BuildURL(endpoint string, protocol Protocol) string {
 	case ProtocolAnthropic:
 		if path == "" {
 			u.Path = "/v1/messages"
+		} else if strings.HasSuffix(path, "/v1") {
+			u.Path = path + "/messages"
 		} else {
 			u.Path = path + "/v1/messages"
 		}
@@ -88,6 +90,55 @@ func BuildURL(endpoint string, protocol Protocol) string {
 			u.Path = path + "/chat/completions"
 		}
 	}
+	return u.String()
+}
+
+// BuildCatalogURL 基于 BuildURL 规范化的 endpoint 构造 catalog 探测 URL
+// (list models / api tags)。
+// 规则：
+//   - 如果 endpoint 已经以 /models 或 /api/tags 结尾，直接返回规范化后的 endpoint
+//   - 先从 BuildURL 得到规范化基础 URL
+//   - OpenAI chat 协议：/v1/chat/completions → /v1/models 或 /chat/completions → /models
+//   - OpenAI Response 协议：/v1/responses → /v1/models 或 /responses → /models
+//   - Anthropic 协议：/v1/messages → /v1/models 或 /messages → /models
+//   - Ollama chat 协议：/api/chat → /api/tags
+func BuildCatalogURL(endpoint string, protocol Protocol) string {
+	// If the endpoint already ends with a known list endpoint, normalize and return directly.
+	// This avoids BuildURL adding chat/completions on top.
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	path := strings.TrimSuffix(u.Path, "/")
+
+	if strings.HasSuffix(path, "/models") || strings.HasSuffix(path, "/api/tags") {
+		// Already a list-models/tags endpoint, normalize and return
+		u.Path = path
+		return u.String()
+	}
+
+	baseURL := BuildURL(endpoint, protocol)
+	u, err = url.Parse(baseURL)
+	if err != nil {
+		return baseURL
+	}
+
+	path = strings.TrimSuffix(u.Path, "/")
+
+	if protocol == ProtocolOllamaChat {
+		path = strings.Replace(path, "/api/chat", "/api/tags", 1)
+	} else if strings.HasSuffix(path, "/chat/completions") {
+		path = strings.TrimSuffix(path, "/chat/completions") + "/models"
+	} else if strings.HasSuffix(path, "/messages") {
+		path = strings.TrimSuffix(path, "/messages") + "/models"
+	} else if strings.HasSuffix(path, "/responses") {
+		path = strings.TrimSuffix(path, "/responses") + "/models"
+	} else {
+		// Unknown suffix, append /models
+		path = path + "/models"
+	}
+
+	u.Path = path
 	return u.String()
 }
 

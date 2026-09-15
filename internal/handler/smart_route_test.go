@@ -357,11 +357,11 @@ func TestApplySmartRouteRules(t *testing.T) {
 
 	t.Run("code_gathering_without_search_keyword_goes_need_judge", func(t *testing.T) {
 		obs := &TurnObservation{
-			OriginalModel:      "my-alias",
-			RecentToolNames:    []string{"grep", "read_file"},
-			HasRecentToolCall:  true,
-			LatestIsToolResult: true,
-			HasMaterialTraces:  true,
+			OriginalModel:       "my-alias",
+			RecentToolNames:     []string{"grep", "read_file"},
+			HasRecentToolCall:   true,
+			LatestIsToolResult:  true,
+			HasMaterialTraces:   true,
 			HasCodeOrFileTraces: true,
 		}
 		aliasInfo := &model.AliasSmartRouteInfo{
@@ -379,12 +379,12 @@ func TestApplySmartRouteRules(t *testing.T) {
 
 	t.Run("rule_scout_for_web_extract_material_without_search_keyword", func(t *testing.T) {
 		obs := &TurnObservation{
-			OriginalModel:       "my-alias",
-			RecentToolNames:     []string{"web_extract"},
-			HasRecentToolCall:   true,
-			LatestIsToolResult:  true,
-			HasMaterialTraces:   true,
-			RecentMessages:      []string{"tool: Title: Go docs URL: https://go.dev Snippet: package docs"},
+			OriginalModel:      "my-alias",
+			RecentToolNames:    []string{"web_extract"},
+			HasRecentToolCall:  true,
+			LatestIsToolResult: true,
+			HasMaterialTraces:  true,
+			RecentMessages:     []string{"tool: Title: Go docs URL: https://go.dev Snippet: package docs"},
 		}
 		aliasInfo := &model.AliasSmartRouteInfo{
 			DefaultGroup: reasonGroup,
@@ -398,12 +398,12 @@ func TestApplySmartRouteRules(t *testing.T) {
 
 	t.Run("rule_scout_for_agent_fetch_material_without_search_keyword", func(t *testing.T) {
 		obs := &TurnObservation{
-			OriginalModel:       "my-alias",
-			RecentToolNames:     []string{"agent-fetch"},
-			HasRecentToolCall:   true,
-			LatestIsToolResult:  true,
-			HasMaterialTraces:   true,
-			RecentMessages:      []string{"tool: url: https://example.com title: docs snippet: api behavior"},
+			OriginalModel:      "my-alias",
+			RecentToolNames:    []string{"agent-fetch"},
+			HasRecentToolCall:  true,
+			LatestIsToolResult: true,
+			HasMaterialTraces:  true,
+			RecentMessages:     []string{"tool: url: https://example.com title: docs snippet: api behavior"},
 		}
 		aliasInfo := &model.AliasSmartRouteInfo{
 			DefaultGroup: reasonGroup,

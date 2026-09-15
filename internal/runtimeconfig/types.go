@@ -10,11 +10,11 @@ import (
 type ErrorCode string
 
 const (
-	ErrCodeBadRequest   ErrorCode = "bad_request"
-	ErrCodeNotFound     ErrorCode = "not_found"
-	ErrCodeConflict     ErrorCode = "conflict"
-	ErrCodeValidation   ErrorCode = "validation_error"
-	ErrCodeInternal     ErrorCode = "internal_error"
+	ErrCodeBadRequest ErrorCode = "bad_request"
+	ErrCodeNotFound   ErrorCode = "not_found"
+	ErrCodeConflict   ErrorCode = "conflict"
+	ErrCodeValidation ErrorCode = "validation_error"
+	ErrCodeInternal   ErrorCode = "internal_error"
 )
 
 // Error 表示操作失败详情
@@ -31,6 +31,18 @@ func (e *Error) Error() string {
 	return e.Message
 }
 
+// StickyInput 表示 sticky 配置输入
+type StickyInput struct {
+	Enabled     bool   `json:"enabled"`
+	IdleTimeout string `json:"idle_timeout,omitempty"` // 空闲超时时间，默认 10m
+}
+
+// StickyOutput 表示 sticky 配置输出
+type StickyOutput struct {
+	Enabled     bool   `json:"enabled"`
+	IdleTimeout string `json:"idle_timeout,omitempty"`
+}
+
 // ModelGroupInput 表示 API 输入的 model group 数据
 // API 输入允许 model 或 models 二选一
 type ModelGroupInput struct {
@@ -40,6 +52,7 @@ type ModelGroupInput struct {
 	Models        []ModelEntryInput   `json:"models,omitempty"` // 多模型输入
 	Exposure      *string             `json:"exposure,omitempty"`
 	ModelMetadata *ModelMetadataInput `json:"model_metadata,omitempty"`
+	Sticky        *StickyInput        `json:"sticky,omitempty"` // sticky 配置（仅 load-balance 模式）
 }
 
 // ModelEntryInput 表示 models 数组条目输入
@@ -61,6 +74,7 @@ type ModelGroupOutput struct {
 	Models        []ModelEntryOutput   `json:"models"`
 	Exposure      config.Exposure      `json:"exposure"`
 	ModelMetadata *ModelMetadataOutput `json:"model_metadata,omitempty"`
+	Sticky        *StickyOutput        `json:"sticky,omitempty"`
 }
 
 // ModelEntryOutput 表示 models 数组条目输出
@@ -71,16 +85,20 @@ type ModelEntryOutput struct {
 
 // ModelMetadataOutput 表示 model_metadata 输出
 type ModelMetadataOutput struct {
-	ContextLength        *int `json:"context_length,omitempty"`
+	ContextLength         *int `json:"context_length,omitempty"`
 	ComputedContextLength *int `json:"computed_context_length,omitempty"` // 计算值（从 catalog/子 group 递归得出）
 }
 
 // NormalizeInput 将输入归一化为 config.ModelGroupConfig
 // 若输入 model 非空，归一为单条 models（weight=1, priority=0）
 func (input *ModelGroupInput) NormalizeInput() config.ModelGroupConfig {
+	mode := input.Mode
+	if mode == "" {
+		mode = "failover"
+	}
 	cfg := config.ModelGroupConfig{
-		Name:    input.Name,
-		Mode:    input.Mode,
+		Name:     input.Name,
+		Mode:     mode,
 		Exposure: normalizeExposurePtr(input.Exposure),
 	}
 
@@ -104,6 +122,14 @@ func (input *ModelGroupInput) NormalizeInput() config.ModelGroupConfig {
 				Model:  e.Model,
 				Weight: weight,
 			}
+		}
+	}
+
+	// 处理 sticky
+	if input.Sticky != nil {
+		cfg.Sticky = &config.StickyConfig{
+			Enabled:     input.Sticky.Enabled,
+			IdleTimeout: input.Sticky.IdleTimeout,
 		}
 	}
 
@@ -135,6 +161,14 @@ func ToOutput(cfg config.ModelGroupConfig) ModelGroupOutput {
 		}
 	}
 
+	// 处理 sticky
+	if cfg.Sticky != nil {
+		output.Sticky = &StickyOutput{
+			Enabled:     cfg.Sticky.Enabled,
+			IdleTimeout: cfg.Sticky.IdleTimeout,
+		}
+	}
+
 	return output
 }
 
@@ -147,18 +181,18 @@ type RedirectInput struct {
 
 // RedirectOutput 表示 API 输出的 redirect 数据
 type RedirectOutput struct {
-	Source   string           `json:"source"`   // 源名称
-	Target   string           `json:"target"`   // 目标
-	Exposure config.Exposure  `json:"exposure"` // 暴露级别（显式值）
+	Source   string          `json:"source"`   // 源名称
+	Target   string          `json:"target"`   // 目标
+	Exposure config.Exposure `json:"exposure"` // 暴露级别（显式值）
 }
 
 // RedirectListOutput 表示列表输出的 redirect（带解析信息）
 type RedirectListOutput struct {
-	Source        string          `json:"source"`         // 源名称
-	Target        string          `json:"target"`         // 配置的直接目标
-	ResolvedGroup string          `json:"resolved_group"` // 最终解析到的 group
-	ChainLength   int             `json:"chain_length"`   // 链路长度（0=直达 group）
-	Exposure      config.Exposure `json:"exposure"`        // 暴露级别（显式值）
+	Source        string          `json:"source"`                   // 源名称
+	Target        string          `json:"target"`                   // 配置的直接目标
+	ResolvedGroup string          `json:"resolved_group"`           // 最终解析到的 group
+	ChainLength   int             `json:"chain_length"`             // 链路长度（0=直达 group）
+	Exposure      config.Exposure `json:"exposure"`                 // 暴露级别（显式值）
 	ContextLength *int            `json:"context_length,omitempty"` // 最终 group 的 context_length
 }
 
@@ -196,17 +230,30 @@ type AuthKeyOutput struct {
 	Key  string `json:"key"`
 }
 
+// RemoteBridgeInput 表示 API 输入的 remote bridge 配置
+type RemoteBridgeInput struct {
+	Enabled  bool   `json:"enabled"`
+	Provider string `json:"provider,omitempty"`
+	Token    string `json:"token,omitempty"`
+	Local    bool   `json:"local,omitempty"`
+}
+
+// CascadeInput 表示 API 输入的 cascade 配置
+type CascadeInput struct {
+	Enabled bool   `json:"enabled"`
+	Token   string `json:"token,omitempty"`
+}
+
 // ProviderInput 表示 API 输入的 provider 数据
 type ProviderInput struct {
-	Name             string                     `json:"name"`
-	Endpoint         string                     `json:"endpoint,omitempty"`
-	Endpoints        []EndpointInput            `json:"endpoints,omitempty"`
-	APIKey           string                     `json:"api_key,omitempty"`
-	Protocols        []string                   `json:"protocols,omitempty"`
-	RateLimit        RateLimitInput             `json:"rate_limit,omitempty"`
-	UpstreamModels   []UpstreamModelInput       `json:"upstream_models,omitempty"`
-	DefaultProtocols []string                   `json:"default_protocols,omitempty"`
-	DisabledTimeRanges []string                 `json:"disabled_time_ranges,omitempty"`
+	Name         string             `json:"name"`
+	Endpoint     string             `json:"endpoint,omitempty"`
+	Endpoints    []EndpointInput    `json:"endpoints,omitempty"`
+	APIKey       string             `json:"api_key,omitempty"`
+	Protocols    []string           `json:"protocols,omitempty"`
+	RateLimit    RateLimitInput     `json:"rate_limit,omitempty"`
+	RemoteBridge *RemoteBridgeInput `json:"remote_bridge,omitempty"`
+	Cascade      *CascadeInput      `json:"cascade,omitempty"`
 }
 
 // EndpointInput 表示 endpoints 数组条目输入
@@ -220,23 +267,29 @@ type RateLimitInput struct {
 	QPM int `json:"qpm,omitempty"`
 }
 
-// UpstreamModelInput 表示 upstream_models 数组条目输入
-type UpstreamModelInput struct {
-	Model            string   `json:"model"`
-	QPM              int      `json:"qpm,omitempty"`
-	AllowedProtocols []string `json:"allowed_protocols,omitempty"`
+// RemoteBridgeOutput 表示 API 输出的 remote bridge 配置
+type RemoteBridgeOutput struct {
+	Enabled  bool   `json:"enabled"`
+	Provider string `json:"provider,omitempty"`
+	Token    string `json:"token,omitempty"`
+	Local    bool   `json:"local,omitempty"`
+}
+
+// CascadeOutput 表示 API 输出的 cascade 配置
+type CascadeOutput struct {
+	Enabled bool   `json:"enabled"`
+	Token   string `json:"token,omitempty"`
 }
 
 // ProviderOutput 表示 API 输出的 provider 数据（完整配置，含 API Key）
 type ProviderOutput struct {
-	Name             string                     `json:"name"`
-	Endpoints        []EndpointOutput           `json:"endpoints"`
-	APIKey           string                     `json:"api_key,omitempty"`
-	Protocols        []string                   `json:"protocols,omitempty"`
-	RateLimit        RateLimitOutput            `json:"rate_limit,omitempty"`
-	UpstreamModels   []UpstreamModelOutput      `json:"upstream_models,omitempty"`
-	DefaultProtocols []string                   `json:"default_protocols,omitempty"`
-	DisabledTimeRanges []string                 `json:"disabled_time_ranges,omitempty"`
+	Name         string              `json:"name"`
+	Endpoints    []EndpointOutput    `json:"endpoints"`
+	APIKey       string              `json:"api_key,omitempty"`
+	Protocols    []string            `json:"protocols,omitempty"`
+	RateLimit    RateLimitOutput     `json:"rate_limit,omitempty"`
+	RemoteBridge *RemoteBridgeOutput `json:"remote_bridge,omitempty"`
+	Cascade      *CascadeOutput      `json:"cascade,omitempty"`
 }
 
 // EndpointOutput 表示 endpoints 数组条目输出
@@ -250,21 +303,12 @@ type RateLimitOutput struct {
 	QPM int `json:"qpm,omitempty"`
 }
 
-// UpstreamModelOutput 表示 upstream_models 数组条目输出
-type UpstreamModelOutput struct {
-	Model            string   `json:"model"`
-	QPM              int      `json:"qpm,omitempty"`
-	AllowedProtocols []string `json:"allowed_protocols,omitempty"`
-}
-
 // ToConfig 将 ProviderInput 转换为 config.ProviderConfig
 func (input *ProviderInput) ToConfig() config.ProviderConfig {
 	cfg := config.ProviderConfig{
-		Endpoint:           input.Endpoint,
-		APIKey:             input.APIKey,
-		Protocols:          input.Protocols,
-		DefaultProtocols:   input.DefaultProtocols,
-		DisabledTimeRanges: input.DisabledTimeRanges,
+		Endpoint:  input.Endpoint,
+		APIKey:    input.APIKey,
+		Protocols: input.Protocols,
 	}
 
 	// endpoints
@@ -281,13 +325,21 @@ func (input *ProviderInput) ToConfig() config.ProviderConfig {
 		QPM: input.RateLimit.QPM,
 	}
 
-	// upstream_models
-	cfg.UpstreamModels = make([]config.UpstreamModelConfig, len(input.UpstreamModels))
-	for i, um := range input.UpstreamModels {
-		cfg.UpstreamModels[i] = config.UpstreamModelConfig{
-			Model:            um.Model,
-			QPM:              um.QPM,
-			AllowedProtocols: um.AllowedProtocols,
+	// remote_bridge
+	if input.RemoteBridge != nil {
+		cfg.RemoteBridge = &config.RemoteBridgeConfig{
+			Enabled:  input.RemoteBridge.Enabled,
+			Provider: input.RemoteBridge.Provider,
+			Token:    input.RemoteBridge.Token,
+			Local:    input.RemoteBridge.Local,
+		}
+	}
+
+	// cascade
+	if input.Cascade != nil {
+		cfg.Cascade = &config.ProviderCascadeConfig{
+			Enabled: input.Cascade.Enabled,
+			Token:   input.Cascade.Token,
 		}
 	}
 
@@ -297,10 +349,8 @@ func (input *ProviderInput) ToConfig() config.ProviderConfig {
 // ToProviderOutput 将 config.ProviderConfig 转换为输出格式
 func ToProviderOutput(name string, cfg config.ProviderConfig) ProviderOutput {
 	output := ProviderOutput{
-		Name:               name,
-		APIKey:             cfg.APIKey,
-		DefaultProtocols:   cfg.DefaultProtocols,
-		DisabledTimeRanges: cfg.DisabledTimeRanges,
+		Name:   name,
+		APIKey: cfg.APIKey,
 	}
 
 	// 统一转换为 endpoints 数组
@@ -340,17 +390,184 @@ func ToProviderOutput(name string, cfg config.ProviderConfig) ProviderOutput {
 		output.RateLimit = RateLimitOutput{QPM: cfg.RateLimit.QPM}
 	}
 
-	// upstream_models
-	output.UpstreamModels = make([]UpstreamModelOutput, len(cfg.UpstreamModels))
-	for i, um := range cfg.UpstreamModels {
-		output.UpstreamModels[i] = UpstreamModelOutput{
-			Model:            um.Model,
-			QPM:              um.QPM,
-			AllowedProtocols: um.AllowedProtocols,
+	// remote_bridge
+	if cfg.RemoteBridge != nil {
+		output.RemoteBridge = &RemoteBridgeOutput{
+			Enabled:  cfg.RemoteBridge.Enabled,
+			Provider: cfg.RemoteBridge.Provider,
+			Token:    cfg.RemoteBridge.Token,
+			Local:    cfg.RemoteBridge.Local,
+		}
+	}
+
+	// cascade
+	if cfg.Cascade != nil {
+		output.Cascade = &CascadeOutput{
+			Enabled: cfg.Cascade.Enabled,
+			Token:   cfg.Cascade.Token,
 		}
 	}
 
 	return output
+}
+
+// RulesInput 表示整表替换 rules 的请求体。
+// Rules 为 nil 表示请求缺少 rules 键或值为 null（非法）；空切片表示清空。
+type RulesInput struct {
+	Rules []RuleInput `json:"rules"`
+}
+
+// RuleInput 表示 API 输入的规则条目（snake_case JSON，与 YAML 的 kebab-case 字段名不同）。
+type RuleInput struct {
+	Match  RuleMatchInput  `json:"match"`
+	Action RuleActionInput `json:"action"`
+}
+
+// RuleMatchInput 表示 API 输入的规则 match；省略的字段表示未设置（不参与匹配）。
+type RuleMatchInput struct {
+	ClientModel   *RuleConditionInput `json:"client_model,omitempty"`
+	Key           *RuleConditionInput `json:"key,omitempty"`
+	UpstreamModel *RuleConditionInput `json:"upstream_model,omitempty"`
+}
+
+// RuleConditionInput 表示 API 输入的单个 match 条件。
+type RuleConditionInput struct {
+	Op    string `json:"op"`
+	Value string `json:"value"`
+}
+
+// RuleActionInput 表示 API 输入的规则 action；省略的字段表示未设置。
+type RuleActionInput struct {
+	Protocol         string   `json:"protocol,omitempty"`
+	Effort           []string `json:"effort,omitempty"`
+	EffortMode       string   `json:"effort_mode,omitempty"`
+	TemperatureMode  string   `json:"temperature_mode,omitempty"`
+	Thinking         string   `json:"thinking,omitempty"`
+	MaxTokens        *int     `json:"max_tokens,omitempty"`
+	QPM              *int     `json:"qpm,omitempty"`
+	EnableTimeRange  []string `json:"enable_time_range,omitempty"`
+	DisableTimeRange []string `json:"disable_time_range,omitempty"`
+	Retries          *int     `json:"retries,omitempty"`
+}
+
+// ToConfig 将 RuleInput 转换为 config.RuleConfig。
+func (input *RuleInput) ToConfig() config.RuleConfig {
+	return config.RuleConfig{
+		Match: config.RuleMatch{
+			ClientModel:   ruleConditionInputToConfig(input.Match.ClientModel),
+			Key:           ruleConditionInputToConfig(input.Match.Key),
+			UpstreamModel: ruleConditionInputToConfig(input.Match.UpstreamModel),
+		},
+		Action: config.RuleAction{
+			Protocol:         input.Action.Protocol,
+			Effort:           input.Action.Effort,
+			EffortMode:       input.Action.EffortMode,
+			TemperatureMode:  input.Action.TemperatureMode,
+			Thinking:         input.Action.Thinking,
+			MaxTokens:        input.Action.MaxTokens,
+			QPM:              input.Action.QPM,
+			EnableTimeRange:  input.Action.EnableTimeRange,
+			DisableTimeRange: input.Action.DisableTimeRange,
+			Retries:          input.Action.Retries,
+		},
+	}
+}
+
+func ruleConditionInputToConfig(cond *RuleConditionInput) *config.RuleCondition {
+	if cond == nil {
+		return nil
+	}
+	return &config.RuleCondition{Op: cond.Op, Value: cond.Value}
+}
+
+// RuleOutput 表示 API 输出的规则条目。
+type RuleOutput struct {
+	Match  RuleMatchOutput  `json:"match"`
+	Action RuleActionOutput `json:"action"`
+}
+
+// RuleMatchOutput 表示 API 输出的规则 match。
+type RuleMatchOutput struct {
+	ClientModel   *RuleConditionOutput `json:"client_model,omitempty"`
+	Key           *RuleConditionOutput `json:"key,omitempty"`
+	UpstreamModel *RuleConditionOutput `json:"upstream_model,omitempty"`
+}
+
+// RuleConditionOutput 表示 API 输出的单个 match 条件。
+type RuleConditionOutput struct {
+	Op    string `json:"op"`
+	Value string `json:"value"`
+}
+
+// RuleActionOutput 表示 API 输出的规则 action。
+type RuleActionOutput struct {
+	Protocol         string   `json:"protocol,omitempty"`
+	Effort           []string `json:"effort,omitempty"`
+	EffortMode       string   `json:"effort_mode,omitempty"`
+	TemperatureMode  string   `json:"temperature_mode,omitempty"`
+	Thinking         string   `json:"thinking,omitempty"`
+	MaxTokens        *int     `json:"max_tokens,omitempty"`
+	QPM              *int     `json:"qpm,omitempty"`
+	EnableTimeRange  []string `json:"enable_time_range,omitempty"`
+	DisableTimeRange []string `json:"disable_time_range,omitempty"`
+	Retries          *int     `json:"retries,omitempty"`
+}
+
+// ToRuleOutput 将 config.RuleConfig 转换为 API 输出格式。
+func ToRuleOutput(rule config.RuleConfig) RuleOutput {
+	var effort []string
+	if len(rule.Action.Effort) > 0 {
+		effort = append([]string(nil), rule.Action.Effort...)
+	}
+	var enable []string
+	if len(rule.Action.EnableTimeRange) > 0 {
+		enable = append([]string(nil), rule.Action.EnableTimeRange...)
+	}
+	var disable []string
+	if len(rule.Action.DisableTimeRange) > 0 {
+		disable = append([]string(nil), rule.Action.DisableTimeRange...)
+	}
+	var qpm *int
+	if rule.Action.QPM != nil {
+		q := *rule.Action.QPM
+		qpm = &q
+	}
+	var retries *int
+	if rule.Action.Retries != nil {
+		n := *rule.Action.Retries
+		retries = &n
+	}
+	var maxTokens *int
+	if rule.Action.MaxTokens != nil {
+		n := *rule.Action.MaxTokens
+		maxTokens = &n
+	}
+	return RuleOutput{
+		Match: RuleMatchOutput{
+			ClientModel:   ruleConditionToOutput(rule.Match.ClientModel),
+			Key:           ruleConditionToOutput(rule.Match.Key),
+			UpstreamModel: ruleConditionToOutput(rule.Match.UpstreamModel),
+		},
+		Action: RuleActionOutput{
+			Protocol:         rule.Action.Protocol,
+			Effort:           effort,
+			EffortMode:       rule.Action.EffortMode,
+			TemperatureMode:  rule.Action.TemperatureMode,
+			Thinking:         rule.Action.Thinking,
+			MaxTokens:        maxTokens,
+			QPM:              qpm,
+			EnableTimeRange:  enable,
+			DisableTimeRange: disable,
+			Retries:          retries,
+		},
+	}
+}
+
+func ruleConditionToOutput(cond *config.RuleCondition) *RuleConditionOutput {
+	if cond == nil {
+		return nil
+	}
+	return &RuleConditionOutput{Op: cond.Op, Value: cond.Value}
 }
 
 // ApplyResult 表示 apply 操作结果

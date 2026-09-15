@@ -73,13 +73,15 @@ func (e *Exposure) UnmarshalJSON(data []byte) error {
 }
 
 type Config struct {
-	Server      ServerConfig       `yaml:"server"`
-	Inbound     InboundConfig      `yaml:"inbound"`
-	Providers   ProvidersConfig    `yaml:"providers"`
-	ModelGroups []ModelGroupConfig `yaml:"model_groups"`
-	Database    DatabaseConfig     `yaml:"database"`
-	Redirect    RedirectConfigs    `yaml:"redirect"`
-	SmartRoute  *SmartRouteConfig  `yaml:"smart_route"`
+	Server      ServerConfig        `yaml:"server"`
+	Inbound     InboundConfig       `yaml:"inbound"`
+	Providers   ProvidersConfig     `yaml:"providers"`
+	ModelGroups []ModelGroupConfig  `yaml:"model_groups"`
+	Database    DatabaseConfig      `yaml:"database"`
+	Redirect    RedirectConfigs     `yaml:"redirect"`
+	SmartRoute  *SmartRouteConfig   `yaml:"smart_route"`
+	Rules       []RuleConfig        `yaml:"rules"`
+	Cascade     *SpokeCascadeConfig `yaml:"cascade,omitempty"`
 }
 
 // RedirectConfig 定义 redirect 配置项，支持 exposure 字段
@@ -154,7 +156,8 @@ type ServerConfig struct {
 	LogLevel          string            `yaml:"log_level"`
 	Timeout           string            `yaml:"timeout"`             // 全局请求超时，覆盖从发起到连接关闭的整个生命周期，默认 120s
 	ConnectTimeout    string            `yaml:"connect_timeout"`     // TCP + TLS 连接建立超时，默认 10s
-	PrefillTimeout    string            `yaml:"prefill_timeout"`     // 流式首 token 超时，默认 30s
+	PrefillTimeout    string            `yaml:"prefill_timeout"`     // 流式单 attempt 预算（等 header + 首 token），默认 30s
+	NonStreamTimeout  string            `yaml:"non_stream_timeout"`  // 非流式单 attempt 预算（等 header/生成），默认 120s
 	StreamIdleTimeout string            `yaml:"stream_idle_timeout"` // 流式传输空闲超时，默认 60s
 	HealthCheck       HealthCheckConfig `yaml:"health_check"`
 	Admin             AdminConfig       `yaml:"admin"`
@@ -286,14 +289,55 @@ func IsInDisabledTimeRange(now time.Time, ranges []DisabledTimeRange) bool {
 }
 
 type ProviderConfig struct {
-	Endpoint           string                `yaml:"endpoint"`
-	Endpoints          []EndpointConfig      `yaml:"endpoints"`
-	APIKey             string                `yaml:"api_key"`
-	Protocols          []string              `yaml:"protocols"`
-	RateLimit          RateLimitConfig       `yaml:"rate_limit"`
-	UpstreamModels     []UpstreamModelConfig `yaml:"upstream_model"`
-	DefaultProtocols   []string              `yaml:"default_protocols"` // 上游模型默认协议，未显式设 allowed_protocols 的模型继承此值
-	DisabledTimeRanges []string              `yaml:"disabled_time_ranges"`
+	Endpoint     string                 `yaml:"endpoint"`
+	Endpoints    []EndpointConfig       `yaml:"endpoints"`
+	APIKey       string                 `yaml:"api_key"`
+	Protocols    []string               `yaml:"protocols"`
+	RateLimit    RateLimitConfig        `yaml:"rate_limit"`
+	RemoteBridge *RemoteBridgeConfig    `yaml:"remote_bridge,omitempty"`
+	Cascade      *ProviderCascadeConfig `yaml:"cascade,omitempty"`
+}
+
+// ProviderCascadeConfig 表示 hub 侧 cascade provider 配置。
+// 当 enabled 为 true 时，该 provider 通过 WSS 会话接收 job，本地不拨号。
+type ProviderCascadeConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Token   string `yaml:"token"`
+}
+
+// HTTPDialable reports whether this provider has a dialable HTTP endpoint.
+// cascade.enabled providers are session-backed and must not be probed or dialed.
+func (p ProviderConfig) HTTPDialable() bool {
+	return p.Cascade == nil || !p.Cascade.Enabled
+}
+
+// SpokeCascadeConfig 表示 spoke 侧顶层 cascade 出站配置。
+// 历史 `offer` 白名单已移除（由 public/hidden exposure 元数据同步取代），
+// 通过 RejectDeprecatedCascadeKeys 在加载与 Apply 时按路径硬拒绝。
+type SpokeCascadeConfig struct {
+	Hub   string `yaml:"hub"`
+	Token string `yaml:"token"`
+	Peer  string `yaml:"peer"`
+}
+
+// 元数据快照协议资源上限。启用顶层 Spoke Cascade 时，public/hidden 可调用入口
+// 集合（名称去重）必须满足同样限制，否则配置可能在元数据同步阶段失败；
+// 该上限同时用于 metadata frame 的全帧语义校验（见 internal/cascade）。
+// 只限入口数与名称字节长度，不限制 WebSocket 消息大小，避免影响既有
+// job/result/cancel frame 的大小语义。
+const (
+	MaxMetadataSnapshotEntries = 1000
+	MaxMetadataModelNameBytes  = 256
+)
+
+// RemoteBridgeConfig 表示远程桥接 provider 配置。
+// 当 enabled 为 true 时，该 provider 通过远程 bridge 服务代理请求，
+// 本地不持有上游的真实 API 凭证。
+type RemoteBridgeConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Provider string `yaml:"provider"` // bridge 本地 provider 类型，第一版仅允许 xai-oauth
+	Token    string `yaml:"token"`    // bridge 认证 token
+	Local    bool   `yaml:"local"`    // 同容器 loopback bridge，显式跳过 bearer 鉴权
 }
 
 type EndpointConfig struct {
@@ -303,12 +347,6 @@ type EndpointConfig struct {
 
 type RateLimitConfig struct {
 	QPM int `yaml:"qpm"`
-}
-
-type UpstreamModelConfig struct {
-	Model            string   `yaml:"model"`
-	QPM              int      `yaml:"qpm"`
-	AllowedProtocols []string `yaml:"allowed_protocols"`
 }
 
 // GetEndpoint 根据入方向协议选择合适的 endpoint。
@@ -343,14 +381,6 @@ func (p *ProviderConfig) fallbackEndpoint() string {
 }
 
 func (p *ProviderConfig) SelectOutboundFormat(inbound codec.Format) (codec.Format, string, int, error) {
-	return p.SelectOutboundFormatForModel(inbound, "")
-}
-
-func (p *ProviderConfig) SelectOutboundFormatForModel(inbound codec.Format, upstreamModel string) (codec.Format, string, int, error) {
-	if allowed := p.allowedFormatsForModel(upstreamModel); len(allowed) > 0 {
-		return codec.SelectBestFormat(allowed, inbound)
-	}
-
 	allFormats := make([]codec.Format, 0, len(p.Endpoints))
 
 	for _, ep := range p.Endpoints {
@@ -377,49 +407,35 @@ func (p *ProviderConfig) SelectOutboundFormatForModel(inbound codec.Format, upst
 	return codec.SelectBestFormat(formats, inbound)
 }
 
-func (p *ProviderConfig) allowedFormatsForModel(upstreamModel string) []codec.Format {
-	upstreamModel = strings.TrimSpace(upstreamModel)
-	if upstreamModel == "" {
-		return nil
-	}
+// ProtocolReachable 判断 rawProtocol 规范化后是否落在 provider 可达协议内。
+func (p *ProviderConfig) ProtocolReachable(rawProtocol string) bool {
+	return len(p.filterReachableFormats([]string{rawProtocol})) > 0
+}
 
+// filterReachableFormats 将原始协议字符串规范化并与 provider 可达协议求交。
+func (p *ProviderConfig) filterReachableFormats(rawProtocols []string) []codec.Format {
 	reachable := p.reachableFormats()
 	if len(reachable) == 0 {
 		return nil
 	}
 
-	for _, modelCfg := range p.UpstreamModels {
-		if strings.TrimSpace(modelCfg.Model) != upstreamModel {
+	formats := make([]codec.Format, 0, len(rawProtocols))
+	seen := make(map[codec.Format]struct{}, len(rawProtocols))
+	for _, raw := range rawProtocols {
+		format, err := codec.NormalizeProviderFormat(raw)
+		if err != nil {
 			continue
 		}
-		rawProtocols := modelCfg.AllowedProtocols
-		if len(rawProtocols) == 0 {
-			if len(p.DefaultProtocols) == 0 {
-				return nil
-			}
-			rawProtocols = p.DefaultProtocols
+		if _, ok := reachable[format]; !ok {
+			continue
 		}
-
-		formats := make([]codec.Format, 0, len(rawProtocols))
-		seen := make(map[codec.Format]struct{}, len(rawProtocols))
-		for _, raw := range rawProtocols {
-			format, err := codec.NormalizeProviderFormat(raw)
-			if err != nil {
-				continue
-			}
-			if _, ok := reachable[format]; !ok {
-				continue
-			}
-			if _, ok := seen[format]; ok {
-				continue
-			}
-			seen[format] = struct{}{}
-			formats = append(formats, format)
+		if _, ok := seen[format]; ok {
+			continue
 		}
-		return formats
+		seen[format] = struct{}{}
+		formats = append(formats, format)
 	}
-
-	return nil
+	return formats
 }
 
 func (p *ProviderConfig) reachableFormats() map[codec.Format]struct{} {
@@ -449,27 +465,6 @@ func (p *ProviderConfig) reachableFormats() map[codec.Format]struct{} {
 	return formats
 }
 
-// GetOutboundProtocol 返回与历史实现兼容的字符串协议。
-// 新代码应优先使用 SelectOutboundFormat。
-func (p *ProviderConfig) GetOutboundProtocol(inbound string) string {
-	inboundFormat, err := codec.NormalizeProviderFormat(inbound)
-	if err != nil {
-		if len(p.Protocols) > 0 {
-			return p.Protocols[0]
-		}
-		return ""
-	}
-
-	outbound, _, _, err := p.SelectOutboundFormat(inboundFormat)
-	if err != nil {
-		if len(p.Protocols) > 0 {
-			return p.Protocols[0]
-		}
-		return ""
-	}
-	return string(outbound)
-}
-
 func protocolsContains(protocols []string, target string) bool {
 	target = strings.ToLower(strings.TrimSpace(target))
 	for _, p := range protocols {
@@ -484,31 +479,15 @@ func protocolContains(raw, target string) bool {
 	return strings.EqualFold(strings.TrimSpace(raw), target)
 }
 
-// SupportsOllamaChatProtocol 返回该 provider 是否声明了 ollama.chat 协议
-// （在顶层 protocols 或任意 endpoint 中）。
-func (p *ProviderConfig) SupportsOllamaChatProtocol() bool {
-	if protocolsContains(p.Protocols, "ollama.chat") {
-		return true
-	}
-	for _, ep := range p.Endpoints {
-		for _, proto := range ep.Protocols {
-			if protocolContains(proto, "ollama.chat") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// SupportsEmbeddingProtocol 返回该 provider 是否为 embedding-only provider。
-// 返回 true 表示该 provider 支持 ollama.embed 协议（在顶层 protocols 或任意 endpoint 中）。
+// SupportsEmbeddingProtocol 返回该 provider 是否支持 embedding 协议。
+// 返回 true 表示该 provider 支持 ollama.embed 或 openai.embeddings 协议（在顶层 protocols 或任意 endpoint 中）。
 func (p *ProviderConfig) SupportsEmbeddingProtocol() bool {
-	if protocolsContains(p.Protocols, "ollama.embed") {
+	if protocolsContains(p.Protocols, "ollama.embed") || protocolsContains(p.Protocols, "openai.embeddings") {
 		return true
 	}
 	for _, ep := range p.Endpoints {
 		for _, proto := range ep.Protocols {
-			if protocolContains(proto, "ollama.embed") {
+			if protocolContains(proto, "ollama.embed") || protocolContains(proto, "openai.embeddings") {
 				return true
 			}
 		}
@@ -516,34 +495,63 @@ func (p *ProviderConfig) SupportsEmbeddingProtocol() bool {
 	return false
 }
 
-// IsDisabledAt 返回 provider 在指定时间是否处于禁用时段。
-// now 应为本地时间（如 time.Now().Local()）。
-func (p *ProviderConfig) IsDisabledAt(now time.Time) bool {
-	if len(p.DisabledTimeRanges) == 0 {
-		return false
-	}
-	ranges := make([]DisabledTimeRange, 0, len(p.DisabledTimeRanges))
-	for _, raw := range p.DisabledTimeRanges {
-		r, err := ParseTimeRange(raw)
-		if err != nil {
-			continue // 已在启动校验阶段拦截非法值
-		}
-		ranges = append(ranges, r)
-	}
-	return IsInDisabledTimeRange(now, ranges)
-}
+// GetEmbeddingProtocol 返回该 provider 唯一的 embedding 协议（规范化小写字符串）。
+// 若同时存在两种 embedding 协议、或一种都没有，返回 error。
+func (p *ProviderConfig) GetEmbeddingProtocol() (string, error) {
+	var found []string
 
-// GetEmbeddingEndpoint 返回 embedding 请求应使用的 endpoint URL。
-// 选择顺序：第一个 protocols 包含 "ollama.embed" 的 endpoint URL → fallback 到 provider.endpoint。
-// 如果都没有，返回空字符串。
-func (p *ProviderConfig) GetEmbeddingEndpoint() string {
+	// 检查顶层 protocols
+	for _, proto := range p.Protocols {
+		proto = strings.ToLower(strings.TrimSpace(proto))
+		if proto == "ollama.embed" || proto == "openai.embeddings" {
+			found = append(found, proto)
+		}
+	}
+
+	// 检查 endpoints
 	for _, ep := range p.Endpoints {
 		for _, proto := range ep.Protocols {
-			if proto == "ollama.embed" && ep.URL != "" {
+			proto = strings.ToLower(strings.TrimSpace(proto))
+			if proto == "ollama.embed" || proto == "openai.embeddings" {
+				found = append(found, proto)
+			}
+		}
+	}
+
+	// 去重
+	unique := make(map[string]bool)
+	var result []string
+	for _, p := range found {
+		if !unique[p] {
+			unique[p] = true
+			result = append(result, p)
+		}
+	}
+
+	if len(result) == 0 {
+		return "", fmt.Errorf("no embedding protocol found")
+	}
+	if len(result) > 1 {
+		return "", fmt.Errorf("multiple embedding protocols found: %v", result)
+	}
+	return result[0], nil
+}
+
+// GetEmbeddingEndpointByProtocol 选择第一个 endpoints[].protocols 含该 protocol 的 endpoint URL（匹配大小写不敏感）。
+// 若无匹配则 fallback 顶层 endpoint；无可用 URL 时返回空串。
+func (p *ProviderConfig) GetEmbeddingEndpointByProtocol(protocol string) string {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+
+	// 先在 endpoints 中查找
+	for _, ep := range p.Endpoints {
+		for _, proto := range ep.Protocols {
+			if strings.ToLower(strings.TrimSpace(proto)) == protocol && ep.URL != "" {
 				return ep.URL
 			}
 		}
 	}
+
+	// fallback 到顶层 endpoint
 	return p.Endpoint
 }
 
@@ -606,6 +614,18 @@ type ModelMetadataConfig struct {
 	ContextLength *int `yaml:"context_length"` // 若设置则覆盖 catalog 查询结果
 }
 
+// StickyConfig 定义 load-balance 模式的可选 sticky session 配置。
+type StickyConfig struct {
+	Enabled     bool   `yaml:"enabled"`                // 是否启用 sticky session
+	IdleTimeout string `yaml:"idle_timeout,omitempty"` // 空闲超时时间，默认 10m
+}
+
+// ModelGroupConfig 定义模型组的完整配置。
+// 新增字段时需同步更新以下位置，遗漏会导致功能不完整：
+//   - runtimeconfig/yaml_store.go: modelGroupToYamlNode (YAML 序列化)
+//   - runtimeconfig/types.go: NormalizeInput / ToOutput (API 输入/输出转换)
+//   - runtimeconfig/model_group_crud.go: ValidateCreate / ValidateUpdate (校验)
+//   - runtimeconfig/yaml_store_test.go: TestModelGroupToYamlNode_ExhaustiveKeys (穷举测试)
 type ModelGroupConfig struct {
 	Name          string              `yaml:"name"`
 	Mode          string              `yaml:"mode"`
@@ -614,6 +634,7 @@ type ModelGroupConfig struct {
 	Models        ModelEntries        `yaml:"models"`             // 多模型配置（向后兼容）
 	Exposure      *Exposure           `yaml:"exposure,omitempty"` // 可选，默认 public
 	ModelMetadata ModelMetadataConfig `yaml:"model_metadata"`     // 可选元数据覆盖
+	Sticky        *StickyConfig       `yaml:"sticky,omitempty"`   // 可选 sticky session 配置（仅 load-balance 模式）
 }
 
 func (c *ModelGroupConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -653,6 +674,10 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
 
+	if err := RejectDeprecatedConfigYAML(data); err != nil {
+		return nil, err
+	}
+
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
@@ -662,6 +687,15 @@ func Load(path string) (*Config, error) {
 	// 配置文件的持久化升级由 serve.go 启动时的 AST 写回负责，
 	// 这里仅保证 cfg 本身不再持有简写值，避免运行时各路径出现简写。
 	NormalizeProviderProtocolsInConfig(&cfg)
+	NormalizeRulesInConfig(&cfg)
+
+	if err := ValidateRules(cfg.Rules); err != nil {
+		return nil, fmt.Errorf("validate rules: %w", err)
+	}
+
+	if err := ValidateCascade(&cfg); err != nil {
+		return nil, fmt.Errorf("validate cascade: %w", err)
+	}
 
 	return &cfg, nil
 }

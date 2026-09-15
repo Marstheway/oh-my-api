@@ -10,20 +10,22 @@ import (
 )
 
 type responsesToChatStreamMapper struct {
-	responseID     string
-	requestedModel string
-	model          string
-	created        int64
-	roleSent       bool
-	toolIndex      map[string]int
-	nextTool       int
-	itemIDToKey    map[string]string
-	outputIndexToKey map[int]string
-	pendingArgsByItemID    map[string]string
-	pendingArgsByOutputIndex map[int]string
-	sawToolCall              bool
+	responseID                 string
+	requestedModel             string
+	model                      string
+	created                    int64
+	roleSent                   bool
+	toolIndex                  map[string]int
+	nextTool                   int
+	itemIDToKey                map[string]string
+	outputIndexToKey           map[int]string
+	pendingArgsByItemID        map[string]string
+	pendingArgsByOutputIndex   map[int]string
+	fallbackToolKey            string
+	fallbackToolAmbiguous      bool
+	sawToolCall                bool
 	needsReasoningSummaryBreak bool
-	hasSentReasoning         bool
+	hasSentReasoning           bool
 }
 
 func newResponsesToChatStreamMapper(responseID, model string, created int64) *responsesToChatStreamMapper {
@@ -34,25 +36,26 @@ func newResponsesToChatStreamMapper(responseID, model string, created int64) *re
 		created = time.Now().Unix()
 	}
 	return &responsesToChatStreamMapper{
-		responseID:              responseID,
-		requestedModel:          model,
-		model:                   model,
-		created:                 created,
-		toolIndex:               map[string]int{},
-		itemIDToKey:             map[string]string{},
-		outputIndexToKey:        map[int]string{},
-		pendingArgsByItemID:     map[string]string{},
+		responseID:               responseID,
+		requestedModel:           model,
+		model:                    model,
+		created:                  created,
+		toolIndex:                map[string]int{},
+		itemIDToKey:              map[string]string{},
+		outputIndexToKey:         map[int]string{},
+		pendingArgsByItemID:      map[string]string{},
 		pendingArgsByOutputIndex: map[int]string{},
 	}
 }
 
-func (m *responsesToChatStreamMapper) chunk(delta *dto.Delta, finishReason *string) dto.ChatCompletionChunk {
+func (m *responsesToChatStreamMapper) chunkWithUsage(delta *dto.Delta, finishReason *string, usage *dto.Usage) dto.ChatCompletionChunk {
 	return dto.ChatCompletionChunk{
 		ID:      m.responseID,
 		Object:  "chat.completion.chunk",
 		Created: m.created,
 		Model:   m.model,
 		Choices: []dto.ChunkChoice{{Index: 0, Delta: delta, FinishReason: finishReason}},
+		Usage:   usage,
 	}
 }
 
@@ -61,7 +64,7 @@ func (m *responsesToChatStreamMapper) emitRoleIfNeeded() []dto.ChatCompletionChu
 		return nil
 	}
 	m.roleSent = true
-	return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{Role: "assistant"}, nil)}
+	return []dto.ChatCompletionChunk{m.chunkWithUsage(&dto.Delta{Role: "assistant"}, nil, nil)}
 }
 
 func (m *responsesToChatStreamMapper) keyForEvent(event dto.ResponsesStreamEvent) string {
@@ -101,6 +104,17 @@ func (m *responsesToChatStreamMapper) findTool(event dto.ResponsesStreamEvent) (
 			return key, idx, true
 		}
 	}
+	if !m.fallbackToolAmbiguous && m.fallbackToolKey != "" {
+		if idx, ok := m.toolIndex[m.fallbackToolKey]; ok {
+			if event.OutputIndex != nil {
+				m.outputIndexToKey[*event.OutputIndex] = m.fallbackToolKey
+			}
+			if itemID := strings.TrimSpace(event.ItemID); itemID != "" {
+				m.itemIDToKey[itemID] = m.fallbackToolKey
+			}
+			return m.fallbackToolKey, idx, true
+		}
+	}
 	return "", 0, false
 }
 
@@ -109,6 +123,14 @@ func (m *responsesToChatStreamMapper) ensureTool(event dto.ResponsesStreamEvent,
 	if key == "" {
 		if itemID != "" {
 			key = "item:" + strings.TrimSpace(itemID)
+		}
+	}
+	if key == "" && callID != "" {
+		key = "call:" + strings.TrimSpace(callID)
+		if m.fallbackToolKey != "" && m.fallbackToolKey != key {
+			m.fallbackToolAmbiguous = true
+		} else {
+			m.fallbackToolKey = key
 		}
 	}
 	if key == "" {
@@ -181,17 +203,17 @@ func (m *responsesToChatStreamMapper) Map(event dto.ResponsesStreamEvent) ([]dto
 		}
 		return m.emitRoleIfNeeded(), nil
 
-		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-			var delta string
-			if len(event.Delta) > 0 {
-				if err := json.Unmarshal(event.Delta, &delta); err != nil {
-					return nil, err
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		var delta string
+		if len(event.Delta) > 0 {
+			if err := json.Unmarshal(event.Delta, &delta); err != nil {
+				return nil, err
 			}
 		}
 		if delta == "" {
 			return nil, nil
 		}
-			if m.needsReasoningSummaryBreak {
+		if m.needsReasoningSummaryBreak {
 			if strings.HasPrefix(delta, "\n\n") {
 				m.needsReasoningSummaryBreak = false
 			} else if strings.HasPrefix(delta, "\n") {
@@ -201,11 +223,11 @@ func (m *responsesToChatStreamMapper) Map(event dto.ResponsesStreamEvent) ([]dto
 				delta = "\n\n" + delta
 				m.needsReasoningSummaryBreak = false
 			}
-			}
-			m.hasSentReasoning = true
-			chunks := m.emitRoleIfNeeded()
-			chunks = append(chunks, m.chunk(&dto.Delta{ReasoningContent: delta}, nil))
-			return chunks, nil
+		}
+		m.hasSentReasoning = true
+		chunks := m.emitRoleIfNeeded()
+		chunks = append(chunks, m.chunkWithUsage(&dto.Delta{ReasoningContent: delta}, nil, nil))
+		return chunks, nil
 
 	case "response.reasoning_summary_text.done", "response.reasoning_text.done":
 		if m.hasSentReasoning {
@@ -237,11 +259,18 @@ func (m *responsesToChatStreamMapper) Map(event dto.ResponsesStreamEvent) ([]dto
 		if callID == "" {
 			callID = strings.TrimSpace(item.ID)
 		}
-
-			key, idx := m.ensureTool(event, item.ID, callID)
-			if key == "" {
-				return nil, nil
+		if callID == "" {
+			if event.OutputIndex != nil {
+				callID = fmt.Sprintf("generated_tool_call_%d", *event.OutputIndex)
+			} else {
+				callID = fmt.Sprintf("generated_tool_call_%d", m.nextTool)
 			}
+		}
+
+		key, idx := m.ensureTool(event, item.ID, callID)
+		if key == "" {
+			return nil, nil
+		}
 
 		m.sawToolCall = true
 
@@ -259,7 +288,7 @@ func (m *responsesToChatStreamMapper) Map(event dto.ResponsesStreamEvent) ([]dto
 		}
 
 		chunks := m.emitRoleIfNeeded()
-		chunks = append(chunks, m.chunk(&dto.Delta{ToolCalls: []dto.ToolCall{{
+		chunks = append(chunks, m.chunkWithUsage(&dto.Delta{ToolCalls: []dto.ToolCall{{
 			Index: &idx,
 			ID:    callID,
 			Type:  "function",
@@ -267,7 +296,7 @@ func (m *responsesToChatStreamMapper) Map(event dto.ResponsesStreamEvent) ([]dto
 				Name:      name,
 				Arguments: initialArgs,
 			},
-		}}}, nil))
+		}}}, nil, nil))
 		return chunks, nil
 
 	case "response.output_text.delta":
@@ -280,7 +309,7 @@ func (m *responsesToChatStreamMapper) Map(event dto.ResponsesStreamEvent) ([]dto
 		if delta == "" {
 			return nil, nil
 		}
-		return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{Content: delta}, nil)}, nil
+		return []dto.ChatCompletionChunk{m.chunkWithUsage(&dto.Delta{Content: delta}, nil, nil)}, nil
 
 	case "response.function_call_arguments.delta":
 		var argsDelta string
@@ -294,13 +323,13 @@ func (m *responsesToChatStreamMapper) Map(event dto.ResponsesStreamEvent) ([]dto
 		}
 
 		if _, idx, ok := m.findTool(event); ok {
-			return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{ToolCalls: []dto.ToolCall{{
+			return []dto.ChatCompletionChunk{m.chunkWithUsage(&dto.Delta{ToolCalls: []dto.ToolCall{{
 				Index: &idx,
 				Type:  "function",
 				Function: dto.ToolCallFunc{
 					Arguments: argsDelta,
 				},
-			}}}, nil)}, nil
+			}}}, nil, nil)}, nil
 		}
 
 		// Tool 还不存在，暂存 delta
@@ -312,52 +341,55 @@ func (m *responsesToChatStreamMapper) Map(event dto.ResponsesStreamEvent) ([]dto
 		}
 		return nil, nil
 
-		case "response.custom_tool_call_input.delta":
-			var argsDelta string
-			if len(event.Delta) > 0 {
-				if err := json.Unmarshal(event.Delta, &argsDelta); err != nil {
-					return nil, err
-				}
+	case "response.custom_tool_call_input.delta":
+		var argsDelta string
+		if len(event.Delta) > 0 {
+			if err := json.Unmarshal(event.Delta, &argsDelta); err != nil {
+				return nil, err
 			}
-			if argsDelta == "" {
-				return nil, nil
-			}
-
-			if _, idx, ok := m.findTool(event); ok {
-				return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{ToolCalls: []dto.ToolCall{{
-					Index: &idx,
-					Type:  "function",
-					Function: dto.ToolCallFunc{
-						Arguments: argsDelta,
-					},
-				}}}, nil)}, nil
-			}
-
-			// Tool 还不存在，暂存 delta
-			if event.OutputIndex != nil {
-				m.pendingArgsByOutputIndex[*event.OutputIndex] += argsDelta
-			}
-			if itemID := strings.TrimSpace(event.ItemID); itemID != "" {
-				m.pendingArgsByItemID[itemID] += argsDelta
-			}
+		}
+		if argsDelta == "" {
 			return nil, nil
+		}
 
-		case "response.completed", "response.incomplete", "response.done":
-			finishReason := m.responsesFinishReasonFromCompletedEvent(event)
-			return []dto.ChatCompletionChunk{m.chunk(&dto.Delta{}, &finishReason)}, nil
+		if _, idx, ok := m.findTool(event); ok {
+			return []dto.ChatCompletionChunk{m.chunkWithUsage(&dto.Delta{ToolCalls: []dto.ToolCall{{
+				Index: &idx,
+				Type:  "function",
+				Function: dto.ToolCallFunc{
+					Arguments: argsDelta,
+				},
+			}}}, nil, nil)}, nil
+		}
+
+		// Tool 还不存在，暂存 delta
+		if event.OutputIndex != nil {
+			m.pendingArgsByOutputIndex[*event.OutputIndex] += argsDelta
+		}
+		if itemID := strings.TrimSpace(event.ItemID); itemID != "" {
+			m.pendingArgsByItemID[itemID] += argsDelta
+		}
+		return nil, nil
+
+	case "response.completed", "response.incomplete", "response.done":
+		finishReason := m.responsesFinishReasonFromCompletedEvent(event)
+		// 解析 usage
+		var usage *dto.Usage
+		if len(event.Response) > 0 {
+			var responseObj struct {
+				Usage *dto.ResponsesUsage `json:"usage,omitempty"`
+			}
+			if err := json.Unmarshal(event.Response, &responseObj); err == nil && responseObj.Usage != nil {
+				u := usageFromResponsesUsage(responseObj.Usage)
+				usage = &u
+			}
+		}
+		return []dto.ChatCompletionChunk{m.chunkWithUsage(&dto.Delta{}, &finishReason, usage)}, nil
 
 	case "response.failed":
-		var responseObj struct {
-			Error *struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if len(event.Response) > 0 {
-			_ = json.Unmarshal(event.Response, &responseObj)
-		}
-		if responseObj.Error != nil {
-			return nil, fmt.Errorf("response failed [%s]: %s", responseObj.Error.Code, responseObj.Error.Message)
+		code, message := extractResponsesError(event)
+		if code != "" || message != "" {
+			return nil, fmt.Errorf("response failed [%s]: %s", code, message)
 		}
 		return nil, fmt.Errorf("response failed")
 	default:

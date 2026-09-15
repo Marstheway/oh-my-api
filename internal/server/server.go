@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Marstheway/oh-my-api/internal/cascade"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/router"
 	"github.com/Marstheway/oh-my-api/internal/runtimeconfig"
@@ -18,12 +19,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func Run(cfg *config.Config, metricsHandler http.Handler, runtimeManager *runtimeconfig.Manager) error {
+func Run(cfg *config.Config, metricsHandler http.Handler, runtimeManager *runtimeconfig.Manager, cascadeHubs *cascade.HubRegistry) error {
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
-	router.Setup(r, runtimeManager)
-	router.SetupAdmin(r, cfg, runtimeManager, stats.GetQuerier())
+	router.Setup(r, runtimeManager, cascadeHubs)
+	router.SetupAdmin(r, cfg, runtimeManager, stats.GetQuerier(), cascadeHubs)
 
 	srv := &http.Server{
 		Addr:    cfg.Server.Listen,

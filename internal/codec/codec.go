@@ -27,4 +27,5 @@ type Codec interface {
 	DecodeRequest(c *gin.Context) (any, error)
 	EncodeRequest(outbound Format, req any, upstreamModel string, needsDeepSeekCompat bool) ([]byte, error)
 	WriteResponse(c *gin.Context, outbound Format, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error
+	WriteResponseTo(w http.ResponseWriter, outbound Format, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error
 }

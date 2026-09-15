@@ -365,6 +365,44 @@ func TestUsageDetails_Fields(t *testing.T) {
 	}
 }
 
+func TestToolCallDelta_OmitsEmptyIdentityFields(t *testing.T) {
+	index := 0
+	chunk := ChatCompletionChunk{
+		Choices: []ChunkChoice{{
+			Delta: &Delta{ToolCalls: []ToolCall{{
+				Index:    &index,
+				Function: ToolCallFunc{Arguments: `{"city"`},
+			}}},
+		}},
+	}
+
+	body, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	var wire struct {
+		Choices []struct {
+			Delta struct {
+				ToolCalls []map[string]any `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("Unmarshal error: %v", err)
+	}
+	call := wire.Choices[0].Delta.ToolCalls[0]
+	if _, exists := call["id"]; exists {
+		t.Fatalf("tool call delta contains id: %s", body)
+	}
+	function, _ := call["function"].(map[string]any)
+	if _, exists := function["name"]; exists {
+		t.Fatalf("tool call delta contains function.name: %s", body)
+	}
+	if function["arguments"] != `{"city"` {
+		t.Fatalf("tool call delta arguments = %v", function["arguments"])
+	}
+}
+
 func TestMessage_NewFields(t *testing.T) {
 	// 测试 Message 新增字段
 	tests := []struct {

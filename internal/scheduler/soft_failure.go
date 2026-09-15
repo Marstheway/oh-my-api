@@ -30,26 +30,40 @@ const (
 	failureReasonContentFilterStop   = "content_filter_stop_reason"
 	failureReasonContentFilterDetail = "content_filter_incomplete"
 	failureReasonContentFilterPhrase = "content_filter_phrase"
-	failureReasonTokenHubQuota       = "tokenhub_quota_exceeded"
-	failureReasonTokenHubContent     = "tokenhub_content_filter"
+	failureReasonQuotaExceeded       = "quota_exceeded"
+	failureReasonContentFilter       = "content_filter"
 )
 
-// tokenHubQuotaErrorCodes 已知的额度类错误码集合
-var tokenHubQuotaErrorCodes = map[string]bool{
-	"401007": true,
-	"401008": true,
-	"403004": true,
-	"20097":  true,
+// tencentQuotaErrorCodes 腾讯云推理 API 已知的额度类错误码集合。
+// 参考 docs/references/errcode/腾讯云 API错误码.md（产品文档 1823/131595）。
+var tencentQuotaErrorCodes = map[string]bool{
+	"401007": true, // CodeEndpointNoFreePackage：无免费体验额度
+	"401008": true, // CodeEndpointFreeQuotaExhausted：免费体验额度耗尽
+	"403004": true, // CodeInsufficientBalance：账号欠费
 }
 
-// tokenHubHosts TokenHub 已知的目标 host 集合
-var tokenHubHosts = map[string]bool{
-	"api.lkeap.cloud.tencent.com": true,
-	"tokenhub.tencentmaas.com":    true,
+// openAIQuotaErrorCodes OpenAI 429 响应中表示额度耗尽的 error.code 白名单。
+// 参考 docs/references/errcode/openai api ErrCode.md。
+// 注意：429 本身是限流语义，仅当 error.code 命中此白名单时才升级为额度错误。
+var openAIQuotaErrorCodes = map[string]bool{
+	"credit_balance_exhausted":          true,
+	"organization_spend_limit_exceeded": true,
+	"project_spend_limit_exceeded":      true,
+	"organization_usage_limit_exceeded": true,
 }
 
-// quotaCooldown 额度类错误（HTTP 402 / TokenHub 私有额度码）的统一不健康冷却时间
-const quotaCooldown = 1 * time.Hour
+// tencentHosts 腾讯云推理 API 家族已知 host 集合。
+// token-hub / token-plan / coding-plan 三个产品共享同一套腾讯云错误码。
+var tencentHosts = map[string]bool{
+	"api.lkeap.cloud.tencent.com": true, // token-plan / coding-plan
+	"tokenhub.tencentmaas.com":    true, // token-hub
+}
+
+// quotaBaseCooldown 额度类错误（HTTP 402 / 私有额度码）的初始退避时长
+const quotaBaseCooldown = 1 * time.Hour
+
+// quotaMaxCooldown 额度类错误的退避封顶时长（指数退避上限）
+const quotaMaxCooldown = 12 * time.Hour
 
 // requestTarget 表示请求的目标地址信息，用于 provider 家族识别
 type requestTarget struct {
@@ -70,12 +84,13 @@ var softFailurePhrases = []string{
 	"抱歉，我无法提供相关内容",
 }
 
-func parseResponse(resp *http.Response, providerName, upstreamModel, protocol string, prefillTimeout time.Duration, streamIdleTimeout time.Duration) (*Result, error) {
+func parseResponse(resp *http.Response, providerName, upstreamModel, protocol string, prefillTimeout time.Duration, streamIdleTimeout time.Duration, attemptStart time.Time) (*Result, error) {
 	result := &Result{
-		Response:      resp,
-		Winner:        providerName,
-		UpstreamModel: upstreamModel,
-		FailureKind:   FailureKindSuccess,
+		Response:         resp,
+		Winner:           providerName,
+		UpstreamModel:    upstreamModel,
+		OutboundProtocol: protocol,
+		FailureKind:      FailureKindSuccess,
 	}
 
 	if resp == nil {
@@ -89,13 +104,16 @@ func parseResponse(resp *http.Response, providerName, upstreamModel, protocol st
 			return result, nil
 		}
 
-		kind, reason, streamTTFT, err := probeStreamPrefix(resp, protocol, prefillTimeout, streamIdleTimeout)
+		kind, reason, streamTTFT, err := probeStreamPrefix(resp, protocol, prefillTimeout, streamIdleTimeout, attemptStart)
 		if err != nil {
 			return nil, err
 		}
 		result.FailureKind = kind
 		result.FailureReason = reason
 		result.StreamTTFT = streamTTFT
+		if streamTTFT > 0 {
+			result.StreamStartedAt = attemptStart.Add(streamTTFT)
+		}
 		return result, nil
 	}
 
@@ -118,9 +136,14 @@ func parseResponse(resp *http.Response, providerName, upstreamModel, protocol st
 	return result, nil
 }
 
-// applyTokenHubClassification 对 hard failure 做 provider 错误分类
-// 先处理通用 HTTP 规则（如 402），再针对 TokenHub 做私有错误码分级
-func applyTokenHubClassification(result *Result, resp *http.Response, taskRequest *http.Request) {
+// applyProviderErrorClassification 对 hard failure 做 provider 级错误再分类。
+// 只处理会影响健康策略或 soft 语义的关键码，其余保持 parseResponse 原样：
+//  1. 通用 HTTP 402 → 额度退避
+//  2. 腾讯云推理 host：额度私有码 → 额度退避；451001 → soft（换源、不摘除）
+//  3. OpenAI 兼容 429 + 额度 error.code → 额度退避
+//
+// 普通 429 / 其它 4xx 不摘除，仅影响当前请求 failover。
+func applyProviderErrorClassification(result *Result, resp *http.Response, taskRequest *http.Request) {
 	if result.FailureKind != FailureKindHard {
 		return
 	}
@@ -128,26 +151,48 @@ func applyTokenHubClassification(result *Result, resp *http.Response, taskReques
 		return
 	}
 
-	// 通用：HTTP 402 表示欠费/额度耗尽，立即打 1 小时不健康
+	// 通用：HTTP 402 表示欠费/额度耗尽。
+	// 覆盖 Anthropic billing_error、DeepSeek Insufficient Balance、腾讯云 402 等。
 	if resp != nil && resp.StatusCode == http.StatusPaymentRequired {
-		result.FailureKind = FailureKindHard
-		result.FailureReason = failureReasonTokenHubQuota
-		result.HealthActionInfo = HealthActionInfo{
-			Action:           HealthActionMarkUnhealthy,
-			CooldownOverride: quotaCooldown,
-		}
+		markQuotaFailure(result)
 		return
 	}
 
 	target := makeRequestTarget(resp, taskRequest)
-	if !isTokenHubTarget(target) {
+	if isTencentTarget(target) {
+		switch code := parseErrorCode(resp); {
+		case tencentQuotaErrorCodes[code]:
+			markQuotaFailure(result)
+		case code == "451001":
+			// 腾讯内容审核：soft，便于指标识别 prompt 是否触发审核；换源且不 unhealthy
+			result.FailureKind = FailureKindSoft
+			result.FailureReason = failureReasonContentFilter
+			result.HealthActionInfo = HealthActionInfo{}
+		}
+		// 其它腾讯私有码（含 429 限流）：保持 hard 4xx 默认——换源、不摘除
 		return
 	}
 
-	info := classifyTokenHubError(target, resp)
-	result.FailureKind = info.FailureKind
-	result.FailureReason = info.FailureReason
-	result.HealthActionInfo = info.HealthActionInfo
+	// OpenAI 兼容错误体：429 + 额度类 error.code → 额度退避
+	if resp != nil && resp.StatusCode == http.StatusTooManyRequests && isOpenAIQuotaError(resp) {
+		markQuotaFailure(result)
+	}
+}
+
+// markQuotaFailure 将 hard failure 标记为额度类错误并挂额度退避动作
+func markQuotaFailure(result *Result) {
+	result.FailureKind = FailureKindHard
+	result.FailureReason = failureReasonQuotaExceeded
+	result.HealthActionInfo = HealthActionInfo{
+		Action: HealthActionMarkUnhealthyQuota,
+	}
+}
+
+// isOpenAIQuotaError 判断响应是否为 OpenAI 风格额度耗尽错误
+// （HTTP 429 + error.code 命中额度白名单）
+func isOpenAIQuotaError(resp *http.Response) bool {
+	code := parseErrorCode(resp)
+	return code != "" && openAIQuotaErrorCodes[code]
 }
 
 // makeRequestTarget 从 HTTP 响应和任务请求中提取目标 URL 信息
@@ -169,22 +214,22 @@ func makeRequestTarget(resp *http.Response, taskRequest *http.Request) requestTa
 	return requestTarget{}
 }
 
-// isTokenHubTarget 判断请求目标 host 是否属于 TokenHub
-func isTokenHubTarget(target requestTarget) bool {
-	return tokenHubHosts[target.host]
+// isTencentTarget 判断请求目标 host 是否属于腾讯云推理 API 家族
+func isTencentTarget(target requestTarget) bool {
+	return tencentHosts[target.host]
 }
 
-// tokenHubErrorBody 表示 TokenHub 返回的统一错误体
-type tokenHubErrorBody struct {
+// errorBody 表示 OpenAI 兼容的统一错误体；code 可能是 string 或 number
+type errorBody struct {
 	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
 	} `json:"error"`
 }
 
-// parseTokenHubErrorCode 从响应体中提取 error.code
-// 返回空字符串表示解析失败或不存在
-func parseTokenHubErrorCode(resp *http.Response) string {
+// parseErrorCode 从响应体中提取 error.code（OpenAI 兼容格式）
+// 支持 JSON string 与 number；返回空字符串表示解析失败或不存在
+func parseErrorCode(resp *http.Response) string {
 	if resp == nil || resp.Body == nil {
 		return ""
 	}
@@ -200,80 +245,43 @@ func parseTokenHubErrorCode(resp *http.Response) string {
 		return ""
 	}
 
-	var errBody tokenHubErrorBody
+	var errBody errorBody
 	if err := json.Unmarshal(body, &errBody); err != nil {
 		return ""
 	}
 
-	return errBody.Error.Code
+	return normalizeErrorCode(errBody.Error.Code)
 }
 
-// classifyTokenHubError 对 TokenHub 的错误码进行分类
-// 返回默认的 FailureKindResult，HealthAction 和 FailureKind 表示分类结果
-func classifyTokenHubError(target requestTarget, resp *http.Response) failureKindResult {
-	if !isTokenHubTarget(target) {
-		return defaultHardFailureResult()
+// normalizeErrorCode 将 error.code 的 RawMessage 规范为字符串
+func normalizeErrorCode(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
 	}
-
-	// HTTP 429 只影响当前请求 failover，不写入长期不健康
-	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
-		return failureKindResult{FailureKind: FailureKindHard, FailureReason: failureReasonHTTPStatus}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
 	}
-
-	code := parseTokenHubErrorCode(resp)
-	if code == "" {
-		return defaultHardFailureResult()
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.String()
 	}
-
-	return classifyTokenHubErrorCode(code)
-}
-
-// failureKindResult 封装分类结果，包含 FailureKind、FailureReason 和 HealthActionInfo
-type failureKindResult struct {
-	FailureKind      FailureKind
-	FailureReason    string
-	HealthActionInfo HealthActionInfo
-}
-
-func defaultHardFailureResult() failureKindResult {
-	return failureKindResult{
-		FailureKind:   FailureKindHard,
-		FailureReason: failureReasonHTTPStatus,
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return strconv.FormatInt(int64(f), 10)
 	}
+	return ""
 }
 
 // applyHealthAction 根据分类结果对 provider 健康状态执行对应操作
 func applyHealthAction(chk *health.Checker, healthKey string, result *Result) {
 	switch result.HealthActionInfo.Action {
+	case HealthActionMarkUnhealthyQuota:
+		// 额度策略集中在此：base/max 不经由 Result 透传
+		chk.MarkUnhealthyEscalating(healthKey, quotaBaseCooldown, quotaMaxCooldown)
 	case HealthActionMarkUnhealthy:
 		chk.MarkUnhealthyFor(healthKey, result.HealthActionInfo.CooldownOverride)
 	}
-}
-
-// classifyTokenHubErrorCode 根据 TokenHub 错误码返回对应的分类结果
-func classifyTokenHubErrorCode(code string) failureKindResult {
-	// 额度类错误：hard failure + 立即 1 小时不健康
-	if tokenHubQuotaErrorCodes[code] {
-		return failureKindResult{
-			FailureKind:   FailureKindHard,
-			FailureReason: failureReasonTokenHubQuota,
-			HealthActionInfo: HealthActionInfo{
-				Action:           HealthActionMarkUnhealthy,
-				CooldownOverride: quotaCooldown,
-			},
-		}
-	}
-
-	// 内容安全过滤：映射到 soft_failure
-	if code == "451001" {
-		return failureKindResult{
-			FailureKind:   FailureKindSoft,
-			FailureReason: failureReasonTokenHubContent,
-		}
-	}
-
-	// 其它 TokenHub 私有错误码：保持 hard failure，不写入长期不健康
-	return defaultHardFailureResult()
 }
 
 func classifyResponse(protocol string, body []byte, sseDataEvents []string) (FailureKind, string) {
@@ -642,7 +650,8 @@ func adaptiveCandidateKey(task Task) string {
 	return task.ProviderName + "/" + task.UpstreamModel
 }
 
-// recordAdaptiveTTFTIfNeeded 在 attempt 确认为流式成功时写入 TTFT 样本。
+// recordAdaptiveTTFTIfNeeded 在 attempt 确认为流式成功时，将端到端 TTFT 样本写入 adaptive tracker。
+// TTFT 表示单次上游尝试从发起 HTTP 请求到收到首个 SSE 事件的耗时。
 func recordAdaptiveTTFTIfNeeded(result *Result, task Task) {
 	if result == nil {
 		return

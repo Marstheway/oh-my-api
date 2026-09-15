@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,10 +20,10 @@ import (
 func newConcurrentStrategyTest(t *testing.T, providers map[string]config.ProviderConfig) (*ConcurrentStrategy, *health.Checker) {
 	t.Helper()
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	return NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0), h
+	return NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0, 0), h
 }
 
 func newProbeReadFailureServer(t *testing.T) *httptest.Server {
@@ -64,10 +65,10 @@ func TestConcurrentStrategy_ProbeReadFailureMarksProviderUnhealthy(t *testing.T)
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(1, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	_, err := strategy.Execute(context.Background(), []Task{{
@@ -582,9 +583,9 @@ func TestConcurrentStrategy_AttemptMetrics_Canceled(t *testing.T) {
 	}
 }
 
-// TestConcurrentStrategy_TokenHubQuotaError_OtherProviderWins 验证并发竞速模式下
-// 一个 provider 返回 TokenHub 额度错误时，其他 provider 仍能获胜
-func TestConcurrentStrategy_TokenHubQuotaError_OtherProviderWins(t *testing.T) {
+// TestConcurrentStrategy_TencentQuotaError_OtherProviderWins 验证并发竞速模式下
+// 一个 provider 返回腾讯云额度错误时，其他 provider 仍能获胜
+func TestConcurrentStrategy_TencentQuotaError_OtherProviderWins(t *testing.T) {
 	quotaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error":{"code":"401007","message":"quota exceeded"}}`))
@@ -633,11 +634,11 @@ func TestConcurrentStrategy_TokenHubQuotaError_OtherProviderWins(t *testing.T) {
 		t.Fatalf("FailureKind = %q, want %q", result.FailureKind, FailureKindSuccess)
 	}
 
-	// 验证 token-hub 未被标记为不健康（因为 isTokenHubTarget 检查失败 ——
-	// 测试服务器 URL 不匹配 TokenHub 的已知 host）
+	// 验证 token-hub 未被标记为不健康（因为 isTencentTarget 检查失败 ——
+	// 测试服务器 URL 不匹配腾讯云推理 API 的已知 host）
 	healthKey := health.MakeHealthKey("token-hub", "openai")
 	if !h.IsHealthy(healthKey) {
-		t.Fatal("token-hub should remain healthy in test (URL doesn't match TokenHub pattern)")
+		t.Fatal("token-hub should remain healthy in test (URL doesn't match Tencent pattern)")
 	}
 }
 
@@ -658,11 +659,10 @@ func TestConcurrentStrategy_FiltersOutDisabledCandidates(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-prov": {
-			Endpoint:           disabledSrv.URL,
-			APIKey:             "test-key",
+			Endpoint:  disabledSrv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 		"enabled-prov": {
 			Endpoint:  successSrv.URL,
@@ -678,7 +678,7 @@ func TestConcurrentStrategy_FiltersOutDisabledCandidates(t *testing.T) {
 	successReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, successSrv.URL, nil)
 
 	result, err := strategy.Execute(context.Background(), []Task{
-		{ProviderName: "disabled-prov", Provider: providers["disabled-prov"], UpstreamModel: "model", Request: disabledReq},
+		{ProviderName: "disabled-prov", Provider: providers["disabled-prov"], UpstreamModel: "model", Request: disabledReq, DisableTimeRange: []string{"00:00-24:00"}},
 		{ProviderName: "enabled-prov", Provider: providers["enabled-prov"], UpstreamModel: "model", Request: successReq},
 	})
 	if err != nil {
@@ -693,6 +693,110 @@ func TestConcurrentStrategy_FiltersOutDisabledCandidates(t *testing.T) {
 
 // TestConcurrentStrategy_SingleDisabledProviderReturnsError 验证 concurrent 单候选
 // 处于禁用时段时，返回 ErrNoProviderAvailable。
+func newHeldOpenAIStreamServer(t *testing.T) (url string, releaseTail func(), canceled <-chan struct{}) {
+	t.Helper()
+	release := make(chan struct{})
+	canceledCh := make(chan struct{})
+	var cancelOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "flush unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"))
+		flusher.Flush()
+
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			cancelOnce.Do(func() { close(canceledCh) })
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, func() { close(release) }, canceledCh
+}
+
+func newCancelWatchServer(t *testing.T) (url string, canceled <-chan struct{}) {
+	t.Helper()
+	canceledCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+		close(canceledCh)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, canceledCh
+}
+
+// TestConcurrentStrategy_WinnerStreamSurvivesRaceCancel 验证多候选竞速选出
+// 流式胜者后，继续读 SSE 不会因为内部 race cancel 变成 context canceled。
+func TestConcurrentStrategy_WinnerStreamSurvivesRaceCancel(t *testing.T) {
+	winnerURL, releaseTail, winnerCanceled := newHeldOpenAIStreamServer(t)
+	loserURL, loserCanceled := newCancelWatchServer(t)
+
+	providers := map[string]config.ProviderConfig{
+		"winner": {
+			Endpoint:  winnerURL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+		"loser": {
+			Endpoint:  loserURL,
+			APIKey:    "test-key",
+			Protocols: []string{"openai"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
+		},
+	}
+	strategy, _ := newConcurrentStrategyTest(t, providers)
+
+	winnerReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, winnerURL, nil)
+	loserReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, loserURL, nil)
+
+	result, err := strategy.Execute(context.Background(), []Task{
+		{ProviderName: "winner", Provider: providers["winner"], UpstreamModel: "model", Request: winnerReq, Stream: true},
+		{ProviderName: "loser", Provider: providers["loser"], UpstreamModel: "model", Request: loserReq, Stream: true},
+	})
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	defer result.Response.Body.Close()
+
+	if result.Winner != "winner" {
+		t.Fatalf("winner = %q, want %q", result.Winner, "winner")
+	}
+	if result.FailureKind != FailureKindSuccess {
+		t.Fatalf("FailureKind = %q, want %q", result.FailureKind, FailureKindSuccess)
+	}
+
+	select {
+	case <-loserCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loser request was not canceled after winner")
+	}
+
+	releaseTail()
+	body := string(readSchedulerResponseBody(t, result.Response))
+	if !strings.Contains(body, `"content":"hello"`) {
+		t.Fatalf("missing probed prefix in stream body: %q", body)
+	}
+	if !strings.Contains(body, `"content":" world"`) {
+		t.Fatalf("winner tail was cut off after race cancel: %q", body)
+	}
+
+	select {
+	case <-winnerCanceled:
+		t.Fatal("winner request context was canceled after race; stream should stay bound to parent ctx")
+	default:
+	}
+}
+
 func TestConcurrentStrategy_SingleDisabledProviderReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -702,11 +806,10 @@ func TestConcurrentStrategy_SingleDisabledProviderReturnsError(t *testing.T) {
 
 	providers := map[string]config.ProviderConfig{
 		"disabled-only": {
-			Endpoint:           srv.URL,
-			APIKey:             "test-key",
+			Endpoint:  srv.URL,
+			APIKey:    "test-key",
 			Protocols: []string{"openai"},
-			RateLimit:          config.RateLimitConfig{QPM: 0},
-			DisabledTimeRanges: []string{"00:00-24:00"},
+			RateLimit: config.RateLimitConfig{QPM: 0},
 		},
 	}
 
@@ -714,7 +817,7 @@ func TestConcurrentStrategy_SingleDisabledProviderReturnsError(t *testing.T) {
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	_, err := strategy.Execute(context.Background(), []Task{
-		{ProviderName: "disabled-only", Provider: providers["disabled-only"], UpstreamModel: "model", Request: req},
+		{ProviderName: "disabled-only", Provider: providers["disabled-only"], UpstreamModel: "model", Request: req, DisableTimeRange: []string{"00:00-24:00"}},
 	})
 	if err != ErrNoProviderAvailable {
 		t.Errorf("error = %v, want %v", err, ErrNoProviderAvailable)

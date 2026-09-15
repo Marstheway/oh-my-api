@@ -89,6 +89,25 @@ func TestRecordToken(t *testing.T) {
 	}
 }
 
+func TestRecordStreamDecode(t *testing.T) {
+	streamDecodeOutputTokensTotal.Reset()
+	streamDecodeDurationSecondsTotal.Reset()
+
+	RecordStreamDecode("test-provider", "gpt-4", "test-group", "test-key", 50, 2.5)
+	RecordStreamDecode("test-provider", "gpt-4", "test-group", "test-key", 0, 2.5)
+	RecordStreamDecode("test-provider", "gpt-4", "test-group", "test-key", 50, 0)
+
+	output := testutil.ToFloat64(streamDecodeOutputTokensTotal.WithLabelValues("test-provider", "gpt-4", "test-group", "test-key"))
+	if output != 50 {
+		t.Errorf("expected stream_decode_output_tokens_total 50, got %f", output)
+	}
+
+	duration := testutil.ToFloat64(streamDecodeDurationSecondsTotal.WithLabelValues("test-provider", "gpt-4", "test-group", "test-key"))
+	if duration != 2.5 {
+		t.Errorf("expected stream_decode_duration_seconds_total 2.5, got %f", duration)
+	}
+}
+
 func TestSetProviderHealth(t *testing.T) {
 	providerHealthStatus.Reset()
 
@@ -119,6 +138,19 @@ func TestRecordProviderFailure(t *testing.T) {
 	count := testutil.ToFloat64(providerRequestFailures.WithLabelValues("test-provider", "timeout"))
 	if count != 1 {
 		t.Errorf("expected provider_request_failures count 1, got %f", count)
+	}
+}
+
+func TestRecordStreamInterrupted(t *testing.T) {
+	streamInterruptedTotal.Reset()
+
+	RecordStreamInterrupted("test-provider", "gpt-4", "openai.responses", "upstream_timeout")
+
+	count := testutil.ToFloat64(streamInterruptedTotal.WithLabelValues(
+		"test-provider", "gpt-4", "openai.responses", "upstream_timeout",
+	))
+	if count != 1 {
+		t.Errorf("expected stream_interrupted_total count 1, got %f", count)
 	}
 }
 

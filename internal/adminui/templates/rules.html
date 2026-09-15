@@ -1,0 +1,147 @@
+{{ define "title" }}Rules{{ end }}
+
+{{ define "styles" }}
+  /* ═══ Drag & Drop ═══ */
+  .drag-cell { width: 32px; padding-right: 0; }
+  .drag-handle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px;
+    cursor: grab; color: var(--text-muted);
+    opacity: 0.5; transition: opacity 0.15s;
+  }
+  tbody tr:hover .drag-handle { opacity: 1; }
+  .drag-handle:active { cursor: grabbing; }
+
+  .sortable-ghost { background: var(--bg-hover); opacity: 0.6; }
+  .sortable-chosen { background: var(--bg-elevated); }
+
+  /* ═══ Row Index ═══ */
+  .row-index {
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  /* ═══ Match / Action Summary ═══ */
+  .cond-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; margin: 1px 3px 1px 0;
+    border-radius: var(--radius-sm);
+    background: var(--bg-input); border: 1px solid var(--border-default);
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--text-secondary); white-space: nowrap;
+  }
+  .cond-chip .cond-field { color: var(--text-muted); }
+  .cond-chip .cond-op { color: var(--accent); }
+  .cond-chip .cond-value { color: var(--text-primary); }
+
+  /* Rules 弹窗加宽：action table 的 protocol / effort chips 需要横向空间 */
+  .modal { max-width: 960px; }
+
+  /* ═══ Modal Sections ═══ */
+  .form-section-label {
+    font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;
+    border-bottom: 1px solid var(--border-faint);
+    padding-bottom: 4px; margin-top: 4px;
+  }
+  .form-section-label:first-child { margin-top: 0; }
+
+  /* ═══ Action table editor（对齐 providers endpoints 表格） ═══ */
+  .table-editor {
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--bg-input);
+  }
+  .table-editor-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-default);
+    background: var(--bg-elevated);
+  }
+  .table-editor-header span {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .table-editor-header .w-action-type { flex: 0 0 180px; }
+  .table-editor-header .w-action-value { flex: 1 1 auto; min-width: 0; }
+  .table-editor-header .w-auto { flex: 0 0 auto; min-width: 0; width: 28px; }
+
+  .table-editor-row {
+    display: flex; align-items: flex-start; gap: 6px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-default);
+  }
+  .table-editor-row:last-child { border-bottom: none; }
+  .table-editor-row .form-select.w-action-type,
+  .table-editor-row .dropdown.w-action-type { flex: 0 0 180px; width: 180px; }
+  .table-editor-row .action-value-cell {
+    flex: 1 1 auto; min-width: 0;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .table-editor-row .action-value-cell .form-input { width: 100%; padding: 5px 8px; }
+  .table-editor-row .action-value-cell .enum-chips { padding: 2px 0; }
+  .table-editor-row .action-value-cell .tags-input-area {
+    min-height: 32px;
+  }
+  .table-editor-row .btn-icon.w-auto {
+    flex: 0 0 auto; width: 28px; height: 28px; margin-top: 2px;
+  }
+  .action-value-placeholder { padding: 6px 0; }
+
+  /* ═══ Matching tip ═══ */
+  .rules-tips {
+    margin-bottom: 16px;
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid color-mix(in srgb, var(--info) 28%, var(--border-default));
+    background: color-mix(in srgb, var(--info) 8%, var(--bg-surface));
+    font-size: 13px; line-height: 1.45;
+    color: var(--text-secondary);
+  }
+{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <div class="page-title">Rules</div>
+    <div class="page-subtitle">Ordered rules: rewrite requests or adjust scheduling</div>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-primary" onclick="openRuleModal()">
+      <i data-lucide="plus" style="width:13px;height:13px"></i>
+      <span>New Rule</span>
+    </button>
+  </div>
+</div>
+
+{{ template "draft-bar" }}
+
+<div class="rules-tips" id="rulesMatchTips">
+  All matching rules run in order; later ones override the same action type — put broad defaults first.
+</div>
+
+<!-- Rules Table -->
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:32px"></th>
+        <th style="width:36px">#</th>
+        <th style="width:38%">Match</th>
+        <th style="width:36%">Action</th>
+        <th style="width:76px"></th>
+      </tr>
+    </thead>
+    <tbody id="rulesTableBody"></tbody>
+  </table>
+  <div class="empty-state" id="rulesEmpty" style="display:none">
+    <div class="empty-icon">⚙</div>
+    <div class="empty-title">No rules defined</div>
+    <div class="empty-subtitle">Broad defaults first, specifics later — same action type uses last matching rule</div>
+  </div>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script src="/admin/static/rules.js"></script>
+{{ end }}

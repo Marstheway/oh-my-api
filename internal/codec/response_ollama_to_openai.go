@@ -9,7 +9,6 @@ import (
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
-	"github.com/gin-gonic/gin"
 )
 
 // convertOllamaChatResponseToOpenAIChat 将 Ollama /api/chat 非流式响应转换为标准 OpenAI Chat 响应。
@@ -73,7 +72,7 @@ func convertOllamaChatResponseToOpenAIChat(resp *dto.OllamaChatResponse) (*dto.C
 }
 
 // writeOllamaChatResponseAsOpenAIChat 读取 Ollama 非流式 body，转换为 OpenAI Chat 格式写回客户端。
-func writeOllamaChatResponseAsOpenAIChat(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+func writeOllamaChatResponseAsOpenAIChat(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
 	var ollamaResp dto.OllamaChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
 		return WrapConversionError("write_response", "ollama_to_chat",
@@ -99,12 +98,14 @@ func writeOllamaChatResponseAsOpenAIChat(c *gin.Context, resp *http.Response, co
 		}
 	}
 
-	c.JSON(http.StatusOK, chatResp)
+	if err := writeJSON(w, http.StatusOK, chatResp); err != nil {
+		return err
+	}
 	return nil
 }
 
 // writeOllamaChatResponseAsAnthropic 读取 Ollama 非流式 body，转换为 Anthropic 格式写回客户端。
-func writeOllamaChatResponseAsAnthropic(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+func writeOllamaChatResponseAsAnthropic(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
 	var ollamaResp dto.OllamaChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
 		return WrapConversionError("write_response", "ollama_to_anthropic",
@@ -131,12 +132,14 @@ func writeOllamaChatResponseAsAnthropic(c *gin.Context, resp *http.Response, cou
 		}
 	}
 
-	c.JSON(http.StatusOK, claudeResp)
+	if err := writeJSON(w, http.StatusOK, claudeResp); err != nil {
+		return err
+	}
 	return nil
 }
 
 // writeOllamaChatResponseAsResponses 读取 Ollama 非流式 body，转换为 OpenAI Responses API 格式写回客户端。
-func writeOllamaChatResponseAsResponses(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+func writeOllamaChatResponseAsResponses(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
 	var ollamaResp dto.OllamaChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
 		return WrapConversionError("write_response", "ollama_to_responses",
@@ -168,6 +171,8 @@ func writeOllamaChatResponseAsResponses(c *gin.Context, resp *http.Response, cou
 		}
 	}
 
-	c.JSON(http.StatusOK, responsesResp)
+	if err := writeJSON(w, http.StatusOK, responsesResp); err != nil {
+		return err
+	}
 	return nil
 }

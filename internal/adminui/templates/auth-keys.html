@@ -1,0 +1,345 @@
+{{ define "title" }}Auth Keys{{ end }}
+
+{{ define "styles" }}
+  /* ═══ Table ═══ */
+  .table-wrap {
+    border: 1px solid var(--border-default); border-radius: var(--radius-md);
+    overflow: hidden; background: var(--bg-surface);
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+
+  thead th {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 500;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px;
+    padding: 9px 14px; text-align: left;
+    border-bottom: 1px solid var(--border-default); background: var(--bg-elevated);
+  }
+
+  tbody td {
+    padding: 10px 14px; font-family: var(--font-mono); font-size: 13px;
+    border-bottom: 1px solid var(--border-default); vertical-align: middle;
+  }
+
+  tbody tr { transition: background var(--transition-fast); }
+  tbody tr:hover { background: var(--bg-hover); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  /* ═══ Key Cell ═══ */
+  .key-cell {
+    display: flex; align-items: center; gap: 8px;
+  }
+
+  .key-text {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-primary);
+    letter-spacing: 0.3px;
+  }
+
+  .reveal-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: var(--radius-sm); background: transparent;
+    border: 1px solid transparent; color: var(--text-muted);
+    cursor: pointer; transition: all var(--transition-fast);
+    padding: 2px;
+  }
+
+  .reveal-btn:hover { background: var(--bg-hover); border-color: var(--border-default); color: var(--text-primary); }
+
+  /* ═══ Input with Action ═══ */
+  .input-with-action {
+    display: flex; gap: 8px; align-items: stretch;
+  }
+
+  .input-with-action .form-input { flex: 1; }
+
+  /* ═══ Empty State ═══ */
+  .empty-state {
+    padding: 40px 20px; display: flex; flex-direction: column;
+    align-items: center; gap: 8px;
+  }
+
+  .empty-icon {
+    font-size: 28px; color: var(--text-muted); opacity: 0.5;
+  }
+
+  .empty-title {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted);
+  }
+
+  .empty-subtitle {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); opacity: 0.7;
+  }
+
+  /* ═══ Mobile Responsive (768px) ═══ */
+  @media (max-width: 768px) {
+    .table-wrap table {
+      min-width: 480px;
+    }
+  }
+{{ end }}
+
+{{ define "content" }}
+<div class="page-header">
+  <div>
+    <div class="page-title">Auth Keys</div>
+    <div class="page-subtitle">Gateway inbound keys accepted via Bearer / x-api-key / ?api_key=</div>
+  </div>
+  <div class="page-actions">
+    <button class="btn btn-primary" onclick="openAuthKeyModal()">
+      <i data-lucide="plus" style="width:13px;height:13px"></i>
+      <span>New Auth Key</span>
+    </button>
+  </div>
+</div>
+
+{{ template "draft-bar" }}
+
+<!-- Auth Keys Table -->
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:25%">Name</th>
+        <th style="width:60%">Key</th>
+        <th style="width:15%"></th>
+      </tr>
+    </thead>
+    <tbody id="authKeyTableBody"></tbody>
+  </table>
+  <div class="empty-state" id="authKeysEmpty" style="display:none">
+    <div class="empty-icon">🔑</div>
+    <div class="empty-title">No auth keys defined</div>
+    <div class="empty-subtitle">Create keys to authenticate inbound API requests</div>
+  </div>
+</div>
+{{ end }}
+
+{{ define "scripts" }}
+<script>
+// ══════ State ══════
+
+let state = {
+  keys: []
+};
+
+function escapeAttr(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+let originalKeys = [];
+let editKeyName = null;
+const revealedKeys = new Set();
+
+// Draft bar 配置（shared.js 使用）
+window.draftBarConfig = {
+  hasChanges: () => JSON.stringify(state.keys) !== JSON.stringify(originalKeys),
+  onApplySuccess: () => {
+    originalKeys = JSON.parse(JSON.stringify(state.keys));
+  }
+};
+
+// ══════ Load Data ══════
+
+async function loadData() {
+  try {
+    state.keys = await apiFetch('/admin/runtime-config/draft/auth-keys');
+    if (!originalKeys || originalKeys.length === 0) {
+      originalKeys = JSON.parse(JSON.stringify(state.keys));
+    }
+    renderKeys();
+    updateDraftBar();
+  } catch (err) {
+    showToast(err.message || 'Failed to load data.', 'error');
+  }
+}
+
+// ══════ Render Keys ══════
+
+function renderKeys() {
+  const tbody = document.getElementById('authKeyTableBody');
+  const empty = document.getElementById('authKeysEmpty');
+
+  if (!state.keys || state.keys.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'flex';
+    return;
+  }
+  empty.style.display = 'none';
+
+  const sorted = [...state.keys].sort((a, b) => a.name.localeCompare(b.name));
+  tbody.innerHTML = sorted.map(k => {
+    const masked = maskKey(k.key);
+    const revealed = revealedKeys.has(k.name);
+    const display = revealed ? escapeHtml(k.key) : escapeHtml(masked);
+    const icon = revealed ? 'eye-off' : 'eye';
+    return `
+      <tr>
+        <td><span class="code">${escapeHtml(k.name)}</span></td>
+        <td>
+          <div class="key-cell">
+            <span class="key-text" id="keytext-${escapeAttr(k.name)}" data-full="${escapeAttr(k.key)}">${display}</span>
+            <button class="reveal-btn" onclick="toggleKeyReveal('${escapeAttr(k.name)}')" title="Show/hide key" aria-label="Toggle key visibility">
+              <i data-lucide="${icon}" style="width:14px;height:14px"></i>
+            </button>
+          </div>
+        </td>
+        <td>
+          <div class="row-actions" style="justify-content:flex-end">
+            <button class="btn-icon" onclick="openAuthKeyModal('${escapeAttr(k.name)}')" title="Edit">
+              <i data-lucide="pencil" style="width:12px;height:12px"></i>
+            </button>
+            <button class="btn-icon" onclick="deleteAuthKey('${escapeAttr(k.name)}')" title="Delete" style="color:var(--danger);opacity:0.6">
+              <i data-lucide="trash-2" style="width:12px;height:12px"></i>
+            </button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+// ══════ Key Mask / Reveal ══════
+
+function maskKey(key) {
+  if (!key) return '';
+  if (key.length <= 12) return '*'.repeat(key.length);
+  return key.slice(0, 8) + '••••' + key.slice(-4);
+}
+
+function toggleKeyReveal(name) {
+  if (revealedKeys.has(name)) {
+    revealedKeys.delete(name);
+  } else {
+    revealedKeys.add(name);
+    // 10 秒后自动隐藏
+    setTimeout(() => {
+      if (revealedKeys.has(name)) toggleKeyReveal(name);
+    }, 10000);
+  }
+  renderKeys();
+}
+
+// ══════ Modal ══════
+
+function openAuthKeyModal(name) {
+  editKeyName = name || null;
+  const existing = name ? state.keys.find(k => k.name === name) : null;
+  const body = buildKeyForm(existing ? existing.name : '', existing ? existing.key : '');
+  const footer = `
+    <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+    <button class="btn btn-primary" onclick="saveAuthKey()">${name ? 'Save Changes' : 'Create Key'}</button>
+  `;
+  showModal(name ? 'Edit Auth Key' : 'Create Auth Key', body, footer);
+}
+
+function buildKeyForm(nameVal, keyVal) {
+  return `
+    <div class="form-group">
+      <label class="form-label">Key Name <span class="required">*</span></label>
+      <input class="form-input" id="akName" type="text" value="${escapeAttr(nameVal)}" placeholder="e.g. default, mobile-app, internal" ${nameVal ? 'readonly' : ''}>
+      <span class="form-hint">A short, descriptive label for identifying this key.</span>
+      <span class="form-error" id="akNameErr"></span>
+    </div>
+    <div class="form-group">
+      <label class="form-label">API Key Value <span class="required">*</span></label>
+      <div class="input-with-action">
+        <input class="form-input" id="akKey" type="text" value="${escapeAttr(keyVal)}" placeholder="sk-gateway-...">
+        <button class="btn btn-ghost btn-sm" onclick="generateKey()" title="Generate a random key" style="flex-shrink:0">Generate</button>
+      </div>
+      <span class="form-hint">Accepted via <code style="font-family:var(--font-mono);font-size:10px;color:var(--accent)">Authorization: Bearer</code>, <code style="font-family:var(--font-mono);font-size:10px;color:var(--accent)">x-api-key</code>, or <code style="font-family:var(--font-mono);font-size:10px;color:var(--accent)">?api_key=</code> query param.</span>
+      <span class="form-error" id="akKeyErr"></span>
+    </div>
+  `;
+}
+
+function generateKey() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  const n = 40;
+  const arr = new Uint32Array(n);
+  crypto.getRandomValues(arr);
+  let key = 'sk-';
+  for (let i = 0; i < n; i++) {
+    key += chars[arr[i] % chars.length];
+  }
+  document.getElementById('akKey').value = key;
+  document.getElementById('akKey').focus();
+}
+
+async function saveAuthKey() {
+  const nameInput = document.getElementById('akName');
+  const keyInput = document.getElementById('akKey');
+  const nameErr = document.getElementById('akNameErr');
+  const keyErr = document.getElementById('akKeyErr');
+
+  const name = nameInput.value.trim();
+  const keyVal = keyInput.value.trim();
+
+  nameErr.textContent = '';
+  keyErr.textContent = '';
+  if (!name) { nameErr.textContent = 'Key name is required.'; return; }
+  if (!keyVal) { keyErr.textContent = 'API key value is required.'; return; }
+
+  const body = { name, key: keyVal };
+
+  try {
+    if (editKeyName) {
+      await apiFetch(`/admin/runtime-config/draft/auth-keys/${encodeURIComponent(editKeyName)}`, {
+        method: 'PUT',
+        body: JSON.stringify(body)
+      });
+      showToast(`"${name}" updated.`);
+    } else {
+      await apiFetch('/admin/runtime-config/draft/auth-keys', {
+        method: 'POST',
+        body: JSON.stringify(body)
+      });
+      showToast(`"${name}" created.`);
+    }
+    closeModal();
+    await loadData();
+  } catch (err) {
+    if (err.field === 'name') {
+      nameErr.textContent = err.message;
+    } else if (err.field === 'key') {
+      keyErr.textContent = err.message;
+    }
+    showToast(err.message || 'An error occurred.', 'error');
+  }
+}
+
+// ══════ Delete ══════
+
+async function deleteAuthKey(name) {
+  try {
+    const detail = await apiFetch(`/admin/runtime-config/draft/auth-keys/${encodeURIComponent(name)}`);
+    const message = `This will remove the key <strong>${escapeHtml(detail.name)}</strong>. ` +
+      `Clients using this key will receive 401 errors once changes are applied.`;
+
+    showConfirm({
+      title: 'Delete Auth Key',
+      message: message,
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await apiFetch(`/admin/runtime-config/draft/auth-keys/${encodeURIComponent(name)}`, { method: 'DELETE' });
+          showToast(`"${name}" deleted.`);
+          await loadData();
+        } catch (err) {
+          showToast(err.message || 'Delete failed.', 'error');
+        }
+      }
+    });
+  } catch (err) {
+    showToast('Failed to load key details.', 'error');
+  }
+}
+
+// ══════ Init ══════
+
+loadData();
+</script>
+{{ end }}

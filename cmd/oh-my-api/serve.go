@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Marstheway/oh-my-api/internal/cascade"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/handler"
 	"github.com/Marstheway/oh-my-api/internal/health"
@@ -27,6 +28,10 @@ func runServe(configPath string) {
 		os.Exit(1)
 	}
 	runServeWithExit(cfg, configPath, os.Exit)
+}
+
+func newProviderClient(cfg *config.Config, timeout, connectTimeout, responseHeaderTimeout time.Duration) *provider.Client {
+	return provider.NewClient(cfg.Providers.Items, timeout, connectTimeout, responseHeaderTimeout)
 }
 
 func runServeWithExit(cfg *config.Config, configPath string, exitFn func(int)) {
@@ -55,7 +60,7 @@ func runServeWithExit(cfg *config.Config, configPath string, exitFn func(int)) {
 		}
 	}
 
-	// prefill_timeout 默认 30s
+	// prefill_timeout 默认 30s（流式单 attempt：header + 首 token）
 	prefillTimeout := 30 * time.Second
 	if cfg.Server.PrefillTimeout != "" {
 		if d, err := time.ParseDuration(cfg.Server.PrefillTimeout); err == nil {
@@ -66,6 +71,25 @@ func runServeWithExit(cfg *config.Config, configPath string, exitFn func(int)) {
 				"prefill_timeout", cfg.Server.PrefillTimeout,
 				"default", "30s")
 		}
+	}
+
+	// non_stream_timeout 默认 120s（非流式单 attempt：等 header/生成）；不超过 server.timeout
+	nonStreamTimeout := 120 * time.Second
+	if cfg.Server.NonStreamTimeout != "" {
+		if d, err := time.ParseDuration(cfg.Server.NonStreamTimeout); err == nil {
+			nonStreamTimeout = d
+		} else {
+			slog.Warn("non_stream_timeout parse failed, fallback to default",
+				"error", err,
+				"non_stream_timeout", cfg.Server.NonStreamTimeout,
+				"default", "120s")
+		}
+	}
+	if nonStreamTimeout > timeout {
+		slog.Warn("non_stream_timeout exceeds server.timeout, clamping",
+			"non_stream_timeout", nonStreamTimeout.String(),
+			"timeout", timeout.String())
+		nonStreamTimeout = timeout
 	}
 
 	// stream_idle_timeout 默认 60s
@@ -85,7 +109,9 @@ func runServeWithExit(cfg *config.Config, configPath string, exitFn func(int)) {
 		Level: parseLogLevel(cfg.Server.LogLevel),
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
-				return slog.Attr{}
+				if t, ok := a.Value.Any().(time.Time); ok {
+					a.Value = slog.StringValue(t.Format("2006/01/02 15:04:05"))
+				}
 			}
 			return a
 		},
@@ -97,6 +123,7 @@ func runServeWithExit(cfg *config.Config, configPath string, exitFn func(int)) {
 		"timeout", timeout.String(),
 		"connect_timeout", connectTimeout.String(),
 		"prefill_timeout", prefillTimeout.String(),
+		"non_stream_timeout", nonStreamTimeout.String(),
 		"stream_idle_timeout", streamIdleTimeout.String())
 
 	// 启动时将配置文件中的协议简写（"openai" → "openai.chat" 等）持久化写回。
@@ -158,12 +185,36 @@ func runServeWithExit(cfg *config.Config, configPath string, exitFn func(int)) {
 		return
 	}
 
-	client := provider.NewClient(cfg.Providers.Items, timeout, connectTimeout)
-	startUpstreamCatalogProbe(cfg, client, timeout)
 	rlManager := ratelimit.NewManager(cfg.Providers.Items)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched := scheduler.New(rlManager, client, healthChecker, prefillTimeout, streamIdleTimeout)
+
+	cascadeHubs := cascade.NewHubRegistry()
+	cascadeRT := newCascadeRuntime(cascadeHubs, healthChecker)
+	defer cascadeRT.shutdown()
+	cascadeRT.installHub(cfg)
+
+	// 装配 catalog / models.dev 刷新成功后的元数据通知钩子（进程级只设置一次）。
+	setCascadeMetadataNotifyHook(func() {
+		cascadeRT.notifyMetadataChanged()
+	})
+
+	client := newWiredProviderClient(cascadeRT, cfg, timeout, connectTimeout, nonStreamTimeout)
+
+	// 初始化共享 catalog service，加载已有快照并启动后台定时刷新
+	catalogSvc := initCatalogService(cfg, client, timeout)
+
+	sched := scheduler.New(rlManager, client, healthChecker, prefillTimeout, streamIdleTimeout, nonStreamTimeout)
+
+	// 注入共享 catalog source 与 cascade hub registry 到 handler，
+	// 使其能读取运行时刷新的数据与活跃 Cascade session 元数据。
+	handler.SetCatalogSource(catalogSvc)
+	handler.SetCascadeHubs(cascadeHubs)
 	handler.Init(cfg, resolver, sched)
+
+	// Spoke 元数据 source 持有启动期 resolver/配置与共享 catalog lookup；
+	// catalog 与 models.dev 刷新成功后经 setCascadeMetadataNotifyHook 通知 publisher 重算并去重发布。
+	cascadeRT.setMetadataSource(resolver, cfg, catalogSvc.ContextLength)
+	cascadeRT.startSpoke(cfg)
 
 	// 创建 runtimeconfig manager
 	rebuilder := &runtimeconfig.DefaultRuntimeRebuilder{
@@ -171,7 +222,14 @@ func runServeWithExit(cfg *config.Config, configPath string, exitFn func(int)) {
 			return model.NewResolver(c)
 		},
 		NewScheduler: func(c *config.Config, r *model.Resolver) (*scheduler.Scheduler, error) {
-			return scheduler.New(rlManager, client, healthChecker, prefillTimeout, streamIdleTimeout), nil
+			return scheduler.New(
+				ratelimit.NewManager(c.Providers.Items),
+				newWiredProviderClient(cascadeRT, c, timeout, connectTimeout, nonStreamTimeout),
+				healthChecker,
+				prefillTimeout,
+				streamIdleTimeout,
+				nonStreamTimeout,
+			), nil
 		},
 	}
 	reinitHandler := &runtimeconfig.DefaultReinitHandler{
@@ -184,7 +242,19 @@ func runServeWithExit(cfg *config.Config, configPath string, exitFn func(int)) {
 		return
 	}
 
-	if err := server.Run(cfg, metricsHandler, runtimeManager); err != nil {
+	// 配置 Apply 后更新 catalog 所使用的 provider 列表和 client，并在 handler reinit 后重建 cascade hub/spoke。
+	runtimeManager.OnCommitted = func(newCfg *config.Config, newResolver *model.Resolver) {
+		// 用 Apply 实际构建并交给 handler 的 resolver 原子替换 Spoke 元数据 source，
+		// 不在此重新构建；替换后通知 publisher 重算（若内容变化才发送）。
+		cascadeRT.setMetadataSource(newResolver, newCfg, catalogSvc.ContextLength)
+	}
+	runtimeManager.OnAfterApply = func(newCfg *config.Config) {
+		updateCatalogConfig(newCfg)
+		updateCatalogClient(newWiredProviderClient(cascadeRT, newCfg, timeout, connectTimeout, nonStreamTimeout))
+		cascadeRT.afterApply(newCfg)
+	}
+
+	if err := server.Run(cfg, metricsHandler, runtimeManager, cascadeHubs); err != nil {
 		slog.Error("server error", "error", err)
 		exitFn(1)
 		return

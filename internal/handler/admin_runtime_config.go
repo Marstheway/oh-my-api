@@ -1,15 +1,38 @@
 package handler
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/Marstheway/oh-my-api/internal/adaptor"
+	"github.com/Marstheway/oh-my-api/internal/cascade"
+	"github.com/Marstheway/oh-my-api/internal/catalog"
+	"github.com/Marstheway/oh-my-api/internal/codec"
+	"github.com/Marstheway/oh-my-api/internal/config"
+	"github.com/Marstheway/oh-my-api/internal/dto"
+	"github.com/Marstheway/oh-my-api/internal/provider"
 	"github.com/Marstheway/oh-my-api/internal/runtimeconfig"
 	"github.com/gin-gonic/gin"
 )
 
+const (
+	httpTestTimeout      = 15 * time.Second
+	cascadeTestTimeout   = 45 * time.Second
+	cascadeTestMaxTokens = 32
+	cascadeTestProtocol  = "openai.chat"
+	cascadeTestDummyURL  = "http://cascade.local/v1/chat/completions"
+)
+
 // AdminRuntimeConfigHandler 处理 /admin/runtime-config 端点
 type AdminRuntimeConfigHandler struct {
-	manager *runtimeconfig.Manager
+	manager     *runtimeconfig.Manager
+	cascadeHubs *cascade.HubRegistry
 }
 
 // NewAdminRuntimeConfigHandler 创建 handler
@@ -19,9 +42,14 @@ func NewAdminRuntimeConfigHandler(manager *runtimeconfig.Manager) *AdminRuntimeC
 	}
 }
 
+// SetCascadeHubs wires the live hub registry used by cascade leaf tests.
+func (h *AdminRuntimeConfigHandler) SetCascadeHubs(hubs *cascade.HubRegistry) {
+	h.cascadeHubs = hubs
+}
+
 // DraftResponse 表示完整 draft 视图（脱敏）
 type DraftResponse struct {
-	ModelGroups []runtimeconfig.ModelGroupOutput `json:"model_groups"`
+	ModelGroups []runtimeconfig.ModelGroupOutput   `json:"model_groups"`
 	Redirect    []runtimeconfig.RedirectListOutput `json:"redirect,omitempty"`
 	Providers   map[string]ProviderSummary         `json:"providers"`
 	AuthKeys    []AuthKeySummary                   `json:"auth_keys"`
@@ -54,8 +82,9 @@ func (h *AdminRuntimeConfigHandler) GetDraft(c *gin.Context) {
 		return
 	}
 
-	// 加载 draft 的 catalogIdx
-	draftCatalogIdx := LoadCatalogContextIndex(cfg)
+	// 与 /v1/models 相同：优先共享 CatalogSource（含 probe + models.dev fallback），
+	// 避免 Admin 只读 catalog_upstream.json 而丢掉 models.dev 回退。
+	lookup := contextLengthLookup()
 
 	groups := h.manager.ListModelGroups()
 	output := make([]runtimeconfig.ModelGroupOutput, len(groups))
@@ -63,7 +92,7 @@ func (h *AdminRuntimeConfigHandler) GetDraft(c *gin.Context) {
 		output[i] = runtimeconfig.ToOutput(g)
 		// 计算 computed_context_length（仅当无配置值时）
 		if output[i].ModelMetadata == nil || output[i].ModelMetadata.ContextLength == nil {
-			computed := ResolveContextLength(g.Name, draftResolver, draftCatalogIdx)
+			computed := ResolveContextLength(g.Name, draftResolver, lookup)
 			if computed != nil {
 				if output[i].ModelMetadata == nil {
 					output[i].ModelMetadata = &runtimeconfig.ModelMetadataOutput{}
@@ -77,7 +106,7 @@ func (h *AdminRuntimeConfigHandler) GetDraft(c *gin.Context) {
 	redirects := h.manager.ListRedirects()
 	for i := range redirects {
 		if redirects[i].ResolvedGroup != "" {
-			ctx := ResolveContextLength(redirects[i].ResolvedGroup, draftResolver, draftCatalogIdx)
+			ctx := ResolveContextLength(redirects[i].ResolvedGroup, draftResolver, lookup)
 			redirects[i].ContextLength = ctx
 		}
 	}
@@ -107,6 +136,34 @@ func (h *AdminRuntimeConfigHandler) GetDraft(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, resp)
+}
+
+// GetCascade 返回 draft cascade 配置（含明文 shared token，供 Admin UI 回显编辑）。
+// GET /admin/runtime-config/draft/cascade
+func (h *AdminRuntimeConfigHandler) GetCascade(c *gin.Context) {
+	c.JSON(http.StatusOK, h.manager.GetCascade())
+}
+
+// UpdateCascade 将请求的角色应用到 draft cascade 配置。
+// PUT /admin/runtime-config/draft/cascade
+func (h *AdminRuntimeConfigHandler) UpdateCascade(c *gin.Context) {
+	var input runtimeconfig.CascadeConfigInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"code":    "bad_request",
+				"message": "invalid request body: " + err.Error(),
+			},
+		})
+		return
+	}
+
+	if err := h.manager.UpdateCascade(&input); err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, h.manager.GetCascade())
 }
 
 // GetModelGroup 返回单个 model group 详情
@@ -191,6 +248,28 @@ func (h *AdminRuntimeConfigHandler) UpdateModelGroup(c *gin.Context) {
 	c.JSON(http.StatusOK, runtimeconfig.ToOutput(group))
 }
 
+
+// ReorderModelGroups PUT /admin/runtime-config/draft/model-groups/order
+func (h *AdminRuntimeConfigHandler) ReorderModelGroups(c *gin.Context) {
+	var body struct {
+		Names []string `json:"names"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"code":    "bad_request",
+				"message": "invalid request body: " + err.Error(),
+			},
+		})
+		return
+	}
+	if err := h.manager.ReorderModelGroups(body.Names); err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 // DeleteModelGroup 删除 model group
 func (h *AdminRuntimeConfigHandler) DeleteModelGroup(c *gin.Context) {
 	name := c.Param("name")
@@ -237,6 +316,39 @@ func (h *AdminRuntimeConfigHandler) Apply(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, ApplyResponse{Success: true})
+}
+
+// GetCatalog 返回脱敏、规范化的上游模型目录视图（只读，供 Model Group 弹窗自动补全）。
+// GET /admin/runtime-config/catalog
+// 无 catalog source 时返回空且 stale 的目录响应，不序列化原始 ProviderEntry。
+func (h *AdminRuntimeConfigHandler) GetCatalog(c *gin.Context) {
+	if catalogSrc == nil {
+		c.JSON(http.StatusOK, catalog.EmptyCatalogView())
+		return
+	}
+	c.JSON(http.StatusOK, catalogSrc.CatalogView())
+}
+
+
+// ReorderRedirects PUT /admin/runtime-config/draft/redirects/order
+func (h *AdminRuntimeConfigHandler) ReorderRedirects(c *gin.Context) {
+	var body struct {
+		Sources []string `json:"sources"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"code":    "bad_request",
+				"message": "invalid request body: " + err.Error(),
+			},
+		})
+		return
+	}
+	if err := h.manager.ReorderRedirects(body.Sources); err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 // GetRedirects 返回所有 redirect 列表
@@ -346,6 +458,56 @@ func (h *AdminRuntimeConfigHandler) DeleteRedirect(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+// GetRules 返回 draft 中的 rules（顺序即配置顺序）。
+// GET /admin/runtime-config/draft/rules
+func (h *AdminRuntimeConfigHandler) GetRules(c *gin.Context) {
+	rules := h.manager.ListRules()
+	output := make([]runtimeconfig.RuleOutput, len(rules))
+	for i, rule := range rules {
+		output[i] = runtimeconfig.ToRuleOutput(rule)
+	}
+	c.JSON(http.StatusOK, gin.H{"rules": output})
+}
+
+// ReplaceRules 整表替换 draft rules。
+// PUT /admin/runtime-config/draft/rules
+// body 必须含 rules 键：[] 表示清空；缺 rules 键或 rules 为 null 返回 400，draft 不变。
+func (h *AdminRuntimeConfigHandler) ReplaceRules(c *gin.Context) {
+	var req runtimeconfig.RulesInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"code":    "bad_request",
+				"message": "invalid request body: " + err.Error(),
+			},
+		})
+		return
+	}
+
+	// 显式 nil 检查：{"rules":[]} 是合法清空，binding:"required" 会误拒绝
+	if req.Rules == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{
+				"code":    "bad_request",
+				"message": "missing rules key: body must contain a rules array (use [] to clear)",
+			},
+		})
+		return
+	}
+
+	if err := h.manager.ReplaceRules(req.Rules); err != nil {
+		h.writeError(c, err)
+		return
+	}
+
+	rules := h.manager.ListRules()
+	output := make([]runtimeconfig.RuleOutput, len(rules))
+	for i, rule := range rules {
+		output[i] = runtimeconfig.ToRuleOutput(rule)
+	}
+	c.JSON(http.StatusOK, gin.H{"rules": output})
 }
 
 // GetProviders 返回所有 provider 列表（完整配置，含 API Key）
@@ -583,6 +745,7 @@ func (h *AdminRuntimeConfigHandler) writeError(c *gin.Context, err error) {
 				"error": gin.H{
 					"code":    string(rerr.Code),
 					"message": rerr.Message,
+					"field":   rerr.Field,
 				},
 			})
 		case runtimeconfig.ErrCodeConflict:
@@ -619,4 +782,338 @@ func (h *AdminRuntimeConfigHandler) writeError(c *gin.Context, err error) {
 			"message": err.Error(),
 		},
 	})
+}
+
+// testModelRequest 表示模型测试请求
+type testModelRequest struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// testModelResponse 表示模型测试结果
+type testModelResponse struct {
+	Success    bool   `json:"success"`
+	LatencyMs  int64  `json:"latency_ms"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// TestModel 测试模型连通性
+// POST /admin/runtime-config/test-model
+func (h *AdminRuntimeConfigHandler) TestModel(c *gin.Context) {
+	var req testModelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"code": "bad_request", "message": "invalid request: " + err.Error()},
+		})
+		return
+	}
+
+	if req.Provider == "" || req.Model == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"code": "bad_request", "message": "provider and model are required"},
+		})
+		return
+	}
+
+	cfg := h.manager.GetDraft()
+	providerCfg, ok := cfg.Providers.Items[req.Provider]
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": gin.H{"code": "not_found", "message": fmt.Sprintf("provider '%s' not found", req.Provider)},
+		})
+		return
+	}
+
+	if providerCfg.Cascade != nil && providerCfg.Cascade.Enabled {
+		c.JSON(http.StatusOK, h.testCascadeModel(req.Provider, providerCfg, req.Model))
+		return
+	}
+
+	// 探测该 provider 全部可达 endpoint（不评 rules；无 client-model/key 上下文）
+	endpoints := collectTestEndpoints(providerCfg)
+	if len(endpoints) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"code": "bad_request", "message": "no endpoint configured for this provider"},
+		})
+		return
+	}
+
+	// 构造最小测试请求，body 按协议转换在 doTestEndpoint 内完成
+	testReq := &dto.ChatCompletionRequest{
+		Model: req.Model,
+		Messages: []dto.Message{
+			{Role: "user", Content: "hi"},
+		},
+		MaxTokens: 64,
+	}
+
+	timeout := httpTestTimeout
+	client := provider.NewClient(map[string]config.ProviderConfig{
+		req.Provider: providerCfg,
+	}, 0, 0, 0)
+
+	testModel := req.Provider + "/" + req.Model
+	slog.Info("testing model connectivity",
+		"test_model", testModel,
+		"endpoints", len(endpoints),
+	)
+
+	// 按顺序测试所有 endpoint，遇到第一个成功就返回
+	var lastResult testModelResponse
+	for i, ep := range endpoints {
+		epLog := slog.With("test_model", testModel, "endpoint_idx", i+1, "total", len(endpoints))
+
+		result := doTestEndpoint(client, req.Provider, ep.url, ep.protocol, providerCfg.APIKey, testReq, timeout)
+
+		if result.Success {
+			epLog.Info("model test success",
+				"url", ep.url,
+				"protocol", ep.protocol,
+				"latency_ms", result.LatencyMs,
+				"status_code", result.StatusCode,
+			)
+			c.JSON(http.StatusOK, result)
+			return
+		}
+
+		epLog.Warn("model test failed",
+			"url", ep.url,
+			"protocol", ep.protocol,
+			"latency_ms", result.LatencyMs,
+			"status_code", result.StatusCode,
+			"error", result.Error,
+		)
+		lastResult = result
+	}
+
+	// 所有 endpoint 都失败
+	c.JSON(http.StatusOK, lastResult)
+}
+
+// testEndpoint 表示一个待测试的 endpoint
+type testEndpoint struct {
+	url      string
+	protocol string
+}
+
+// collectTestEndpoints 收集所有需要测试的 endpoint。
+func collectTestEndpoints(providerCfg config.ProviderConfig) []testEndpoint {
+	var rawEndpoints []struct {
+		url       string
+		protocols []string
+	}
+
+	if len(providerCfg.Endpoints) > 0 {
+		for _, ep := range providerCfg.Endpoints {
+			protos := ep.Protocols
+			if len(protos) == 0 {
+				protos = providerCfg.Protocols
+			}
+			rawEndpoints = append(rawEndpoints, struct {
+				url       string
+				protocols []string
+			}{url: ep.URL, protocols: protos})
+		}
+	} else if providerCfg.Endpoint != "" {
+		rawEndpoints = append(rawEndpoints, struct {
+			url       string
+			protocols []string
+		}{url: providerCfg.Endpoint, protocols: providerCfg.Protocols})
+	}
+
+	var result []testEndpoint
+	for _, raw := range rawEndpoints {
+		if len(raw.protocols) == 0 {
+			result = append(result, testEndpoint{url: raw.url, protocol: ""})
+			continue
+		}
+		for _, proto := range raw.protocols {
+			result = append(result, testEndpoint{url: raw.url, protocol: strings.TrimSpace(proto)})
+		}
+	}
+
+	return result
+}
+
+func (h *AdminRuntimeConfigHandler) testCascadeModel(providerName string, providerCfg config.ProviderConfig, model string) testModelResponse {
+	if h.cascadeHubs == nil {
+		return testModelResponse{Success: false, Error: "cascade hub not configured"}
+	}
+	hub := h.cascadeHubs.Get()
+	if hub == nil || !hub.Configured() {
+		return testModelResponse{Success: false, Error: "cascade hub not configured"}
+	}
+	if _, ok := hub.Session(); !ok {
+		return testModelResponse{Success: false, Error: "cascade spoke not connected"}
+	}
+
+	client := provider.NewClient(map[string]config.ProviderConfig{
+		providerName: providerCfg,
+	}, 0, 0, 0)
+	client.SetCascadeHubRegistry(h.cascadeHubs)
+
+	testReq := &dto.ChatCompletionRequest{
+		Model:  model,
+		Stream: true,
+		Messages: []dto.Message{
+			{Role: "user", Content: "hi"},
+		},
+		MaxTokens: cascadeTestMaxTokens,
+	}
+
+	chatCodec, err := codec.Get(codec.FormatOpenAIChat)
+	if err != nil {
+		return testModelResponse{Success: false, Error: err.Error()}
+	}
+	bodyBytes, err := chatCodec.EncodeRequest(codec.FormatOpenAIChat, testReq, testReq.Model, false)
+	if err != nil {
+		return testModelResponse{Success: false, Error: fmt.Sprintf("encode request: %s", err)}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cascadeTestTimeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, cascadeTestDummyURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return testModelResponse{Success: false, Error: err.Error()}
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(bodyBytes)), nil
+	}
+
+	testModel := providerName + "/" + model
+	slog.Info("testing cascade model connectivity",
+		"test_model", testModel,
+		"protocol", cascadeTestProtocol,
+	)
+
+	start := time.Now()
+	resp, err := client.DoWithMeta(providerName, provider.RequestMeta{
+		UpstreamModel:    model,
+		OutboundProtocol: cascadeTestProtocol,
+	}, httpReq)
+	latencyMs := time.Since(start).Milliseconds()
+	if err != nil {
+		slog.Warn("cascade model test failed",
+			"test_model", testModel,
+			"latency_ms", latencyMs,
+			"error", err.Error(),
+		)
+		return testModelResponse{Success: false, LatencyMs: latencyMs, Error: err.Error()}
+	}
+	defer resp.Body.Close()
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if readErr != nil && len(body) == 0 {
+		return testModelResponse{
+			Success:    false,
+			LatencyMs:  latencyMs,
+			StatusCode: resp.StatusCode,
+			Error:      fmt.Sprintf("HTTP %d: read body failed: %s", resp.StatusCode, readErr),
+		}
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		slog.Info("cascade model test success",
+			"test_model", testModel,
+			"latency_ms", latencyMs,
+			"status_code", resp.StatusCode,
+		)
+		return testModelResponse{Success: true, LatencyMs: latencyMs, StatusCode: resp.StatusCode}
+	}
+
+	errMsg := strings.TrimSpace(string(body))
+	runes := []rune(errMsg)
+	if len(runes) > 500 {
+		errMsg = string(runes[:500])
+	}
+	slog.Warn("cascade model test failed",
+		"test_model", testModel,
+		"latency_ms", latencyMs,
+		"status_code", resp.StatusCode,
+		"error", errMsg,
+	)
+	return testModelResponse{
+		Success:    false,
+		LatencyMs:  latencyMs,
+		StatusCode: resp.StatusCode,
+		Error:      fmt.Sprintf("HTTP %d: %s", resp.StatusCode, errMsg),
+	}
+}
+
+// doTestEndpoint 向单个 endpoint 发送测试请求
+func doTestEndpoint(client *provider.Client, providerName, endpointURL, protocol, apiKey string, testReq *dto.ChatCompletionRequest, timeout time.Duration) testModelResponse {
+	// protocol 为空时按 openai.chat 处理，与 BuildURL 的 default 分支一致
+	outboundFormat := codec.FormatOpenAIChat
+	if protocol != "" {
+		f, err := codec.NormalizeProviderFormat(protocol)
+		if err != nil {
+			return testModelResponse{Success: false, Error: fmt.Sprintf("invalid protocol %q: %s", protocol, err)}
+		}
+		outboundFormat = f
+	}
+
+	chatCodec, err := codec.Get(codec.FormatOpenAIChat)
+	if err != nil {
+		return testModelResponse{Success: false, Error: err.Error()}
+	}
+
+	bodyBytes, err := chatCodec.EncodeRequest(outboundFormat, testReq, testReq.Model, false)
+	if err != nil {
+		return testModelResponse{Success: false, Error: fmt.Sprintf("encode request: %s", err)}
+	}
+
+	requestURL := adaptor.BuildURL(endpointURL, adaptor.Protocol(protocol))
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return testModelResponse{Success: false, Error: err.Error()}
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	if adaptor.Protocol(protocol) == adaptor.ProtocolAnthropic {
+		httpReq.Header.Set("x-api-key", apiKey)
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+	} else {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	start := time.Now()
+	resp, err := client.Do(providerName, httpReq)
+	latencyMs := time.Since(start).Milliseconds()
+
+	if err != nil {
+		return testModelResponse{Success: false, LatencyMs: latencyMs, Error: err.Error()}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return testModelResponse{
+			Success:    false,
+			LatencyMs:  latencyMs,
+			StatusCode: resp.StatusCode,
+			Error:      fmt.Sprintf("HTTP %d: read body failed: %s", resp.StatusCode, err),
+		}
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return testModelResponse{Success: true, LatencyMs: latencyMs, StatusCode: resp.StatusCode}
+	}
+
+	errMsg := strings.TrimSpace(string(body))
+	runes := []rune(errMsg)
+	if len(runes) > 500 {
+		errMsg = string(runes[:500])
+	}
+	return testModelResponse{
+		Success:    false,
+		LatencyMs:  latencyMs,
+		StatusCode: resp.StatusCode,
+		Error:      fmt.Sprintf("HTTP %d: %s", resp.StatusCode, errMsg),
+	}
 }

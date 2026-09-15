@@ -2,6 +2,7 @@ package stats
 
 import (
 	"testing"
+	"time"
 )
 
 func TestQuerierQueryTotal(t *testing.T) {
@@ -139,4 +140,94 @@ func providerKeys(m map[string]*ProviderStats) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+func TestQuerierQueryByUserModels(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	if err := Init(dbPath); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer Close()
+
+	// 写入测试数据：多 user_model 聚合
+	_ = GetRecorder().RecordUserModel("gpt-4o", 100, 50, 100)
+	_ = GetRecorder().RecordUserModel("gpt-4o", 200, 100, 200)
+	_ = GetRecorder().RecordUserModel("claude-3", 300, 150, 300)
+
+	q := GetQuerier()
+	userModels, err := q.QueryByUserModels("", "")
+	if err != nil {
+		t.Fatalf("QueryByUserModels failed: %v", err)
+	}
+
+	if len(userModels) != 2 {
+		t.Fatalf("expected 2 user_models, got %d", len(userModels))
+	}
+
+	if userModels["gpt-4o"].InputTokens != 300 {
+		t.Errorf("expected gpt-4o InputTokens 300, got %d", userModels["gpt-4o"].InputTokens)
+	}
+	if userModels["gpt-4o"].OutputTokens != 150 {
+		t.Errorf("expected gpt-4o OutputTokens 150, got %d", userModels["gpt-4o"].OutputTokens)
+	}
+	if userModels["gpt-4o"].RequestCount != 2 {
+		t.Errorf("expected gpt-4o RequestCount 2, got %d", userModels["gpt-4o"].RequestCount)
+	}
+	if userModels["gpt-4o"].LatencyMs != 300 {
+		t.Errorf("expected gpt-4o LatencyMs 300, got %d", userModels["gpt-4o"].LatencyMs)
+	}
+
+	if userModels["claude-3"].InputTokens != 300 {
+		t.Errorf("expected claude-3 InputTokens 300, got %d", userModels["claude-3"].InputTokens)
+	}
+	if userModels["claude-3"].RequestCount != 1 {
+		t.Errorf("expected claude-3 RequestCount 1, got %d", userModels["claude-3"].RequestCount)
+	}
+}
+
+func TestQuerierQueryByUserModelsDateFilter(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	if err := Init(dbPath); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer Close()
+
+	// 用固定日期写入数据
+	origTimeNow := timeNow
+	timeNow = func() time.Time {
+		t, _ := time.Parse("2006-01-02", "2025-01-15")
+		return t
+	}
+	defer func() { timeNow = origTimeNow }()
+
+	_ = GetRecorder().RecordUserModel("gpt-4o", 100, 50, 100)
+
+	timeNow = func() time.Time {
+		t, _ := time.Parse("2006-01-02", "2025-01-20")
+		return t
+	}
+	_ = GetRecorder().RecordUserModel("gpt-4o", 200, 100, 200)
+
+	q := GetQuerier()
+
+	// 日期过滤：仅包含 2025-01-15 之前
+	userModels, err := q.QueryByUserModels("", "2025-01-15")
+	if err != nil {
+		t.Fatalf("QueryByUserModels with until failed: %v", err)
+	}
+	if len(userModels) != 1 {
+		t.Fatalf("expected 1 user_model with until filter, got %d", len(userModels))
+	}
+	if userModels["gpt-4o"].InputTokens != 100 {
+		t.Errorf("expected InputTokens 100 with until filter, got %d", userModels["gpt-4o"].InputTokens)
+	}
+
+	// 日期过滤：仅包含 2025-01-20 之后
+	userModels, err = q.QueryByUserModels("2025-01-20", "")
+	if err != nil {
+		t.Fatalf("QueryByUserModels with since failed: %v", err)
+	}
+	if userModels["gpt-4o"].InputTokens != 200 {
+		t.Errorf("expected InputTokens 200 with since filter, got %d", userModels["gpt-4o"].InputTokens)
+	}
 }

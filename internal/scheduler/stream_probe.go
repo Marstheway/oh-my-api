@@ -54,12 +54,11 @@ func (s *streamProbeState) abortProbe() {
 	s.aborted = true
 }
 
-func probeStreamPrefix(resp *http.Response, protocol string, prefillTimeout time.Duration, streamIdleTimeout time.Duration) (FailureKind, string, time.Duration, error) {
+func probeStreamPrefix(resp *http.Response, protocol string, prefillTimeout time.Duration, streamIdleTimeout time.Duration, attemptStart time.Time) (FailureKind, string, time.Duration, error) {
 	if resp == nil || resp.Body == nil {
 		return FailureKindSuccess, "", 0, nil
 	}
 
-	probeStart := time.Now()
 	var streamTTFT time.Duration
 
 	originalBody := resp.Body
@@ -101,6 +100,7 @@ func probeStreamPrefix(resp *http.Response, protocol string, prefillTimeout time
 				if !ok {
 					err := <-done
 					if err != nil {
+						_ = originalBody.Close()
 						_ = pipeReader.Close()
 						return FailureKindSuccess, "", true, err
 					}
@@ -119,7 +119,7 @@ func probeStreamPrefix(resp *http.Response, protocol string, prefillTimeout time
 		}
 	}
 
-	prefillTimer := time.NewTimer(prefillTimeout)
+	prefillTimer := time.NewTimer(time.Until(attemptStart.Add(prefillTimeout)))
 	defer prefillTimer.Stop()
 	var probeTimer *time.Timer
 	var probeTimerC <-chan time.Time
@@ -149,6 +149,7 @@ func probeStreamPrefix(resp *http.Response, protocol string, prefillTimeout time
 			if !ok {
 				err := <-done
 				if err != nil {
+					_ = originalBody.Close()
 					_ = pipeReader.Close()
 					return FailureKindSuccess, "", streamTTFT, err
 				}
@@ -165,7 +166,7 @@ func probeStreamPrefix(resp *http.Response, protocol string, prefillTimeout time
 				return kind, reason, streamTTFT, nil
 			}
 			if len(sseEvents) == 1 {
-				streamTTFT = time.Since(probeStart)
+				streamTTFT = time.Since(attemptStart)
 				stopPrefillTimer()
 				startProbeTimer()
 			}
@@ -186,6 +187,7 @@ func probeStreamPrefix(resp *http.Response, protocol string, prefillTimeout time
 		case <-prefillTimer.C:
 			// 如果在 prefill timeout 内没有收到任何 SSE 事件，返回 ErrPrefillTimeout
 			if len(sseEvents) == 0 {
+				_ = originalBody.Close()
 				_ = pipeReader.Close()
 				return FailureKindSuccess, "", 0, ErrPrefillTimeout
 			}
@@ -354,4 +356,26 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 
 func (r *idleTimeoutReader) Close() error {
 	return r.r.Close()
+}
+
+type notifyFirstRead struct {
+	io.ReadCloser
+	notify func()
+	once   sync.Once
+}
+
+func (n *notifyFirstRead) Read(p []byte) (int, error) {
+	nr, err := n.ReadCloser.Read(p)
+	if nr > 0 && n.notify != nil {
+		n.once.Do(n.notify)
+	}
+	return nr, err
+}
+
+// ProbeStreamPrefixForTest exposes probeStreamPrefix for cross-package cascade contract tests.
+func ProbeStreamPrefixForTest(resp *http.Response, protocol string, prefillTimeout, streamIdleTimeout time.Duration, attemptStart time.Time, notifyFirstEvent func()) (FailureKind, string, time.Duration, error) {
+	if notifyFirstEvent != nil && resp != nil && resp.Body != nil {
+		resp.Body = &notifyFirstRead{ReadCloser: resp.Body, notify: notifyFirstEvent}
+	}
+	return probeStreamPrefix(resp, protocol, prefillTimeout, streamIdleTimeout, attemptStart)
 }

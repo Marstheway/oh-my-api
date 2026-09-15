@@ -1,7 +1,9 @@
 package runtimeconfig
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/Marstheway/oh-my-api/internal/config"
@@ -11,18 +13,27 @@ import (
 
 // Manager 管理运行时配置的 draft/active 状态、CRUD 操作和 apply 流程
 type Manager struct {
-	mu       sync.RWMutex
-	active   *config.Config
-	draft    *config.Config
+	mu        sync.RWMutex
+	active    *config.Config
+	draft     *config.Config
 	rebuilder RuntimeRebuilder
-	reinit   ReinitHandler
-	store    *YamlStore
+	reinit    ReinitHandler
+	store     *YamlStore
+
+	// OnAfterApply 在配置成功应用后回调，用于重建共享依赖（如 catalog 刷新循环）
+	OnAfterApply func(newCfg *config.Config)
+
+	// OnCommitted 在配置成功保存、handler reinit 与 active 提交后回调，
+	// 把 Apply 实际构建并交给 handler 的 resolver 与已提交的 active 配置
+	// 交给运行时（如 cascade Spoke 元数据 source 原子替换），避免重复构建。
+	OnCommitted func(newCfg *config.Config, newResolver *model.Resolver)
 
 	// CRUD 服务
 	modelGroupCRUD *ModelGroupCRUD
 	redirectCRUD   *RedirectCRUD
 	providerCRUD   *ProviderCRUD
 	authKeyCRUD    *AuthKeyCRUD
+	cascadeCRUD    *CascadeCRUD
 }
 
 // NewManager 创建配置管理器
@@ -33,8 +44,8 @@ func NewManager(initialCfg *config.Config, configPath string, rebuilder RuntimeR
 	}
 
 	m := &Manager{
-		active:   initialCfg,
-		draft:    deepCopyConfig(initialCfg),
+		active:    initialCfg,
+		draft:     deepCopyConfig(initialCfg),
 		rebuilder: rebuilder,
 		reinit:    reinit,
 		store:     store,
@@ -44,6 +55,7 @@ func NewManager(initialCfg *config.Config, configPath string, rebuilder RuntimeR
 	m.redirectCRUD = NewRedirectCRUD(m.draft)
 	m.providerCRUD = NewProviderCRUD(m.draft)
 	m.authKeyCRUD = NewAuthKeyCRUD(m.draft)
+	m.cascadeCRUD = NewCascadeCRUD(m.draft)
 	return m, nil
 }
 
@@ -112,6 +124,13 @@ func (m *Manager) DeleteModelGroup(name string) error {
 	return m.modelGroupCRUD.Delete(name)
 }
 
+// ReorderModelGroups 按 names 置换 draft 中的 model_groups 顺序。
+func (m *Manager) ReorderModelGroups(names []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.modelGroupCRUD.Reorder(names)
+}
+
 // GetModelGroup 获取单个 model group
 func (m *Manager) GetModelGroup(name string) (config.ModelGroupConfig, bool) {
 	m.mu.RLock()
@@ -161,6 +180,13 @@ func (m *Manager) ListRedirects() []RedirectListOutput {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.redirectCRUD.List()
+}
+
+// ReorderRedirects 按 sources 置换 draft 中的 redirect 顺序。
+func (m *Manager) ReorderRedirects(sources []string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.redirectCRUD.Reorder(sources)
 }
 
 // Provider CRUD 操作（代理到 ProviderCRUD）
@@ -237,6 +263,75 @@ func (m *Manager) ListAuthKeys() []AuthKeyOutput {
 	return m.authKeyCRUD.List()
 }
 
+// GetCascade 返回 draft cascade 配置（含明文 shared token）。
+func (m *Manager) GetCascade() CascadeConfigView {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cascadeCRUD.View()
+}
+
+// UpdateCascade 将请求的角色应用到 draft cascade 配置。
+func (m *Manager) UpdateCascade(input *CascadeConfigInput) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cascadeCRUD.Update(input)
+}
+
+// Rules 整表操作（无单条 CRUD；整表替换避免无稳定 id 时的下标漂移）
+
+// ListRules 返回 draft 中的 rules（顺序即配置顺序）的深拷贝快照。
+func (m *Manager) ListRules() []config.RuleConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.draft.Rules == nil {
+		return nil
+	}
+	out := make([]config.RuleConfig, len(m.draft.Rules))
+	for i, rule := range m.draft.Rules {
+		out[i] = deepCopyRuleConfig(rule)
+	}
+	return out
+}
+
+// ReplaceRules 整表替换 draft rules。
+// 流程：输入转 []config.RuleConfig → 规范化（协议别名/effort 大小写）→ ValidateRules
+// → 深拷贝写入 m.draft.Rules；任一步失败则 draft 保持原切片。
+func (m *Manager) ReplaceRules(input []RuleInput) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	rules := make([]config.RuleConfig, len(input))
+	for i, in := range input {
+		rules[i] = in.ToConfig()
+	}
+
+	config.NormalizeRulesInConfig(&config.Config{Rules: rules})
+
+	if err := config.ValidateRules(rules); err != nil {
+		var verr config.ValidationError
+		if errors.As(err, &verr) && len(verr.Issues) > 0 {
+			msgs := make([]string, len(verr.Issues))
+			for i, issue := range verr.Issues {
+				msgs[i] = issue.Path + ": " + issue.Message
+			}
+			return &Error{
+				Code:    ErrCodeValidation,
+				Message: strings.Join(msgs, "; "),
+				Field:   verr.Issues[0].Path,
+			}
+		}
+		return &Error{Code: ErrCodeValidation, Message: err.Error()}
+	}
+
+	// 深拷贝写入，避免与请求体切片共享底层数组
+	stored := make([]config.RuleConfig, len(rules))
+	for i, rule := range rules {
+		stored[i] = deepCopyRuleConfig(rule)
+	}
+	m.draft.Rules = stored
+	return nil
+}
+
 // RebuildDraftResolver 基于 draft 配置临时构建 resolver（用于计算 context_length）
 func (m *Manager) RebuildDraftResolver() (*model.Resolver, error) {
 	m.mu.RLock()
@@ -249,6 +344,32 @@ func (m *Manager) RebuildDraftResolver() (*model.Resolver, error) {
 func (m *Manager) Apply() ApplyResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// 0. 规范化 draft（协议简写、rules effort 大小写/空格等），再进入校验
+	// Admin UI 可能提交 "HIGH" / " high,max " 等未规范化值
+	config.NormalizeProviderProtocolsInConfig(m.draft)
+	config.NormalizeRulesInConfig(m.draft)
+
+	if err := m.store.RejectDeprecatedFields(); err != nil {
+		return ApplyResult{
+			Success: false,
+			Message: fmt.Sprintf("validation failed: %v", err),
+		}
+	}
+
+	if err := config.ValidateRules(m.draft.Rules); err != nil {
+		return ApplyResult{
+			Success: false,
+			Message: fmt.Sprintf("validation failed: %v", err),
+		}
+	}
+
+	if err := config.ValidateCascade(m.draft); err != nil {
+		return ApplyResult{
+			Success: false,
+			Message: fmt.Sprintf("validation failed: %v", err),
+		}
+	}
 
 	// 1. 校验 draft
 	warnings, err := config.ValidateForServe(m.draft)
@@ -291,6 +412,16 @@ func (m *Manager) Apply() ApplyResult {
 	// 5. 提交 active = draft
 	m.active = deepCopyConfig(m.draft)
 
+	// 6. 回调 committed-runtime（如 cascade Spoke 元数据 source 原子替换）。
+	//    先于 OnAfterApply，使级联重启（hub swap / spoke 重连）直接基于新 source。
+	if m.OnCommitted != nil {
+		m.OnCommitted(m.active, newResolver)
+	}
+
+	// 7. 回调共享依赖重建（如 catalog 刷新循环）
+	if m.OnAfterApply != nil {
+		m.OnAfterApply(m.active)
+	}
 	return ApplyResult{Success: true}
 }
 
@@ -303,6 +434,7 @@ func (m *Manager) DiscardDraft() {
 	m.redirectCRUD = NewRedirectCRUD(m.draft)
 	m.providerCRUD = NewProviderCRUD(m.draft)
 	m.authKeyCRUD = NewAuthKeyCRUD(m.draft)
+	m.cascadeCRUD = NewCascadeCRUD(m.draft)
 }
 
 // ResetDraftToActive 重置 draft 为当前 active（alias of DiscardDraft）
@@ -317,10 +449,10 @@ func deepCopyConfig(cfg *config.Config) *config.Config {
 	}
 
 	result := &config.Config{
-		Server:    cfg.Server,
-		Inbound:   cfg.Inbound,
-		Database:  cfg.Database,
-		Redirect:  make(config.RedirectConfigs, 0),
+		Server:   cfg.Server,
+		Inbound:  cfg.Inbound,
+		Database: cfg.Database,
+		Redirect: make(config.RedirectConfigs, 0),
 	}
 
 	// 深拷贝 Inbound.Auth.Keys（切片底层数组共享，需独立拷贝）
@@ -339,16 +471,14 @@ func deepCopyConfig(cfg *config.Config) *config.Config {
 		copy(pc.Endpoints, v.Endpoints)
 		pc.Protocols = make([]string, len(v.Protocols))
 		copy(pc.Protocols, v.Protocols)
-		pc.UpstreamModels = make([]config.UpstreamModelConfig, len(v.UpstreamModels))
-		for i, um := range v.UpstreamModels {
-			pc.UpstreamModels[i] = um
-			pc.UpstreamModels[i].AllowedProtocols = make([]string, len(um.AllowedProtocols))
-			copy(pc.UpstreamModels[i].AllowedProtocols, um.AllowedProtocols)
+		if v.RemoteBridge != nil {
+			rb := *v.RemoteBridge
+			pc.RemoteBridge = &rb
 		}
-		pc.DefaultProtocols = make([]string, len(v.DefaultProtocols))
-		copy(pc.DefaultProtocols, v.DefaultProtocols)
-		pc.DisabledTimeRanges = make([]string, len(v.DisabledTimeRanges))
-		copy(pc.DisabledTimeRanges, v.DisabledTimeRanges)
+		if v.Cascade != nil {
+			cascade := *v.Cascade
+			pc.Cascade = &cascade
+		}
 		result.Providers.Items[k] = pc
 	}
 
@@ -374,6 +504,74 @@ func deepCopyConfig(cfg *config.Config) *config.Config {
 		result.SmartRoute = &sr
 	}
 
+	// 深拷贝 Rules
+	if len(cfg.Rules) > 0 {
+		result.Rules = make([]config.RuleConfig, len(cfg.Rules))
+		for i, rule := range cfg.Rules {
+			result.Rules[i] = deepCopyRuleConfig(rule)
+		}
+	}
+
+	// 深拷贝顶层 cascade
+	if cfg.Cascade != nil {
+		spoke := *cfg.Cascade
+		result.Cascade = &spoke
+	}
+
+	return result
+}
+
+func deepCopyRuleConfig(rule config.RuleConfig) config.RuleConfig {
+	result := config.RuleConfig{
+		Match:  deepCopyRuleMatch(rule.Match),
+		Action: deepCopyRuleAction(rule.Action),
+	}
+	return result
+}
+
+func deepCopyRuleMatch(match config.RuleMatch) config.RuleMatch {
+	result := config.RuleMatch{}
+	if match.ClientModel != nil {
+		cond := *match.ClientModel
+		result.ClientModel = &cond
+	}
+	if match.Key != nil {
+		cond := *match.Key
+		result.Key = &cond
+	}
+	if match.UpstreamModel != nil {
+		cond := *match.UpstreamModel
+		result.UpstreamModel = &cond
+	}
+	return result
+}
+
+func deepCopyRuleAction(action config.RuleAction) config.RuleAction {
+	result := action
+	if len(action.Effort) > 0 {
+		result.Effort = make([]string, len(action.Effort))
+		copy(result.Effort, action.Effort)
+	}
+	if action.MaxTokens != nil {
+		n := *action.MaxTokens
+		result.MaxTokens = &n
+	}
+	if action.QPM != nil {
+		q := *action.QPM
+		result.QPM = &q
+	}
+	if action.Retries != nil {
+		n := *action.Retries
+		result.Retries = &n
+	}
+	if len(action.EnableTimeRange) > 0 {
+		result.EnableTimeRange = make([]string, len(action.EnableTimeRange))
+		copy(result.EnableTimeRange, action.EnableTimeRange)
+	}
+	if len(action.DisableTimeRange) > 0 {
+		result.DisableTimeRange = make([]string, len(action.DisableTimeRange))
+		copy(result.DisableTimeRange, action.DisableTimeRange)
+	}
 	return result
 }
 

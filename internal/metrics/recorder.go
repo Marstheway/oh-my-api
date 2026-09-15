@@ -44,6 +44,16 @@ func RecordToken(provider, model, modelGroup, keyName string, input, output int)
 	}
 }
 
+// RecordStreamDecode 记录成功流式请求从首个 SSE 事件至完成期间的输出 token 和耗时。
+func RecordStreamDecode(provider, model, modelGroup, keyName string, outputTokens int, duration float64) {
+	if outputTokens <= 0 || duration <= 0 {
+		return
+	}
+
+	streamDecodeOutputTokensTotal.WithLabelValues(provider, model, modelGroup, keyName).Add(float64(outputTokens))
+	streamDecodeDurationSecondsTotal.WithLabelValues(provider, model, modelGroup, keyName).Add(duration)
+}
+
 // SetProviderHealth 设置 Provider 健康状态
 func SetProviderHealth(provider string, healthy bool) {
 	value := float64(0)
@@ -89,6 +99,11 @@ func RecordProviderAttempt(info ProviderAttemptInfo) {
 		info.FailureReason,
 		info.StatusCode,
 	).Observe(info.Duration)
+}
+
+// RecordStreamInterrupted 记录流式响应在完成前中断。
+func RecordStreamInterrupted(provider, upstreamModel, outboundProtocol, reason string) {
+	streamInterruptedTotal.WithLabelValues(provider, upstreamModel, outboundProtocol, reason).Inc()
 }
 
 // RecordRatelimitTriggered 记录限流触发

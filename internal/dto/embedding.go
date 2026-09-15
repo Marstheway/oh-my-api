@@ -11,14 +11,14 @@ type EmbeddingRequest struct {
 }
 
 type EmbeddingResponseItem struct {
-	Object    string     `json:"object"`
-	Index     int        `json:"index"`
-	Embedding []float64  `json:"embedding"`
+	Object    string    `json:"object"`
+	Index     int       `json:"index"`
+	Embedding []float64 `json:"embedding"`
 }
 
 type EmbeddingResponse struct {
 	Object string                  `json:"object"`
-	Data   []EmbeddingResponseItem  `json:"data"`
+	Data   []EmbeddingResponseItem `json:"data"`
 	Model  string                  `json:"model"`
 	Usage  Usage                   `json:"usage"`
 }

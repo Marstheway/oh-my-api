@@ -411,3 +411,36 @@ func (c *RedirectCRUD) resolveRedirect(source string) (string, int) {
 		current = next
 	}
 }
+
+// Reorder 按 sources 置换 redirect 切片。必须是现有 source 的排列。
+func (c *RedirectCRUD) Reorder(sources []string) error {
+	if sources == nil {
+		return &Error{Code: ErrCodeBadRequest, Field: "sources", Message: "must not be null"}
+	}
+	current := c.draft.Redirect
+	if len(sources) != len(current) {
+		return &Error{Code: ErrCodeBadRequest, Field: "sources", Message: "must be a permutation of existing redirect sources"}
+	}
+	bySource := make(map[string]config.RedirectConfig, len(current))
+	for _, rc := range current {
+		bySource[rc.Source] = rc
+	}
+	seen := make(map[string]struct{}, len(sources))
+	next := make(config.RedirectConfigs, 0, len(sources))
+	for _, s := range sources {
+		if s == "" {
+			return &Error{Code: ErrCodeBadRequest, Field: "sources", Message: "must not contain empty source"}
+		}
+		if _, dup := seen[s]; dup {
+			return &Error{Code: ErrCodeBadRequest, Field: "sources", Message: "duplicate source: " + s}
+		}
+		seen[s] = struct{}{}
+		rc, ok := bySource[s]
+		if !ok {
+			return &Error{Code: ErrCodeBadRequest, Field: "sources", Message: "unknown redirect: " + s}
+		}
+		next = append(next, rc)
+	}
+	c.draft.Redirect = next
+	return nil
+}

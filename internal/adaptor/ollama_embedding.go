@@ -22,7 +22,7 @@ type OllamaEmbeddingResponse struct {
 func BuildOllamaEmbeddingRequest(ctx context.Context, provider *config.ProviderConfig,
 	upstreamModel string, req *dto.EmbeddingRequest, normalizedInput []string) (*http.Request, error) {
 
-	endpoint := provider.GetEmbeddingEndpoint()
+	endpoint := provider.GetEmbeddingEndpointByProtocol("ollama.embed")
 	if endpoint == "" {
 		return nil, fmt.Errorf("embedding endpoint is empty")
 	}
@@ -55,6 +55,7 @@ func BuildOllamaEmbeddingRequest(ctx context.Context, provider *config.ProviderC
 	if err != nil {
 		return nil, fmt.Errorf("build embedding request: %w", err)
 	}
+	attachReplayableBody(httpReq, body)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	if provider.APIKey != "" {
@@ -99,4 +100,15 @@ func DecodeOllamaEmbeddingResponse(body io.Reader, expectedCount int) (*OllamaEm
 func isStringInput(input any) bool {
 	_, ok := input.(string)
 	return ok
+}
+
+func attachReplayableBody(req *http.Request, body []byte) {
+	if req == nil {
+		return
+	}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	req.Body, _ = req.GetBody()
+	req.ContentLength = int64(len(body))
 }

@@ -85,9 +85,9 @@ func TestAdminLoginHandler_LoginPage(t *testing.T) {
 			if !tt.wantRedirect && !strings.Contains(w.Body.String(), "Admin Console") {
 				t.Error("LoginPage() 应包含登录页面内容")
 			}
-		if tt.password == "" && !strings.Contains(w.Body.String(), "Password Not Configured") {
-			t.Error("LoginPage() 无密码时应显示配置提示")
-		}
+			if tt.password == "" && !strings.Contains(w.Body.String(), "Password Not Configured") {
+				t.Error("LoginPage() 无密码时应显示配置提示")
+			}
 		})
 	}
 }

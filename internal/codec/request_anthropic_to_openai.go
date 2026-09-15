@@ -206,14 +206,19 @@ func convertMapSliceToContentBlocks(items []any) []dto.ContentBlock {
 	return blocks
 }
 
-// convertMapToMessageSource 将 map[string]any 转换为 dto.MessageSource
+// convertMapToMessageSource 将 map[string]any 转换为 dto.MessageSource。
+// source 字段是可选组合（base64 有 media_type/data，url 型只有 url），
+// 必须用 comma-ok，缺字段不能裸断言，否则 nil interface 会 panic。
 func convertMapToMessageSource(m map[string]any) *dto.MessageSource {
-	return &dto.MessageSource{
-		Type:      m["type"].(string),
-		MediaType: m["media_type"].(string),
-		Data:      m["data"].(string),
-		Url:       m["url"].(string),
+	if m == nil {
+		return nil
 	}
+	src := &dto.MessageSource{}
+	src.Type, _ = m["type"].(string)
+	src.MediaType, _ = m["media_type"].(string)
+	src.Data, _ = m["data"].(string)
+	src.Url, _ = m["url"].(string)
+	return src
 }
 
 // convertClaudeContentBlocksToOpenAI converts []dto.ContentBlock to OpenAI format
@@ -269,8 +274,8 @@ func convertClaudeContentBlocksToOpenAI(role string, blocks []dto.ContentBlock) 
 
 // messageConversionState 收集消息转换过程中的状态
 type messageConversionState struct {
-	textContent       string
-	reasoningContent  string
+	textContent      string
+	reasoningContent string
 	toolCalls        []dto.ToolCall
 	toolMessages     []dto.Message
 	contentParts     []any

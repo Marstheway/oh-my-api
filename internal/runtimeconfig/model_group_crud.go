@@ -3,6 +3,7 @@ package runtimeconfig
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Marstheway/oh-my-api/internal/config"
 )
@@ -79,7 +80,6 @@ func (c *ModelGroupCRUD) ValidateCreate(input *ModelGroupInput) *Error {
 		}
 	}
 
-
 	// model_metadata.context_length 校验
 	if input.ModelMetadata != nil && input.ModelMetadata.ContextLength != nil {
 		if *input.ModelMetadata.ContextLength <= 0 {
@@ -91,6 +91,22 @@ func (c *ModelGroupCRUD) ValidateCreate(input *ModelGroupInput) *Error {
 	if input.Exposure != nil {
 		if _, err := config.NormalizeExposure(*input.Exposure); err != nil {
 			return &Error{Code: ErrCodeBadRequest, Field: "exposure", Message: err.Error()}
+		}
+	}
+
+	// sticky 校验
+	if input.Sticky != nil && input.Sticky.Enabled {
+		// 只允许在 load-balance 或 loadbalance 模式下启用 sticky
+		if input.Mode != "load-balance" && input.Mode != "loadbalance" {
+			return &Error{Code: ErrCodeBadRequest, Field: "sticky", Message: "sticky.enabled can only be true for load-balance mode"}
+		}
+		// idle_timeout 校验
+		if input.Sticky.IdleTimeout != "" {
+			if dur, err := time.ParseDuration(input.Sticky.IdleTimeout); err != nil {
+				return &Error{Code: ErrCodeBadRequest, Field: "sticky.idle_timeout", Message: "invalid duration: " + err.Error()}
+			} else if dur <= 0 {
+				return &Error{Code: ErrCodeBadRequest, Field: "sticky.idle_timeout", Message: "must be greater than 0"}
+			}
 		}
 	}
 
@@ -134,11 +150,11 @@ func (c *ModelGroupCRUD) ValidateUpdate(oldName string, input *ModelGroupInput) 
 				return &Error{Code: ErrCodeConflict, Field: "name", Message: "already exists"}
 			}
 		}
-			for _, rc := range c.draft.Redirect {
-				if rc.Source == input.Name {
-					return &Error{Code: ErrCodeConflict, Field: "name", Message: "conflicts with redirect source"}
-				}
+		for _, rc := range c.draft.Redirect {
+			if rc.Source == input.Name {
+				return &Error{Code: ErrCodeConflict, Field: "name", Message: "conflicts with redirect source"}
 			}
+		}
 	}
 
 	// mode 校验
@@ -197,6 +213,22 @@ func (c *ModelGroupCRUD) ValidateUpdate(oldName string, input *ModelGroupInput) 
 		}
 	}
 
+	// sticky 校验
+	if input.Sticky != nil && input.Sticky.Enabled {
+		// 只允许在 load-balance 或 loadbalance 模式下启用 sticky
+		if input.Mode != "load-balance" && input.Mode != "loadbalance" {
+			return &Error{Code: ErrCodeBadRequest, Field: "sticky", Message: "sticky.enabled can only be true for load-balance mode"}
+		}
+		// idle_timeout 校验
+		if input.Sticky.IdleTimeout != "" {
+			if dur, err := time.ParseDuration(input.Sticky.IdleTimeout); err != nil {
+				return &Error{Code: ErrCodeBadRequest, Field: "sticky.idle_timeout", Message: "invalid duration: " + err.Error()}
+			} else if dur <= 0 {
+				return &Error{Code: ErrCodeBadRequest, Field: "sticky.idle_timeout", Message: "must be greater than 0"}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -207,6 +239,21 @@ func (c *ModelGroupCRUD) Update(oldName string, input *ModelGroupInput) (config.
 	}
 
 	cfg := input.NormalizeInput()
+
+	// 省略保留语义：若 input.Sticky 为 nil，保留原 sticky 配置
+	if input.Sticky == nil {
+		for _, g := range c.draft.ModelGroups {
+			if g.Name == oldName {
+				cfg.Sticky = g.Sticky
+				break
+			}
+		}
+	}
+
+	// 非 load-balance 模式不得保留 sticky.enabled（省略 sticky + 改 mode 时自动清理）
+	if cfg.Mode != "load-balance" && cfg.Mode != "loadbalance" {
+		cfg.Sticky = nil
+	}
 
 	// 找到并替换
 	for i, g := range c.draft.ModelGroups {
@@ -314,4 +361,37 @@ func (c *ModelGroupCRUD) Get(name string) (config.ModelGroupConfig, bool) {
 // List 获取所有 model groups
 func (c *ModelGroupCRUD) List() []config.ModelGroupConfig {
 	return c.draft.ModelGroups
+}
+
+// Reorder 按 names 置换 model_groups 切片。必须是现有 name 的排列（等长、无重复、无未知）。
+func (c *ModelGroupCRUD) Reorder(names []string) error {
+	if names == nil {
+		return &Error{Code: ErrCodeBadRequest, Field: "names", Message: "must not be null"}
+	}
+	current := c.draft.ModelGroups
+	if len(names) != len(current) {
+		return &Error{Code: ErrCodeBadRequest, Field: "names", Message: "must be a permutation of existing group names"}
+	}
+	byName := make(map[string]config.ModelGroupConfig, len(current))
+	for _, g := range current {
+		byName[g.Name] = g
+	}
+	seen := make(map[string]struct{}, len(names))
+	next := make([]config.ModelGroupConfig, 0, len(names))
+	for _, n := range names {
+		if n == "" {
+			return &Error{Code: ErrCodeBadRequest, Field: "names", Message: "must not contain empty name"}
+		}
+		if _, dup := seen[n]; dup {
+			return &Error{Code: ErrCodeBadRequest, Field: "names", Message: "duplicate name: " + n}
+		}
+		seen[n] = struct{}{}
+		g, ok := byName[n]
+		if !ok {
+			return &Error{Code: ErrCodeBadRequest, Field: "names", Message: "unknown group: " + n}
+		}
+		next = append(next, g)
+	}
+	c.draft.ModelGroups = next
+	return nil
 }

@@ -16,6 +16,22 @@ func TestFSEmbed(t *testing.T) {
 	}
 	file.Close()
 
+	// Test that favicon exists
+	file, err = FS.Open("static/favicon.png")
+	if err != nil {
+		t.Fatalf("Failed to open static/favicon.png: %v", err)
+	}
+	file.Close()
+
+	// Providers page assets
+	for _, path := range []string{"static/providers.css", "static/providers.js", "static/shared.js"} {
+		file, err = FS.Open(path)
+		if err != nil {
+			t.Fatalf("Failed to open %s: %v", path, err)
+		}
+		file.Close()
+	}
+
 	// Test that all font files exist
 	fontFiles := []string{
 		"dm-sans-latin-ext.woff2",

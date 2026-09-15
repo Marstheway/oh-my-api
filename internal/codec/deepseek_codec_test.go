@@ -9,9 +9,9 @@ import (
 
 func TestNeedsDeepSeekCompat(t *testing.T) {
 	tests := []struct {
-		name           string
-		upstreamModel  string
-		wantCompat     bool
+		name          string
+		upstreamModel string
+		wantCompat    bool
 	}{
 		{"exact match lowercase", "deepseek-chat", true},
 		{"exact match uppercase", "DEEPSEEK-CHAT", true},
@@ -22,7 +22,7 @@ func TestNeedsDeepSeekCompat(t *testing.T) {
 		{"no match different", "claude-sonnet-4", false},
 		{"empty", "", false},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := NeedsDeepSeekCompat(tt.upstreamModel); got != tt.wantCompat {
@@ -48,14 +48,14 @@ func TestCloneChatRequestWithDeepSeekCompat(t *testing.T) {
 			{Role: "tool", ToolCallID: "tc-1", Content: "result"},
 		},
 	}
-	
+
 	clone := cloneChatRequestWithDeepSeekCompat(req)
-	
+
 	// 验证克隆结果
 	if clone.Messages[1].ReasoningContent == nil || *clone.Messages[1].ReasoningContent != " " {
 		t.Errorf("clone.Messages[1].ReasoningContent = %v, want ' '", clone.Messages[1].ReasoningContent)
 	}
-	
+
 	// 验证原始请求未被修改
 	if req.Messages[1].ReasoningContent != nil {
 		t.Errorf("original request.Messages[1].ReasoningContent should be nil, got %v", req.Messages[1].ReasoningContent)
@@ -79,9 +79,9 @@ func TestCloneChatRequestWithDeepSeekCompat_PreserveExisting(t *testing.T) {
 			},
 		},
 	}
-	
+
 	clone := cloneChatRequestWithDeepSeekCompat(req)
-	
+
 	if clone.Messages[1].ReasoningContent == nil || *clone.Messages[1].ReasoningContent != "existing reasoning" {
 		t.Errorf("clone.Messages[1].ReasoningContent = %v, want 'existing reasoning'", clone.Messages[1].ReasoningContent)
 	}
@@ -96,9 +96,9 @@ func TestCloneChatRequestWithDeepSeekCompat_NoToolCalls(t *testing.T) {
 			{Role: "assistant", Content: "Hi there"},
 		},
 	}
-	
+
 	clone := cloneChatRequestWithDeepSeekCompat(req)
-	
+
 	if clone.Messages[1].ReasoningContent != nil {
 		t.Errorf("clone.Messages[1].ReasoningContent should be nil for non-tool_calls assistant, got %v", clone.Messages[1].ReasoningContent)
 	}
@@ -118,27 +118,27 @@ func TestConvertOpenAIToAnthropicRequest_DeepSeekCompat(t *testing.T) {
 			},
 		},
 	}
-	
+
 	// DeepSeek 模式：应补 thinking block
 	claudeReq, err := convertOpenAIToAnthropicRequest(req, "deepseek-chat", true)
 	if err != nil {
 		t.Fatalf("convertOpenAIToAnthropicRequest failed: %v", err)
 	}
-	
+
 	if len(claudeReq.Messages) != 2 {
 		t.Fatalf("len(claudeReq.Messages) = %d, want 2", len(claudeReq.Messages))
 	}
-	
+
 	assistantMsg := claudeReq.Messages[1]
 	if assistantMsg.Role != "assistant" {
 		t.Fatalf("assistantMsg.Role = %q, want 'assistant'", assistantMsg.Role)
 	}
-	
+
 	blocks, ok := assistantMsg.Content.([]dto.ContentBlock)
 	if !ok {
 		t.Fatalf("assistantMsg.Content is not []dto.ContentBlock")
 	}
-	
+
 	// 第一个 block 应是 thinking
 	if len(blocks) < 1 || blocks[0].Type != "thinking" {
 		t.Fatalf("first block type = %q, want 'thinking'", blocks[0].Type)
@@ -164,18 +164,18 @@ func TestConvertOpenAIToAnthropicRequest_PreserveReasoningContent(t *testing.T) 
 			},
 		},
 	}
-	
+
 	// 非 DeepSeek 模式也应保留 reasoning_content -> thinking
 	claudeReq, err := convertOpenAIToAnthropicRequest(req, "gpt-4", false)
 	if err != nil {
 		t.Fatalf("convertOpenAIToAnthropicRequest failed: %v", err)
 	}
-	
+
 	blocks, ok := claudeReq.Messages[1].Content.([]dto.ContentBlock)
 	if !ok {
 		t.Fatalf("Content is not []dto.ContentBlock")
 	}
-	
+
 	if len(blocks) < 1 || blocks[0].Type != "thinking" {
 		t.Fatalf("first block type = %q, want 'thinking'", blocks[0].Type)
 	}
@@ -200,18 +200,18 @@ func TestConvertAnthropicToOpenAIRequest_PreserveThinking(t *testing.T) {
 			},
 		},
 	}
-	
+
 	openaiReq := convertAnthropicToOpenAIRequest(req, "gpt-4")
-	
+
 	if len(openaiReq.Messages) != 2 {
 		t.Fatalf("len(openaiReq.Messages) = %d, want 2", len(openaiReq.Messages))
 	}
-	
+
 	assistantMsg := openaiReq.Messages[1]
 	if assistantMsg.Role != "assistant" {
 		t.Fatalf("assistantMsg.Role = %q, want 'assistant'", assistantMsg.Role)
 	}
-	
+
 	if assistantMsg.ReasoningContent == nil || *assistantMsg.ReasoningContent != "thinking process" {
 		t.Fatalf("assistantMsg.ReasoningContent = %v, want 'thinking process'", assistantMsg.ReasoningContent)
 	}
@@ -219,7 +219,7 @@ func TestConvertAnthropicToOpenAIRequest_PreserveThinking(t *testing.T) {
 
 func TestOpenAIChatCodec_EncodeRequest_DeepSeekPassthrough(t *testing.T) {
 	codec := &OpenAIChatCodec{}
-	
+
 	req := &dto.ChatCompletionRequest{
 		Model: "user-model",
 		Messages: []dto.Message{
@@ -233,23 +233,23 @@ func TestOpenAIChatCodec_EncodeRequest_DeepSeekPassthrough(t *testing.T) {
 			},
 		},
 	}
-	
+
 	// DeepSeek passthrough: OpenAI -> OpenAI
 	body, err := codec.EncodeRequest(FormatOpenAIChat, req, "deepseek-chat", true)
 	if err != nil {
 		t.Fatalf("EncodeRequest failed: %v", err)
 	}
-	
+
 	var encoded dto.ChatCompletionRequest
 	if err := json.Unmarshal(body, &encoded); err != nil {
 		t.Fatalf("unmarshal encoded request: %v", err)
 	}
-	
+
 	// 验证 reasoning_content 已补
 	if encoded.Messages[1].ReasoningContent == nil || *encoded.Messages[1].ReasoningContent != " " {
 		t.Errorf("encoded.Messages[1].ReasoningContent = %v, want ' '", encoded.Messages[1].ReasoningContent)
 	}
-	
+
 	// 验证原始请求未修改
 	if req.Messages[1].ReasoningContent != nil {
 		t.Errorf("original req.Messages[1].ReasoningContent should be nil, got %v", req.Messages[1].ReasoningContent)
@@ -258,7 +258,7 @@ func TestOpenAIChatCodec_EncodeRequest_DeepSeekPassthrough(t *testing.T) {
 
 func TestOpenAIChatCodec_EncodeRequest_NonDeepSeekPassthrough(t *testing.T) {
 	codec := &OpenAIChatCodec{}
-	
+
 	req := &dto.ChatCompletionRequest{
 		Model: "user-model",
 		Messages: []dto.Message{
@@ -272,18 +272,18 @@ func TestOpenAIChatCodec_EncodeRequest_NonDeepSeekPassthrough(t *testing.T) {
 			},
 		},
 	}
-	
+
 	// 非 DeepSeek: 不应补 reasoning_content
 	body, err := codec.EncodeRequest(FormatOpenAIChat, req, "gpt-4o", false)
 	if err != nil {
 		t.Fatalf("EncodeRequest failed: %v", err)
 	}
-	
+
 	var encoded dto.ChatCompletionRequest
 	if err := json.Unmarshal(body, &encoded); err != nil {
 		t.Fatalf("unmarshal encoded request: %v", err)
 	}
-	
+
 	// 验证 reasoning_content 未补
 	if encoded.Messages[1].ReasoningContent != nil {
 		t.Errorf("encoded.Messages[1].ReasoningContent should be nil for non-DeepSeek, got %v", encoded.Messages[1].ReasoningContent)
@@ -534,7 +534,7 @@ func TestConvertAnthropicToOpenAIRequest_MultipleThinkingBlocks(t *testing.T) {
 	if assistantMsg.ReasoningContent == nil || *assistantMsg.ReasoningContent != expectedReasoning {
 		t.Fatalf("ReasoningContent = %v, want %q (concatenated thinking blocks)", assistantMsg.ReasoningContent, expectedReasoning)
 	}
-	}
+}
 
 // Test: Empty string reasoning_content should be treated as missing and padded
 func TestCloneChatRequestWithDeepSeekCompat_EmptyString(t *testing.T) {

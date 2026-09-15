@@ -34,10 +34,10 @@ func newTestScheduler(qpm int) (*Scheduler, *httptest.Server) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	return New(rl, client, h, 500*time.Millisecond, 0), srv
+	return New(rl, client, h, 500*time.Millisecond, 0, 0), srv
 }
 
 func newSchedulerHTTPResponse(status int, contentType, body string) *http.Response {
@@ -126,10 +126,10 @@ func TestScheduler_Execute_SingleProvider(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	sched := New(rl, client, h, 500*time.Millisecond, 0)
+	sched := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -176,10 +176,10 @@ func TestScheduler_Execute_MultiProvider_Race(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	sched := New(rl, client, h, 500*time.Millisecond, 0)
+	sched := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	slowReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, slowSrv.URL, nil)
 	fastReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, fastSrv.URL, nil)
@@ -216,12 +216,12 @@ func TestScheduler_Execute_AllRateLimited(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	sched := New(rl, client, h, 500*time.Millisecond, 0)
+	sched := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
-	rl.Allow("test", "")
+	rl.Allow("test", "", 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -258,10 +258,10 @@ func TestScheduler_Execute_Timeout(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	sched := New(rl, client, h, 500*time.Millisecond, 0)
+	sched := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
@@ -292,10 +292,10 @@ func TestScheduler_Execute_AllProvidersFailed(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	sched := New(rl, client, h, 500*time.Millisecond, 0)
+	sched := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	tasks := []Task{
@@ -395,7 +395,7 @@ func TestParseResponse_ClassifiesNonStreamSoftFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := newSchedulerHTTPResponse(http.StatusOK, "application/json", tt.body)
 
-			result, err := parseResponse(resp, "winner", "model", tt.protocol, 500*time.Millisecond, 0)
+			result, err := parseResponse(resp, "winner", "model", tt.protocol, 500*time.Millisecond, 0, time.Now())
 			if err != nil {
 				t.Fatalf("parseResponse failed: %v", err)
 			}
@@ -453,7 +453,7 @@ func TestParseResponse_ProbesStreamSoftFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := newSchedulerHTTPResponse(http.StatusOK, "text/event-stream", tt.body)
 
-			result, err := parseResponse(resp, "winner", "model", tt.protocol, 500*time.Millisecond, 0)
+			result, err := parseResponse(resp, "winner", "model", tt.protocol, 500*time.Millisecond, 0, time.Now())
 			if err != nil {
 				t.Fatalf("parseResponse failed: %v", err)
 			}
@@ -544,7 +544,7 @@ func TestProbeStreamPrefix_ReleasesAmbiguousStreamUnchanged(t *testing.T) {
 		"data: [DONE]\n\n"
 	resp := newSchedulerHTTPResponse(http.StatusOK, "text/event-stream", body)
 
-	kind, reason, _, err := probeStreamPrefix(resp, "openai", 500*time.Millisecond, 0)
+	kind, reason, _, err := probeStreamPrefix(resp, "openai", 500*time.Millisecond, 0, time.Now())
 	if err != nil {
 		t.Fatalf("probeStreamPrefix failed: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestProbeStreamPrefix_DrainsReadyEventsBeforePrefixLimitRelease(t *testing.
 	for i := 0; i < 20; i++ {
 		resp := newSchedulerHTTPResponse(http.StatusOK, "text/event-stream", body)
 
-		kind, reason, _, err := probeStreamPrefix(resp, "openai", 500*time.Millisecond, 0)
+		kind, reason, _, err := probeStreamPrefix(resp, "openai", 500*time.Millisecond, 0, time.Now())
 		if err != nil {
 			resp.Body.Close()
 			t.Fatalf("probeStreamPrefix failed: %v", err)
@@ -616,14 +616,14 @@ func TestProbeStreamPrefix_CloseAbortsSilentSoftFailedUpstream(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	resp, err := client.Do("soft", req)
 	if err != nil {
 		t.Fatalf("client.Do failed: %v", err)
 	}
 
-	result, err := parseResponse(resp, "soft", "model", "openai", 500*time.Millisecond, 0)
+	result, err := parseResponse(resp, "soft", "model", "openai", 500*time.Millisecond, 0, time.Now())
 	if err != nil {
 		t.Fatalf("parseResponse failed: %v", err)
 	}
@@ -665,10 +665,10 @@ func TestConcurrentStrategy_Execute_UsesOutboundProtocolForClassification(t *tes
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	result, err := strategy.Execute(context.Background(), []Task{{
@@ -714,10 +714,7 @@ func TestConcurrentStrategy_parseResponse_OpenAI(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
-	rl := ratelimit.NewManager(providers)
-	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	resp, err := client.Do("openai", req)
@@ -725,7 +722,7 @@ func TestConcurrentStrategy_parseResponse_OpenAI(t *testing.T) {
 		t.Fatalf("failed to get response: %v", err)
 	}
 
-	result, err := strategy.parseResponse(resp, "openai", "gpt-4o", "openai")
+	result, err := parseResponse(resp, "openai", "gpt-4o", "openai", 500*time.Millisecond, 0, time.Now())
 	if err != nil {
 		t.Fatalf("parseResponse failed: %v", err)
 	}
@@ -784,10 +781,7 @@ func TestConcurrentStrategy_parseResponse_Anthropic(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
-	rl := ratelimit.NewManager(providers)
-	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	resp, err := client.Do("anthropic", req)
@@ -795,7 +789,7 @@ func TestConcurrentStrategy_parseResponse_Anthropic(t *testing.T) {
 		t.Fatalf("failed to get response: %v", err)
 	}
 
-	result, err := strategy.parseResponse(resp, "anthropic", "claude-3-opus", "anthropic")
+	result, err := parseResponse(resp, "anthropic", "claude-3-opus", "anthropic", 500*time.Millisecond, 0, time.Now())
 	if err != nil {
 		t.Fatalf("parseResponse failed: %v", err)
 	}
@@ -841,10 +835,7 @@ func TestConcurrentStrategy_parseResponse_ErrorStatus(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
-	rl := ratelimit.NewManager(providers)
-	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	resp, err := client.Do("test", req)
@@ -852,7 +843,7 @@ func TestConcurrentStrategy_parseResponse_ErrorStatus(t *testing.T) {
 		t.Fatalf("failed to get response: %v", err)
 	}
 
-	result, err := strategy.parseResponse(resp, "test", "test-model", "openai")
+	result, err := parseResponse(resp, "test", "test-model", "openai", 500*time.Millisecond, 0, time.Now())
 	if err != nil {
 		t.Fatalf("parseResponse should not error for HTTP 5xx: %v", err)
 	}
@@ -883,10 +874,7 @@ func TestConcurrentStrategy_parseResponse_InvalidJSON(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
-	rl := ratelimit.NewManager(providers)
-	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	resp, err := client.Do("test", req)
@@ -894,7 +882,7 @@ func TestConcurrentStrategy_parseResponse_InvalidJSON(t *testing.T) {
 		t.Fatalf("failed to get response: %v", err)
 	}
 
-	result, err := strategy.parseResponse(resp, "test", "test-model", "openai")
+	result, err := parseResponse(resp, "test", "test-model", "openai", 500*time.Millisecond, 0, time.Now())
 	if err != nil {
 		t.Fatalf("parseResponse should not error for invalid JSON: %v", err)
 	}
@@ -923,10 +911,7 @@ func TestConcurrentStrategy_parseResponse_StreamDoesNotPreReadBody(t *testing.T)
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
-	rl := ratelimit.NewManager(providers)
-	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	resp, err := client.Do("test", req)
@@ -934,7 +919,7 @@ func TestConcurrentStrategy_parseResponse_StreamDoesNotPreReadBody(t *testing.T)
 		t.Fatalf("failed to get response: %v", err)
 	}
 
-	result, err := strategy.parseResponse(resp, "test", "test-model", "openai")
+	result, err := parseResponse(resp, "test", "test-model", "openai", 500*time.Millisecond, 0, time.Now())
 	if err != nil {
 		t.Fatalf("parseResponse failed: %v", err)
 	}
@@ -985,10 +970,10 @@ func TestScheduler_Execute_WithUsage_OpenAI(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	sched := New(rl, client, h, 500*time.Millisecond, 0)
+	sched := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	// 创建带 body 的请求
 	reqBody := dto.ChatCompletionRequest{
@@ -1048,10 +1033,10 @@ func TestScheduler_Execute_WithUsage_Anthropic(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	sched := New(rl, client, h, 500*time.Millisecond, 0)
+	sched := New(rl, client, h, 500*time.Millisecond, 0, 0)
 
 	reqBody := dto.ClaudeRequest{
 		Model:     "claude-3",
@@ -1119,10 +1104,10 @@ func TestConcurrentStrategy_race_TwoProviders(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	slowReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, slowSrv.URL, nil)
 	fastReq, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, fastSrv.URL, nil)
@@ -1170,10 +1155,10 @@ func TestConcurrentStrategy_race_AllFail(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req1, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
@@ -1211,10 +1196,10 @@ func TestConcurrentStrategy_ContextCancel(t *testing.T) {
 		},
 	}
 
-	client := provider.NewClient(providers, 50*time.Millisecond, 0)
+	client := provider.NewClient(providers, 50*time.Millisecond, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0)
+	strategy := NewConcurrentStrategy(client, rl, h, 500*time.Millisecond, 0, 0)
 
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, nil)
 
@@ -1242,255 +1227,214 @@ func TestConcurrentStrategy_ContextCancel(t *testing.T) {
 // ============================================================================
 
 // ============================================================================
-// TokenHub 错误分类测试
+// Provider 错误分类测试（额度 / 腾讯 451001 soft / OpenAI 429）
 // ============================================================================
 
-func TestClassifyTokenHubError_QuotaErrorCodes(t *testing.T) {
-	quotaCodes := []string{"401007", "401008", "403004", "20097"}
+func applyHardClassification(t *testing.T, status int, body, reqURL string) *Result {
+	t.Helper()
+	resp := newSchedulerHTTPResponse(status, "application/json", body)
+	resp.Request = &http.Request{URL: mustParseURL(reqURL)}
+	result := &Result{
+		Response:      resp,
+		FailureKind:   FailureKindHard,
+		FailureReason: failureReasonHTTPStatus,
+	}
+	taskReq := &http.Request{URL: mustParseURL(reqURL)}
+	applyProviderErrorClassification(result, resp, taskReq)
+	return result
+}
 
+func TestApplyProviderErrorClassification_TencentQuotaErrorCodes(t *testing.T) {
+	quotaCodes := []string{"401007", "401008", "403004"}
 	for _, code := range quotaCodes {
-		t.Run("quota_error_"+code, func(t *testing.T) {
-			target := requestTarget{
-				host: "api.lkeap.cloud.tencent.com",
-				path: "/plan/v1/chat/completions",
+		t.Run("quota_"+code, func(t *testing.T) {
+			result := applyHardClassification(t, http.StatusBadRequest,
+				`{"error":{"code":"`+code+`","message":"quota exceeded"}}`,
+				"https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions")
+			if result.FailureKind != FailureKindHard {
+				t.Fatalf("FailureKind = %q, want %q", result.FailureKind, FailureKindHard)
 			}
-			resp := newSchedulerHTTPResponse(http.StatusOK, "application/json",
-				`{"error":{"code":"`+code+`","message":"quota exceeded"}}`)
-			resp.Request = &http.Request{
-				URL: mustParseURL("https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions"),
+			if result.HealthActionInfo.Action != HealthActionMarkUnhealthyQuota {
+				t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionMarkUnhealthyQuota)
 			}
-
-			info := classifyTokenHubError(target, resp)
-
-			if info.FailureKind != FailureKindHard {
-				t.Fatalf("FailureKind = %q, want %q", info.FailureKind, FailureKindHard)
-			}
-			if info.HealthActionInfo.Action != HealthActionMarkUnhealthy {
-				t.Fatalf("HealthAction = %q, want %q", info.HealthActionInfo.Action, HealthActionMarkUnhealthy)
-			}
-			if info.HealthActionInfo.CooldownOverride != quotaCooldown {
-				t.Fatalf("CooldownOverride = %v, want %v", info.HealthActionInfo.CooldownOverride, quotaCooldown)
-			}
-			if info.FailureReason != "tokenhub_quota_exceeded" {
-				t.Fatalf("FailureReason = %q, want %q", info.FailureReason, "tokenhub_quota_exceeded")
+			if result.FailureReason != failureReasonQuotaExceeded {
+				t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonQuotaExceeded)
 			}
 		})
 	}
 }
 
-func TestClassifyTokenHubError_ContentFilter451001(t *testing.T) {
-	target := requestTarget{
-		host: "api.lkeap.cloud.tencent.com",
-		path: "/plan/v1/chat/completions",
+func TestApplyProviderErrorClassification_TencentQuotaNumericCode(t *testing.T) {
+	// error.code 为 JSON number 时也应识别
+	result := applyHardClassification(t, http.StatusBadRequest,
+		`{"error":{"code":401007,"message":"quota exceeded"}}`,
+		"https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions")
+	if result.HealthActionInfo.Action != HealthActionMarkUnhealthyQuota {
+		t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionMarkUnhealthyQuota)
 	}
-	resp := newSchedulerHTTPResponse(http.StatusOK, "application/json",
-		`{"error":{"code":"451001","message":"content filtered"}}`)
-	resp.Request = &http.Request{
-		URL: mustParseURL("https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions"),
-	}
-
-	info := classifyTokenHubError(target, resp)
-
-	if info.FailureKind != FailureKindSoft {
-		t.Fatalf("FailureKind = %q, want %q", info.FailureKind, FailureKindSoft)
-	}
-	if info.HealthActionInfo.Action != HealthActionNone {
-		t.Fatalf("HealthAction = %q, want %q", info.HealthActionInfo.Action, HealthActionNone)
-	}
-	if info.FailureReason != "tokenhub_content_filter" {
-		t.Fatalf("FailureReason = %q, want %q", info.FailureReason, "tokenhub_content_filter")
+	if result.FailureReason != failureReasonQuotaExceeded {
+		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonQuotaExceeded)
 	}
 }
 
-func TestClassifyTokenHubError_HTTP429NoHealthEffect(t *testing.T) {
-	target := requestTarget{
-		host: "api.lkeap.cloud.tencent.com",
-		path: "/plan/v1/chat/completions",
-	}
-	resp := newSchedulerHTTPResponse(http.StatusTooManyRequests, "application/json",
-		`{"error":{"code":"429","message":"rate limited"}}`)
-	resp.Request = &http.Request{
-		URL: mustParseURL("https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions"),
-	}
+func TestApplyProviderErrorClassification_TencentContentFilter451001(t *testing.T) {
+	result := applyHardClassification(t, http.StatusUnavailableForLegalReasons,
+		`{"error":{"code":"451001","message":"content filtered"}}`,
+		"https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions")
 
-	info := classifyTokenHubError(target, resp)
-
-	if info.FailureKind != FailureKindHard {
-		t.Fatalf("FailureKind = %q, want %q", info.FailureKind, FailureKindHard)
+	if result.FailureKind != FailureKindSoft {
+		t.Fatalf("FailureKind = %q, want %q", result.FailureKind, FailureKindSoft)
 	}
-	if info.HealthActionInfo.Action != HealthActionNone {
-		t.Fatalf("HealthAction = %q, want %q (429 should not mark unhealthy)", info.HealthActionInfo.Action, HealthActionNone)
+	if result.HealthActionInfo.Action != HealthActionNone {
+		t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionNone)
 	}
-	if info.FailureReason != "http_status" {
-		t.Fatalf("FailureReason = %q, want %q", info.FailureReason, "http_status")
+	if result.FailureReason != failureReasonContentFilter {
+		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonContentFilter)
 	}
 }
 
-func TestClassifyTokenHubError_NonTokenHubProviderRemainsDefault(t *testing.T) {
-	target := requestTarget{
-		host: "api.openai.com",
-		path: "/v1/chat/completions",
-	}
-	resp := newSchedulerHTTPResponse(http.StatusBadRequest, "application/json",
-		`{"error":{"code":"401007","message":"error"}}`)
-	resp.Request = &http.Request{
-		URL: mustParseURL("https://api.openai.com/v1/chat/completions"),
-	}
-
-	info := classifyTokenHubError(target, resp)
-
-	if info.FailureKind != FailureKindHard {
-		t.Fatalf("FailureKind = %q, want %q", info.FailureKind, FailureKindHard)
-	}
-	if info.HealthActionInfo.Action != HealthActionNone {
-		t.Fatalf("HealthAction = %q, want %q for non-TokenHub", info.HealthActionInfo.Action, HealthActionNone)
-	}
-	if info.FailureReason != "http_status" {
-		t.Fatalf("FailureReason = %q, want %q", info.FailureReason, "http_status")
-	}
-}
-
-func TestClassifyTokenHubError_RespRequestURLFallback(t *testing.T) {
-	target := requestTarget{
-		host: "api.lkeap.cloud.tencent.com",
-		path: "/plan/v1/chat/completions",
-	}
-	resp := newSchedulerHTTPResponse(http.StatusOK, "application/json",
-		`{"error":{"code":"401007","message":"quota exceeded"}}`)
-
-	info := classifyTokenHubError(target, resp)
-
-	if info.FailureKind != FailureKindHard {
-		t.Fatalf("FailureKind = %q, want %q", info.FailureKind, FailureKindHard)
-	}
-	if info.HealthActionInfo.Action != HealthActionMarkUnhealthy {
-		t.Fatalf("HealthAction = %q, want %q", info.HealthActionInfo.Action, HealthActionMarkUnhealthy)
-	}
-	if info.HealthActionInfo.CooldownOverride != quotaCooldown {
-		t.Fatalf("CooldownOverride = %v, want %v", info.HealthActionInfo.CooldownOverride, quotaCooldown)
-	}
-}
-
-func TestClassifyTokenHubError_TaskRequestURLFallback(t *testing.T) {
-	target := requestTarget{}
-	resp := newSchedulerHTTPResponse(http.StatusOK, "application/json",
-		`{"error":{"code":"401007","message":"quota exceeded"}}`)
-
-	info := classifyTokenHubError(target, resp)
-	if info.HealthActionInfo.Action == HealthActionMarkUnhealthy {
-		t.Fatal("should not identify as TokenHub when both target and resp.Request are nil")
-	}
-
-	taskReq := &http.Request{
-		URL: mustParseURL("https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions"),
-	}
-
-	info2 := classifyTokenHubError(makeRequestTarget(resp, taskReq), resp)
-	if info2.FailureKind != FailureKindHard {
-		t.Fatalf("FailureKind = %q, want %q", info2.FailureKind, FailureKindHard)
-	}
-	if info2.HealthActionInfo.Action != HealthActionMarkUnhealthy {
-		t.Fatalf("HealthAction = %q, want %q", info2.HealthActionInfo.Action, HealthActionMarkUnhealthy)
-	}
-}
-
-func TestClassifyTokenHubError_AnthropicProtocolQuotaError(t *testing.T) {
-	target := requestTarget{
-		host: "api.lkeap.cloud.tencent.com",
-		path: "/plan/v1/messages",
-	}
-	resp := newSchedulerHTTPResponse(http.StatusOK, "application/json",
-		`{"error":{"code":"20097","message":"quota exceeded"}}`)
-	resp.Request = &http.Request{
-		URL: mustParseURL("https://api.lkeap.cloud.tencent.com/plan/v1/messages"),
-	}
-
-	info := classifyTokenHubError(target, resp)
-
-	if info.FailureKind != FailureKindHard {
-		t.Fatalf("FailureKind = %q, want %q", info.FailureKind, FailureKindHard)
-	}
-	if info.HealthActionInfo.Action != HealthActionMarkUnhealthy {
-		t.Fatalf("HealthAction = %q, want %q for Anthropic quota", info.HealthActionInfo.Action, HealthActionMarkUnhealthy)
-	}
-}
-
-func TestClassifyTokenHubError_UnknownErrorCodeDefaultHardFailure(t *testing.T) {
-	target := requestTarget{
-		host: "api.lkeap.cloud.tencent.com",
-		path: "/plan/v1/chat/completions",
-	}
-	resp := newSchedulerHTTPResponse(http.StatusBadRequest, "application/json",
-		`{"error":{"code":"999999","message":"unknown"}}`)
-	resp.Request = &http.Request{
-		URL: mustParseURL("https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions"),
-	}
-
-	info := classifyTokenHubError(target, resp)
-
-	if info.FailureKind != FailureKindHard {
-		t.Fatalf("FailureKind = %q, want %q", info.FailureKind, FailureKindHard)
-	}
-	if info.HealthActionInfo.Action != HealthActionNone {
-		t.Fatalf("HealthAction = %q, want %q for unknown error code", info.HealthActionInfo.Action, HealthActionNone)
-	}
-	if info.FailureReason != "http_status" {
-		t.Fatalf("FailureReason = %q, want %q", info.FailureReason, "http_status")
-	}
-}
-
-func TestApplyTokenHubClassification_HTTP402_GenericProvider(t *testing.T) {
-	result := &Result{
-		Response:    newSchedulerHTTPResponse(http.StatusPaymentRequired, "application/json", `{"error":"insufficient balance"}`),
-		FailureKind: FailureKindHard,
-	}
-	// 将 resp.Request.URL 设为非 TokenHub 的 host（如 OpenRouter）
-	result.Response.Request = &http.Request{
-		URL: mustParseURL("https://api.openrouter.ai/v1/chat/completions"),
-	}
-
-	taskReq := &http.Request{
-		URL: mustParseURL("https://api.openrouter.ai/v1/chat/completions"),
-	}
-
-	applyTokenHubClassification(result, result.Response, taskReq)
+func TestApplyProviderErrorClassification_TencentHTTP429NoHealthEffect(t *testing.T) {
+	result := applyHardClassification(t, http.StatusTooManyRequests,
+		`{"error":{"code":"429001","message":"rate limited"}}`,
+		"https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions")
 
 	if result.FailureKind != FailureKindHard {
 		t.Fatalf("FailureKind = %q, want %q", result.FailureKind, FailureKindHard)
 	}
-	if result.HealthActionInfo.Action != HealthActionMarkUnhealthy {
-		t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionMarkUnhealthy)
+	if result.HealthActionInfo.Action != HealthActionNone {
+		t.Fatalf("HealthAction = %q, want %q (429 should not mark unhealthy)", result.HealthActionInfo.Action, HealthActionNone)
 	}
-	if result.HealthActionInfo.CooldownOverride != quotaCooldown {
-		t.Fatalf("CooldownOverride = %v, want %v", result.HealthActionInfo.CooldownOverride, quotaCooldown)
-	}
-	if result.FailureReason != failureReasonTokenHubQuota {
-		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonTokenHubQuota)
+	if result.FailureReason != failureReasonHTTPStatus {
+		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonHTTPStatus)
 	}
 }
 
-func TestApplyTokenHubClassification_HTTP402_TokenHubProvider(t *testing.T) {
-	result := &Result{
-		Response:    newSchedulerHTTPResponse(http.StatusPaymentRequired, "application/json", `{"error":{"code":"401007","message":"quota"}}`),
-		FailureKind: FailureKindHard,
+func TestApplyProviderErrorClassification_NonTencentIgnoresTencentQuotaCode(t *testing.T) {
+	result := applyHardClassification(t, http.StatusBadRequest,
+		`{"error":{"code":"401007","message":"error"}}`,
+		"https://api.openai.com/v1/chat/completions")
+
+	if result.HealthActionInfo.Action != HealthActionNone {
+		t.Fatalf("HealthAction = %q, want %q for non-Tencent", result.HealthActionInfo.Action, HealthActionNone)
 	}
-	result.Response.Request = &http.Request{
-		URL: mustParseURL("https://api.lkeap.cloud.tencent.com/v1/chat/completions"),
+	if result.FailureReason != failureReasonHTTPStatus {
+		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonHTTPStatus)
+	}
+}
+
+func TestApplyProviderErrorClassification_TaskRequestURLFallback(t *testing.T) {
+	resp := newSchedulerHTTPResponse(http.StatusBadRequest, "application/json",
+		`{"error":{"code":"401007","message":"quota exceeded"}}`)
+	// resp.Request 为空，依赖 task.Request.URL 识别腾讯 host
+	result := &Result{
+		Response:      resp,
+		FailureKind:   FailureKindHard,
+		FailureReason: failureReasonHTTPStatus,
+	}
+	applyProviderErrorClassification(result, resp, nil)
+	if result.HealthActionInfo.Action != HealthActionNone {
+		t.Fatal("should not classify as Tencent quota without host")
 	}
 
 	taskReq := &http.Request{
-		URL: mustParseURL("https://api.lkeap.cloud.tencent.com/v1/chat/completions"),
+		URL: mustParseURL("https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions"),
 	}
+	// body 已被 parseErrorCode 重放，可再次分类
+	applyProviderErrorClassification(result, resp, taskReq)
+	if result.HealthActionInfo.Action != HealthActionMarkUnhealthyQuota {
+		t.Fatalf("HealthAction = %q, want %q via task URL fallback", result.HealthActionInfo.Action, HealthActionMarkUnhealthyQuota)
+	}
+}
 
-	applyTokenHubClassification(result, result.Response, taskReq)
+func TestApplyProviderErrorClassification_TencentUnknownCodeUnchanged(t *testing.T) {
+	result := applyHardClassification(t, http.StatusBadRequest,
+		`{"error":{"code":"999999","message":"unknown"}}`,
+		"https://api.lkeap.cloud.tencent.com/plan/v1/chat/completions")
 
-	if result.HealthActionInfo.Action != HealthActionMarkUnhealthy {
-		t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionMarkUnhealthy)
+	if result.FailureKind != FailureKindHard {
+		t.Fatalf("FailureKind = %q, want %q", result.FailureKind, FailureKindHard)
 	}
-	if result.HealthActionInfo.CooldownOverride != quotaCooldown {
-		t.Fatalf("CooldownOverride = %v, want %v", result.HealthActionInfo.CooldownOverride, quotaCooldown)
+	if result.HealthActionInfo.Action != HealthActionNone {
+		t.Fatalf("HealthAction = %q, want %q for unknown error code", result.HealthActionInfo.Action, HealthActionNone)
 	}
-	if result.FailureReason != failureReasonTokenHubQuota {
-		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonTokenHubQuota)
+	if result.FailureReason != failureReasonHTTPStatus {
+		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonHTTPStatus)
+	}
+}
+
+func TestApplyProviderErrorClassification_HTTP402_GenericProvider(t *testing.T) {
+	result := applyHardClassification(t, http.StatusPaymentRequired,
+		`{"error":"insufficient balance"}`,
+		"https://api.openrouter.ai/v1/chat/completions")
+
+	if result.FailureKind != FailureKindHard {
+		t.Fatalf("FailureKind = %q, want %q", result.FailureKind, FailureKindHard)
+	}
+	if result.HealthActionInfo.Action != HealthActionMarkUnhealthyQuota {
+		t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionMarkUnhealthyQuota)
+	}
+	if result.FailureReason != failureReasonQuotaExceeded {
+		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonQuotaExceeded)
+	}
+}
+
+func TestApplyProviderErrorClassification_HTTP402_TencentProvider(t *testing.T) {
+	result := applyHardClassification(t, http.StatusPaymentRequired,
+		`{"error":{"code":"401007","message":"quota"}}`,
+		"https://api.lkeap.cloud.tencent.com/v1/chat/completions")
+
+	if result.HealthActionInfo.Action != HealthActionMarkUnhealthyQuota {
+		t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionMarkUnhealthyQuota)
+	}
+	if result.FailureReason != failureReasonQuotaExceeded {
+		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonQuotaExceeded)
+	}
+}
+
+// TestApplyProviderErrorClassification_OpenAI429QuotaCode 验证 OpenAI 429 + 额度类
+// error.code 被识别为额度错误并挂退避。
+func TestApplyProviderErrorClassification_OpenAI429QuotaCode(t *testing.T) {
+	codes := []string{"credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "organization_usage_limit_exceeded"}
+
+	for _, code := range codes {
+		t.Run("quota_"+code, func(t *testing.T) {
+			result := applyHardClassification(t, http.StatusTooManyRequests,
+				`{"error":{"code":"`+code+`","message":"quota exhausted"}}`,
+				"https://api.openai.com/v1/chat/completions")
+
+			if result.HealthActionInfo.Action != HealthActionMarkUnhealthyQuota {
+				t.Fatalf("HealthAction = %q, want %q", result.HealthActionInfo.Action, HealthActionMarkUnhealthyQuota)
+			}
+			if result.FailureReason != failureReasonQuotaExceeded {
+				t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonQuotaExceeded)
+			}
+		})
+	}
+}
+
+// TestApplyProviderErrorClassification_OpenAI429RateLimit 验证普通 429（rate_limit_reached）
+// 不触发额度退避，保持"仅 failover、不摘除"行为。
+func TestApplyProviderErrorClassification_OpenAI429RateLimit(t *testing.T) {
+	result := applyHardClassification(t, http.StatusTooManyRequests,
+		`{"error":{"code":"rate_limit_reached","message":"rate limited"}}`,
+		"https://api.openai.com/v1/chat/completions")
+
+	if result.HealthActionInfo.Action != HealthActionNone {
+		t.Fatalf("HealthAction = %q, want %q for plain rate limit", result.HealthActionInfo.Action, HealthActionNone)
+	}
+	if result.FailureReason != failureReasonHTTPStatus {
+		t.Fatalf("FailureReason = %q, want %q", result.FailureReason, failureReasonHTTPStatus)
+	}
+}
+
+func TestApplyHealthAction_QuotaUsesEscalating(t *testing.T) {
+	h := health.NewChecker(3, 30*time.Second)
+	key := "prov/openai"
+	result := &Result{
+		HealthActionInfo: HealthActionInfo{Action: HealthActionMarkUnhealthyQuota},
+	}
+	applyHealthAction(h, key, result)
+	if h.IsHealthy(key) {
+		t.Fatal("should be unhealthy after quota health action")
 	}
 }

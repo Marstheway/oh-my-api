@@ -11,14 +11,13 @@ import (
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
-	"github.com/gin-gonic/gin"
 )
 
-func passThroughAnthropicResponse(c *gin.Context, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
+func passThroughAnthropicResponse(w http.ResponseWriter, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
 	if isStream {
-		copyResponseHeaders(c.Writer.Header(), resp.Header)
-		c.Writer.WriteHeader(resp.StatusCode)
-		return passThroughAnthropicStream(c, resp, counter, rmc.RequestedModel)
+		copyResponseHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		return passThroughAnthropicStream(w, resp, counter, rmc.RequestedModel)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -44,21 +43,27 @@ func passThroughAnthropicResponse(c *gin.Context, resp *http.Response, isStream 
 		return err
 	}
 
-	copyResponseHeaders(c.Writer.Header(), resp.Header)
+	copyResponseHeaders(w.Header(), resp.Header)
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	c.Data(resp.StatusCode, contentType, outBody)
-	return nil
+	return writeBody(w, resp.StatusCode, contentType, outBody)
 }
 
-func passThroughAnthropicStream(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
-	flusher, ok := c.Writer.(http.Flusher)
+func passThroughAnthropicStream(w http.ResponseWriter, resp *http.Response, counter TokenCounter, requestedModel string) (retErr error) {
+	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
 	}
 
+	sawTerminal := false
+	defer func() {
+		// 流已读到 EOF 但未收到 message_stop 或 error：上游中途断流。
+		if retErr == nil && !sawTerminal {
+			retErr = ErrStreamTruncated
+		}
+	}()
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
@@ -75,6 +80,9 @@ func passThroughAnthropicStream(c *gin.Context, resp *http.Response, counter Tok
 			if data != "" && data != "[DONE]" {
 				var event dto.ClaudeStreamEvent
 				if jsonErr := json.Unmarshal([]byte(data), &event); jsonErr == nil {
+					if event.Type == "message_stop" || event.Type == "error" {
+						sawTerminal = true
+					}
 					if counter != nil {
 						if sc, ok2 := counter.(*token.StreamCounter); ok2 {
 							sc.AddOutputText(token.ExtractTextFromClaudeStreamEvent(&event))
@@ -82,7 +90,7 @@ func passThroughAnthropicStream(c *gin.Context, resp *http.Response, counter Tok
 					}
 					if requestedModel != "" && event.Type == "message_start" && event.Message != nil {
 						if rewrittenData, rewriteErr := rewriteNestedModel([]byte(data), "message", requestedModel); rewriteErr == nil {
-							_, _ = fmt.Fprintf(c.Writer, "data: %s\n", rewrittenData)
+							_, _ = fmt.Fprintf(w, "data: %s\n", rewrittenData)
 							flusher.Flush()
 							if err == io.EOF {
 								break
@@ -94,7 +102,7 @@ func passThroughAnthropicStream(c *gin.Context, resp *http.Response, counter Tok
 			}
 		}
 
-		_, _ = c.Writer.WriteString(line)
+		_, _ = io.WriteString(w, line)
 		flusher.Flush()
 
 		if err == io.EOF {
@@ -109,7 +117,7 @@ func passThroughAnthropicStream(c *gin.Context, resp *http.Response, counter Tok
 	return nil
 }
 
-func writeClaudeResponseAsOpenAI(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+func writeClaudeResponseAsOpenAI(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -132,23 +140,25 @@ func writeClaudeResponseAsOpenAI(c *gin.Context, resp *http.Response, counter To
 	if rmc.RequestedModel != "" {
 		openAIResp.Model = rmc.RequestedModel
 	}
-	c.JSON(http.StatusOK, openAIResp)
+	if err := writeJSON(w, http.StatusOK, openAIResp); err != nil {
+		return err
+	}
 	return nil
 }
 
-func writeClaudeStreamAsOpenAI(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
+func writeClaudeStreamAsOpenAI(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
 
-	flusher, ok := c.Writer.(http.Flusher)
+	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
 	}
 
-	responseID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
-	model := requestedModel
+	mapper := newClaudeToChatStreamMapper("", rmc.RequestedModel, time.Now().Unix())
 	reader := bufio.NewReader(resp.Body)
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
@@ -157,14 +167,16 @@ func writeClaudeStreamAsOpenAI(c *gin.Context, resp *http.Response, counter Toke
 		if line == "" && err == io.EOF {
 			break
 		}
-		line = strings.TrimSuffix(line, "\n")
-		if !strings.HasPrefix(line, "data: ") {
+
+		trimmed := strings.TrimSuffix(line, "\n")
+		if !strings.HasPrefix(trimmed, "data: ") {
 			if err == io.EOF {
 				break
 			}
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
+
+		data := strings.TrimPrefix(trimmed, "data: ")
 		if data == "" {
 			if err == io.EOF {
 				break
@@ -172,59 +184,65 @@ func writeClaudeStreamAsOpenAI(c *gin.Context, resp *http.Response, counter Toke
 			continue
 		}
 
-		if counter != nil {
-			if sc, ok := counter.(*token.StreamCounter); ok {
-				var streamEvent dto.ClaudeStreamEvent
-				if err := json.Unmarshal([]byte(data), &streamEvent); err == nil {
-					text := token.ExtractTextFromClaudeStreamEvent(&streamEvent)
-					sc.AddOutputText(text)
-				}
-			}
-		}
-
 		var event dto.ClaudeStreamEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			if err == io.EOF {
-				break
-			}
+			// Unmarshal 不会返回 io.EOF；坏帧跳过继续读
 			continue
 		}
 
-		if event.Type == "message_start" && event.Message != nil {
-			if event.Message.ID != "" {
-				responseID = event.Message.ID
-			}
-			if requestedModel == "" && event.Message.Model != "" {
-				model = event.Message.Model
+		if counter != nil {
+			if sc, ok2 := counter.(*token.StreamCounter); ok2 {
+				sc.AddOutputText(token.ExtractTextFromClaudeStreamEvent(&event))
 			}
 		}
 
-		chunk := convertClaudeStreamEventToOpenAI(responseID, model, &event)
-		if chunk == nil {
-			if event.Type == "message_stop" {
-				_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
+		chunks, mapErr := mapper.Map(event)
+		if mapErr != nil {
+			return mapErr
+		}
+
+		for _, chunk := range chunks {
+			// 按 Design Rules「Chat 写回层」处理 usage
+			var usageToSend *dto.Usage
+			if chunk.Usage != nil {
+				usageToSend = chunk.Usage
+				chunk.Usage = nil
+			}
+
+			// 判断 base chunk 是否有可写内容
+			if len(chunk.Choices) > 0 {
+				chunkData, marshalErr := json.Marshal(chunk)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", chunkData); writeErr != nil {
+					return writeErr
+				}
 				flusher.Flush()
 			}
-			if err == io.EOF {
-				break
-			}
-			continue
-		}
 
-		chunkData, err := json.Marshal(chunk)
-		if err != nil {
-			if err == io.EOF {
-				break
+			// 仅当 IncludeUsage==true 时发送 usage-only chunk
+			if usageToSend != nil && rmc.IncludeUsage {
+				usageChunk := buildOpenAIStreamUsageChunk(chunk, *usageToSend)
+				usageData, marshalErr := json.Marshal(usageChunk)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", usageData); writeErr != nil {
+					return writeErr
+				}
+				flusher.Flush()
 			}
-			continue
 		}
-		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", chunkData)
-		flusher.Flush()
 
 		if err == io.EOF {
 			break
 		}
 	}
+
+	// 流结束写一次 [DONE]
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
 
 	if counter != nil {
 		if sc, ok := counter.(*token.StreamCounter); ok {
@@ -295,84 +313,6 @@ func convertClaudeResponseToOpenAI(resp *dto.ClaudeResponse) *dto.ChatCompletion
 			FinishReason: &finishReason,
 		}},
 		Usage: usage,
-	}
-}
-
-func convertClaudeStreamEventToOpenAI(responseID, model string, event *dto.ClaudeStreamEvent) *dto.ChatCompletionChunk {
-	chunk := &dto.ChatCompletionChunk{
-		ID:      responseID,
-		Object:  "chat.completion.chunk",
-		Created: time.Now().Unix(),
-		Model:   model,
-		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{}}},
-	}
-
-	switch event.Type {
-	case "message_start":
-		if event.Message != nil {
-			if event.Message.ID != "" {
-				chunk.ID = event.Message.ID
-			}
-			// model is already set from the constructor argument; don't overwrite with upstream value
-		}
-		chunk.Choices[0].Delta.Role = "assistant"
-		return chunk
-
-	case "content_block_start":
-		if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
-			chunk.Choices[0].Index = event.Index
-			chunk.Choices[0].Delta.ToolCalls = []dto.ToolCall{{
-				ID:   event.ContentBlock.ID,
-				Type: "function",
-				Function: dto.ToolCallFunc{
-					Name:      event.ContentBlock.Name,
-					Arguments: "",
-				},
-			}}
-			return chunk
-		}
-		return nil
-
-	case "content_block_delta":
-		if event.Delta == nil {
-			return nil
-		}
-		chunk.Choices[0].Index = event.Index
-		switch event.Delta.Type {
-		case "text_delta":
-			chunk.Choices[0].Delta.Content = event.Delta.Text
-			return chunk
-		case "input_json_delta":
-			chunk.Choices[0].Index = event.Index
-			if event.Delta.PartialJSON != nil {
-				chunk.Choices[0].Delta.ToolCalls = []dto.ToolCall{{
-					Function: dto.ToolCallFunc{Arguments: *event.Delta.PartialJSON},
-				}}
-			}
-			return chunk
-		case "thinking_delta":
-			chunk.Choices[0].Delta.ReasoningContent = event.Delta.Thinking
-			return chunk
-		}
-		return nil
-
-	case "content_block_stop":
-		return nil
-
-	case "message_delta":
-		if event.Delta != nil && event.Delta.StopReason != "" {
-			fr := stopReasonToFinishReason(event.Delta.StopReason)
-			chunk.Choices[0].FinishReason = &fr
-			chunk.Choices[0].Delta = &dto.Delta{}
-			return chunk
-		}
-		return nil
-
-	case "message_stop":
-		return nil
-
-	default:
-		return nil
 	}
 }
 

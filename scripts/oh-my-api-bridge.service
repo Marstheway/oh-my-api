@@ -1,0 +1,56 @@
+# Systemd user service template for oh-my-api-bridge (standalone xAI OAuth)
+#
+# 1. Prepare:
+#    mkdir -p ~/.oh-my-api/bridge ~/.config/systemd/user
+#    openssl rand -hex 24 > ~/.oh-my-api/bridge/token.txt
+#    chmod 600 ~/.oh-my-api/bridge/token.txt
+#
+# 2. Complete xAI OAuth login (writes ~/.oh-my-api/bridge/auth.json):
+#    ./bin/oh-my-api-bridge-linux-amd64 auth login
+#
+# 3. Copy this file:
+#    cp scripts/oh-my-api-bridge.service ~/.config/systemd/user/
+#
+# 4. Edit the ExecStart line if paths differ (binary / state dir location)
+#
+# 5. Enable + start (as your user, NO sudo):
+#    systemctl --user daemon-reload
+#    systemctl --user enable --now oh-my-api-bridge
+#
+# 6. Check:
+#    systemctl --user status oh-my-api-bridge
+#    curl http://127.0.0.1:8081/healthz
+#    journalctl --user -u oh-my-api-bridge -f
+#
+# Notes:
+# - Runs as your user (good for ~/.oh-my-api/bridge/auth.json access)
+# - The bridge reads the bridge token from ~/.oh-my-api/bridge/token.txt
+#   (read-only) and reads/writes its OAuth state at ~/.oh-my-api/bridge/auth.json.
+# - Restart on failure
+# - If using tailscale/LAN only: firewall the port or rely on tailscale ACLs.
+# - Do NOT expose 8081 to public internet.
+
+[Unit]
+Description=oh-my-api xAI OAuth Remote Bridge
+After=network.target
+
+[Service]
+Type=simple
+# 以仓库根作为工作目录，避免 wrapper 内的相对二进制路径在 systemd 默认 CWD（home）下解析失败。
+WorkingDirectory=%h/workspace/oh-my-api
+# Wrapper reads the bridge token from token.txt and passes only -listen and
+# -bridge-token to the binary. No Hermes auth file is involved.
+ExecStart=%h/workspace/oh-my-api/scripts/run-xai-bridge.sh
+# Direct invocation (read token.txt as a single-line value into BRIDGE_TOKEN):
+# ExecStart=/bin/bash -c 'exec %h/workspace/oh-my-api/bin/oh-my-api-bridge-linux-amd64 -listen=:8081 -bridge-token="$(cat %h/.oh-my-api/bridge/token.txt)"'
+Restart=on-failure
+RestartSec=5
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.oh-my-api/bridge
+
+[Install]
+WantedBy=default.target

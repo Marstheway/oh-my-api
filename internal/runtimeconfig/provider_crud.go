@@ -28,8 +28,8 @@ func (c *ProviderCRUD) ValidateCreate(input *ProviderInput) *Error {
 		return &Error{Code: ErrCodeConflict, Field: "name", Message: "already exists"}
 	}
 
-	// endpoint 非空（至少需要 endpoint 或 endpoints）
-	if strings.TrimSpace(input.Endpoint) == "" && len(input.Endpoints) == 0 {
+	// endpoint 非空（至少需要 endpoint 或 endpoints；cascade.enabled 除外）
+	if !isCascadeEnabled(input) && strings.TrimSpace(input.Endpoint) == "" && len(input.Endpoints) == 0 {
 		return &Error{Code: ErrCodeBadRequest, Field: "endpoint", Message: "must provide endpoint or endpoints"}
 	}
 
@@ -50,19 +50,19 @@ func (c *ProviderCRUD) ValidateCreate(input *ProviderInput) *Error {
 		}
 	}
 
-	// upstream_models 校验
-	for i, um := range input.UpstreamModels {
-		if strings.TrimSpace(um.Model) == "" {
-			return &Error{Code: ErrCodeBadRequest, Field: "upstream_models[" + strconv.Itoa(i) + "].model", Message: "must not be empty"}
-		}
-		if um.QPM < 0 {
-			return &Error{Code: ErrCodeBadRequest, Field: "upstream_models[" + strconv.Itoa(i) + "].qpm", Message: "must be >= 0"}
-		}
-	}
-
 	// rate_limit.qpm 校验
 	if input.RateLimit.QPM < 0 {
 		return &Error{Code: ErrCodeBadRequest, Field: "rate_limit.qpm", Message: "must be >= 0"}
+	}
+
+	// remote_bridge 校验
+	if err := validateRemoteBridgeInput(input); err != nil {
+		return err
+	}
+
+	// cascade 校验
+	if err := validateCascadeInput(input); err != nil {
+		return err
 	}
 
 	return nil
@@ -98,8 +98,8 @@ func (c *ProviderCRUD) ValidateUpdate(oldName string, input *ProviderInput) *Err
 		}
 	}
 
-	// endpoint 非空（至少需要 endpoint 或 endpoints）
-	if strings.TrimSpace(input.Endpoint) == "" && len(input.Endpoints) == 0 {
+	// endpoint 非空（至少需要 endpoint 或 endpoints；cascade.enabled 除外）
+	if !c.allowsEmptyEndpoint(oldName, input) && strings.TrimSpace(input.Endpoint) == "" && len(input.Endpoints) == 0 {
 		return &Error{Code: ErrCodeBadRequest, Field: "endpoint", Message: "must provide endpoint or endpoints"}
 	}
 
@@ -120,19 +120,19 @@ func (c *ProviderCRUD) ValidateUpdate(oldName string, input *ProviderInput) *Err
 		}
 	}
 
-	// upstream_models 校验
-	for i, um := range input.UpstreamModels {
-		if strings.TrimSpace(um.Model) == "" {
-			return &Error{Code: ErrCodeBadRequest, Field: "upstream_models[" + strconv.Itoa(i) + "].model", Message: "must not be empty"}
-		}
-		if um.QPM < 0 {
-			return &Error{Code: ErrCodeBadRequest, Field: "upstream_models[" + strconv.Itoa(i) + "].qpm", Message: "must be >= 0"}
-		}
-	}
-
 	// rate_limit.qpm 校验
 	if input.RateLimit.QPM < 0 {
 		return &Error{Code: ErrCodeBadRequest, Field: "rate_limit.qpm", Message: "must be >= 0"}
+	}
+
+	// remote_bridge 校验
+	if err := validateRemoteBridgeInput(input); err != nil {
+		return err
+	}
+
+	// cascade 校验
+	if err := validateCascadeInput(input); err != nil {
+		return err
 	}
 
 	return nil
@@ -145,6 +145,14 @@ func (c *ProviderCRUD) Update(oldName string, input *ProviderInput) error {
 	}
 
 	cfg := input.ToConfig()
+
+	// 更新时省略 cascade 字段则保留 draft 已有块
+	if input.Cascade == nil {
+		if existing, ok := c.draft.Providers.Items[oldName]; ok && existing.Cascade != nil {
+			cascadeCopy := *existing.Cascade
+			cfg.Cascade = &cascadeCopy
+		}
+	}
 
 	// 删除旧条目（如果改名）
 	if input.Name != oldName {
@@ -218,4 +226,66 @@ func (c *ProviderCRUD) List() []ProviderOutput {
 		result = append(result, ToProviderOutput(name, cfg))
 	}
 	return result
+}
+
+// validateRemoteBridgeInput 校验 remote_bridge 输入字段。
+// 仅当 input.RemoteBridge 非空且 enabled 为 true 时才执行校验。
+// 规则与 serve 校验保持一致：provider 仅允许 xai-oauth；local 模式不使用 token。
+func validateRemoteBridgeInput(input *ProviderInput) *Error {
+	if input.RemoteBridge == nil || !input.RemoteBridge.Enabled {
+		return nil
+	}
+
+	b := input.RemoteBridge
+
+	if b.Local {
+		if strings.TrimSpace(b.Token) != "" {
+			return &Error{Code: ErrCodeBadRequest, Field: "remote_bridge.token", Message: "must be empty when OAuth bridge local mode is enabled"}
+		}
+	} else if strings.TrimSpace(b.Token) == "" {
+		return &Error{Code: ErrCodeBadRequest, Field: "remote_bridge.token", Message: "must not be empty when OAuth bridge is enabled"}
+	}
+
+	// provider 非空
+	if strings.TrimSpace(b.Provider) == "" {
+		return &Error{Code: ErrCodeBadRequest, Field: "remote_bridge.provider", Message: "must not be empty when OAuth bridge is enabled"}
+	}
+
+	// 仅允许 xai-oauth
+	if b.Provider != "xai-oauth" {
+		return &Error{Code: ErrCodeBadRequest, Field: "remote_bridge.provider", Message: "unsupported OAuth bridge provider type, only xai-oauth is allowed"}
+	}
+
+	return nil
+}
+
+func isCascadeEnabled(input *ProviderInput) bool {
+	return input.Cascade != nil && input.Cascade.Enabled
+}
+
+func (c *ProviderCRUD) allowsEmptyEndpoint(providerName string, input *ProviderInput) bool {
+	if isCascadeEnabled(input) {
+		return true
+	}
+	if input.Cascade != nil {
+		return false
+	}
+	if existing, ok := c.draft.Providers.Items[providerName]; ok {
+		return existing.Cascade != nil && existing.Cascade.Enabled
+	}
+	return false
+}
+
+// validateCascadeInput 校验 cascade 输入字段。
+// 仅当 input.Cascade 非空且 enabled 为 true 时才执行 token 校验。
+func validateCascadeInput(input *ProviderInput) *Error {
+	if input.Cascade == nil || !input.Cascade.Enabled {
+		return nil
+	}
+
+	if strings.TrimSpace(input.Cascade.Token) == "" {
+		return &Error{Code: ErrCodeBadRequest, Field: "cascade.token", Message: "must not be empty when cascade is enabled"}
+	}
+
+	return nil
 }

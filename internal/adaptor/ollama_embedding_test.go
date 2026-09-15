@@ -42,6 +42,7 @@ func TestOllamaEmbedding_Build_EndpointWithoutPath(t *testing.T) {
 	if httpReq.Header.Get("Content-Type") != "application/json" {
 		t.Errorf("expected Content-Type: application/json, got %s", httpReq.Header.Get("Content-Type"))
 	}
+	assertReplayableBody(t, httpReq)
 }
 
 func TestOllamaEmbedding_Build_EndpointAlreadyHasPath(t *testing.T) {
@@ -408,5 +409,28 @@ func TestOllamaEmbedding_Build_Model(t *testing.T) {
 	model := payload["model"]
 	if model != "some-upstream-model" {
 		t.Errorf("expected model to be 'some-upstream-model', got %s", model)
+	}
+}
+
+func assertReplayableBody(t *testing.T, req *http.Request) {
+	t.Helper()
+	if req.GetBody == nil {
+		t.Fatal("expected GetBody so the request can be retried")
+	}
+	first, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	rc, err := req.GetBody()
+	if err != nil {
+		t.Fatalf("GetBody: %v", err)
+	}
+	defer rc.Close()
+	second, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read replayed body: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("replayed body %q != original %q", second, first)
 	}
 }

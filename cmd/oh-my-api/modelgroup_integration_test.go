@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Marstheway/oh-my-api/internal/cascade"
 	"github.com/Marstheway/oh-my-api/internal/config"
 	"github.com/Marstheway/oh-my-api/internal/handler"
 	"github.com/Marstheway/oh-my-api/internal/health"
@@ -89,10 +90,10 @@ database:
 	resolver, err := model.NewResolver(cfg)
 	require.NoError(t, err)
 
-	client := provider.NewClient(cfg.Providers.Items, timeout, 0)
+	client := provider.NewClient(cfg.Providers.Items, timeout, 0, 0)
 	rlManager := ratelimit.NewManager(cfg.Providers.Items)
 	healthChecker := health.NewChecker(3, 30*time.Second)
-	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0)
+	sched := scheduler.New(rlManager, client, healthChecker, timeout, 0, 0)
 	handler.Init(cfg, resolver, sched)
 
 	rebuilder := &runtimeconfig.DefaultRuntimeRebuilder{
@@ -100,7 +101,7 @@ database:
 			return model.NewResolver(c)
 		},
 		NewScheduler: func(c *config.Config, r *model.Resolver) (*scheduler.Scheduler, error) {
-			return scheduler.New(rlManager, client, healthChecker, timeout, 0), nil
+			return scheduler.New(ratelimit.NewManager(c.Providers.Items), client, healthChecker, timeout, 0, 0), nil
 		},
 	}
 	reinitHandler := &runtimeconfig.DefaultReinitHandler{
@@ -112,7 +113,7 @@ database:
 	metricsHandler := metrics.Init()
 	serverErrCh := make(chan error, 1)
 	go func() {
-		err := server.Run(cfg, metricsHandler, runtimeManager)
+		err := server.Run(cfg, metricsHandler, runtimeManager, cascade.NewHubRegistry())
 		serverErrCh <- err
 	}()
 

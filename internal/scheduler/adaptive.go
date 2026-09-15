@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"net/http"
 	"time"
 
 	"github.com/Marstheway/oh-my-api/internal/health"
@@ -13,30 +12,25 @@ import (
 	"github.com/Marstheway/oh-my-api/internal/ratelimit"
 )
 
-// AdaptiveStrategy 根据 TTFT 延迟统计排序候选，按顺序尝试执行。
+// AdaptiveStrategy 根据 TTFT（端到端首个 SSE 事件延迟）统计排序候选，按顺序尝试执行。
 type AdaptiveStrategy struct {
-	client            *provider.Client
-	ratelimit         *ratelimit.Manager
-	health            *health.Checker
-	prefillTimeout    time.Duration
-	streamIdleTimeout time.Duration
+	leafRuntime
 }
 
 // NewAdaptiveStrategy 创建新的 AdaptiveStrategy。
-func NewAdaptiveStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker, prefillTimeout time.Duration, streamIdleTimeout time.Duration) *AdaptiveStrategy {
+func NewAdaptiveStrategy(client *provider.Client, rl *ratelimit.Manager, h *health.Checker, prefillTimeout, streamIdleTimeout, nonStreamTimeout time.Duration) *AdaptiveStrategy {
 	return &AdaptiveStrategy{
-		client:            client,
-		ratelimit:         rl,
-		health:            h,
-		prefillTimeout:    prefillTimeout,
-		streamIdleTimeout: streamIdleTimeout,
+		leafRuntime: newLeafRuntime("adaptive", client, rl, h, prefillTimeout, streamIdleTimeout, nonStreamTimeout),
 	}
 }
 
-// Execute 实现 Strategy 接口。按 TTFT score 排序候选，顺序尝试。
+// Execute 实现 Strategy 接口。按 TTFT（端到端首个 SSE 事件延迟）score 排序候选，顺序尝试。
 func (s *AdaptiveStrategy) Execute(ctx context.Context, tasks []Task) (*Result, error) {
 	if len(tasks) == 0 {
 		return nil, ErrNoTasks
+	}
+	if err := entryAbort(ctx, "adaptive"); err != nil {
+		return nil, err
 	}
 
 	now := time.Now().Local()
@@ -84,9 +78,8 @@ func (s *AdaptiveStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 	for i := 0; i < len(orderedTasks); i++ {
 		task := orderedTasks[i]
 
-		if ctx.Err() != nil {
-			fallback.DiscardSoftResult()
-			return nil, ctx.Err()
+		if stop, err := stopSequential(ctx, "adaptive", fallback, nil); stop {
+			return nil, err
 		}
 
 		key := adaptiveCandidateKey(task)
@@ -117,6 +110,12 @@ func (s *AdaptiveStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 		}
 
 		if err != nil {
+			if stop, retErr := stopSequential(ctx, "adaptive", fallback, err,
+				"upstream_model", upstreamModelLabel(task),
+				"model_group", task.ModelGroup,
+			); stop {
+				return nil, retErr
+			}
 			slog.Debug("adaptive request failed, trying next",
 				"upstream_model", upstreamModelLabel(task),
 				"model_group", task.ModelGroup,
@@ -140,12 +139,7 @@ func (s *AdaptiveStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 			continue
 		}
 
-		failureReason := result.FailureReason
-		if failureReason == "" && result.Response != nil && result.Response.StatusCode >= http.StatusBadRequest {
-			failureReason = summarizeUpstreamError(result.Response, 120)
-		}
-
-		slog.Debug("adaptive request failed, trying next",
+		logAttrs := []any{
 			"upstream_model", upstreamModelLabel(task),
 			"model_group", task.ModelGroup,
 			"rank_position", fmt.Sprintf("%d/%d", i+1, len(orderedTasks)),
@@ -155,8 +149,9 @@ func (s *AdaptiveStrategy) Execute(ctx context.Context, tasks []Task) (*Result, 
 				}
 				return 0
 			}(),
-			"reason", failureReason,
-		)
+			"reason", result.FailureReason,
+		}
+		slog.Debug("adaptive request failed, trying next", upstreamErrorLogAttrs(logAttrs, result)...)
 		fallback.RecordHardResult(result)
 	}
 
@@ -168,6 +163,9 @@ func (s *AdaptiveStrategy) filterHealthy(tasks []Task, now time.Time) []Task {
 	var healthy []Task
 	for _, t := range tasks {
 		if isProviderDisabledAt(t, now) {
+			continue
+		}
+		if !cascadeLeafReady(s.client, t.ProviderName) {
 			continue
 		}
 		healthKey := health.MakeHealthKey(t.ProviderName, t.OutboundProtocol)
@@ -257,8 +255,7 @@ func (s *AdaptiveStrategy) removeUnhealthyFromRemaining(tasks *[]Task, current *
 
 // executeTask 执行单个请求，复用与 LoadBalanceStrategy 一致的限流/健康/指标上报逻辑。
 func (s *AdaptiveStrategy) executeTask(ctx context.Context, task *Task) (*Result, error) {
-	start := time.Now()
-	if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel) {
+	if !s.ratelimit.Allow(task.ProviderName, task.UpstreamModel, task.ModelQPM) {
 		slog.Warn("provider rate limited, trying next",
 			"upstream_model", upstreamModelLabel(*task),
 			"model_group", task.ModelGroup,
@@ -266,45 +263,7 @@ func (s *AdaptiveStrategy) executeTask(ctx context.Context, task *Task) (*Result
 		return nil, &RateLimitError{Provider: task.ProviderName, Err: ErrAllRateLimited}
 	}
 
-	resp, err := s.client.Do(task.ProviderName, task.Request)
-	if err != nil {
-		recordAttemptMetric("adaptive", *task, nil, err, time.Since(start))
-		s.health.ReportFailure(health.MakeHealthKey(task.ProviderName, task.OutboundProtocol))
-		return nil, err
-	}
-
-	healthKey := health.MakeHealthKey(task.ProviderName, task.OutboundProtocol)
-	result, err := s.parseResponse(resp, task.ProviderName, task.UpstreamModel, responseProtocol(*task), s.prefillTimeout, s.streamIdleTimeout)
-	if err != nil {
-		recordAttemptMetric("adaptive", *task, nil, err, time.Since(start))
-		s.health.ReportFailure(healthKey)
-		return nil, err
-	}
-
-	// 统一应用 TokenHub 错误码分类（仅对硬失败重分级）
-	applyTokenHubClassification(result, resp, task.Request)
-
-	recordAttemptMetric("adaptive", *task, result, nil, time.Since(start))
-
-	applyHealthAction(s.health, healthKey, result)
-	if result.HealthActionInfo.Action != HealthActionNone {
-		return result, nil
-	}
-
-	switch result.FailureKind {
-	case FailureKindSuccess:
-		s.health.ReportSuccess(healthKey)
-	case FailureKindHard:
-		if result.Response != nil && result.Response.StatusCode >= http.StatusInternalServerError {
-			s.health.ReportFailure(healthKey)
-		}
-	}
-
-	return result, nil
-}
-
-func (s *AdaptiveStrategy) parseResponse(resp *http.Response, providerName, upstreamModel, protocol string, prefillTimeout time.Duration, streamIdleTimeout time.Duration) (*Result, error) {
-	return parseResponse(resp, providerName, upstreamModel, protocol, prefillTimeout, streamIdleTimeout)
+	return s.leafRuntime.executeTask(ctx, task)
 }
 
 // upstreamModelLabel 返回 provider/upstream_model 统一格式标签。

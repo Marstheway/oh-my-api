@@ -32,7 +32,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "empty name",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Model: "openai/gpt-4",
@@ -59,7 +59,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "conflicts with redirect key",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{{Source: "gpt-4", Target: "existing"}},
+				Redirect:    config.RedirectConfigs{{Source: "gpt-4", Target: "existing"}},
 			},
 			input: &ModelGroupInput{
 				Name:  "gpt-4",
@@ -72,7 +72,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "invalid mode",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name:  "test",
@@ -86,7 +86,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "both model and models",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name:   "test",
@@ -100,7 +100,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "neither model nor models",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name: "test",
@@ -112,7 +112,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "invalid weight",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name: "test",
@@ -127,7 +127,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "valid multi models",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name: "test",
@@ -142,7 +142,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "invalid context_length",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name:  "test",
@@ -158,7 +158,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "adaptive mode valid leaf only",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name: "adaptive-ok",
@@ -174,7 +174,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "adaptive mode rejects internal reference",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name: "adaptive-bad",
@@ -191,7 +191,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "adaptive mode rejects all internal references",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name: "adaptive-pure-ref",
@@ -208,7 +208,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "adaptive mode accepts single model shorthand",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name:  "adaptive-single",
@@ -221,7 +221,7 @@ func TestModelGroupCRUDValidateCreate(t *testing.T) {
 			name: "adaptive mode rejects single model internal ref",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			input: &ModelGroupInput{
 				Name:  "adaptive-bad-single",
@@ -428,7 +428,7 @@ func TestModelGroupCRUDValidateDelete(t *testing.T) {
 			name: "delete nonexistent",
 			draft: &config.Config{
 				ModelGroups: []config.ModelGroupConfig{},
-				Redirect: config.RedirectConfigs{},
+				Redirect:    config.RedirectConfigs{},
 			},
 			target:  "nonexistent",
 			wantErr: true,
@@ -473,6 +473,9 @@ func TestModelGroupInputNormalize(t *testing.T) {
 		if cfg.Models[0].Weight != 1 {
 			t.Errorf("expected weight 1, got %d", cfg.Models[0].Weight)
 		}
+		if cfg.Mode != "failover" {
+			t.Errorf("expected default mode failover, got %q", cfg.Mode)
+		}
 	})
 
 	t.Run("multi models input with defaults", func(t *testing.T) {
@@ -492,6 +495,9 @@ func TestModelGroupInputNormalize(t *testing.T) {
 			if e.Weight != 1 {
 				t.Errorf("models[%d]: expected weight 1, got %d", i, e.Weight)
 			}
+		}
+		if cfg.Mode != "failover" {
+			t.Errorf("expected default mode failover, got %q", cfg.Mode)
 		}
 	})
 }
@@ -738,6 +744,173 @@ func TestModelGroupCRUD_Exposure(t *testing.T) {
 	out := ToOutput(cfg)
 	if out.Exposure != config.ExposurePublic {
 		t.Errorf("expected output exposure public, got %q", out.Exposure)
+	}
+}
+
+func TestModelGroupCRUD_Sticky_Create(t *testing.T) {
+	crud := NewModelGroupCRUD(&config.Config{
+		ModelGroups: []config.ModelGroupConfig{},
+		Redirect:    config.RedirectConfigs{},
+	})
+
+	// 创建带有 sticky 的 load-balance group
+	input := &ModelGroupInput{
+		Name:  "lb-group",
+		Mode:  "load-balance",
+		Model: "openai/gpt-4",
+		Sticky: &StickyInput{
+			Enabled:     true,
+			IdleTimeout: "10m",
+		},
+	}
+
+	if err := crud.ValidateCreate(input); err != nil {
+		t.Fatalf("expected valid, got error: %v", err)
+	}
+
+	cfg, err := crud.Create(input)
+	if err != nil {
+		t.Fatalf("Create error: %v", err)
+	}
+
+	if cfg.Sticky == nil || !cfg.Sticky.Enabled {
+		t.Error("expected sticky enabled")
+	}
+	if cfg.Sticky.IdleTimeout != "10m" {
+		t.Errorf("expected idle_timeout 10m, got %s", cfg.Sticky.IdleTimeout)
+	}
+}
+
+func TestModelGroupCRUD_Sticky_RejectsNonLBMode(t *testing.T) {
+	crud := NewModelGroupCRUD(&config.Config{
+		ModelGroups: []config.ModelGroupConfig{},
+		Redirect:    config.RedirectConfigs{},
+	})
+
+	// 非 load-balance 模式启用 sticky 应该失败
+	input := &ModelGroupInput{
+		Name:  "concurrent-group",
+		Mode:  "concurrent",
+		Model: "openai/gpt-4",
+		Sticky: &StickyInput{
+			Enabled: true,
+		},
+	}
+
+	err := crud.ValidateCreate(input)
+	if err == nil {
+		t.Fatal("expected error for sticky on non-LB mode")
+	}
+	if err.Code != ErrCodeBadRequest {
+		t.Errorf("expected bad request error, got %s", err.Code)
+	}
+}
+
+func TestModelGroupCRUD_Sticky_UpdatePreservesWhenOmitted(t *testing.T) {
+	// 初始配置带有 sticky
+	crud := NewModelGroupCRUD(&config.Config{
+		ModelGroups: []config.ModelGroupConfig{
+			{
+				Name:  "lb-group",
+				Mode:  "load-balance",
+				Model: "openai/gpt-4",
+				Sticky: &config.StickyConfig{
+					Enabled:     true,
+					IdleTimeout: "15m",
+				},
+			},
+		},
+		Redirect: config.RedirectConfigs{},
+	})
+
+	// Update 省略 sticky
+	input := &ModelGroupInput{
+		Name:  "lb-group",
+		Mode:  "load-balance",
+		Model: "anthropic/claude", // 只改 model
+		// Sticky 为 nil，应该保留原配置
+	}
+
+	cfg, err := crud.Update("lb-group", input)
+	if err != nil {
+		t.Fatalf("Update error: %v", err)
+	}
+
+	// 验证 sticky 被保留
+	if cfg.Sticky == nil || !cfg.Sticky.Enabled {
+		t.Error("expected sticky to be preserved")
+	}
+	if cfg.Sticky.IdleTimeout != "15m" {
+		t.Errorf("expected idle_timeout 15m, got %s", cfg.Sticky.IdleTimeout)
+	}
+}
+
+func TestModelGroupCRUD_Sticky_UpdateOverwritesWhenProvided(t *testing.T) {
+	crud := NewModelGroupCRUD(&config.Config{
+		ModelGroups: []config.ModelGroupConfig{
+			{
+				Name:  "lb-group",
+				Mode:  "load-balance",
+				Model: "openai/gpt-4",
+				Sticky: &config.StickyConfig{
+					Enabled:     true,
+					IdleTimeout: "15m",
+				},
+			},
+		},
+		Redirect: config.RedirectConfigs{},
+	})
+
+	// Update 显式提供 sticky
+	input := &ModelGroupInput{
+		Name:  "lb-group",
+		Mode:  "load-balance",
+		Model: "anthropic/claude",
+		Sticky: &StickyInput{
+			Enabled: false, // 显式禁用
+		},
+	}
+
+	cfg, err := crud.Update("lb-group", input)
+	if err != nil {
+		t.Fatalf("Update error: %v", err)
+	}
+
+	// 验证 sticky 被覆盖
+	if cfg.Sticky == nil || cfg.Sticky.Enabled {
+		t.Error("expected sticky to be disabled")
+	}
+}
+
+func TestModelGroupCRUD_Sticky_UpdateClearsWhenModeLeavesLB(t *testing.T) {
+	crud := NewModelGroupCRUD(&config.Config{
+		ModelGroups: []config.ModelGroupConfig{
+			{
+				Name:  "lb-group",
+				Mode:  "load-balance",
+				Model: "openai/gpt-4",
+				Sticky: &config.StickyConfig{
+					Enabled:     true,
+					IdleTimeout: "15m",
+				},
+			},
+		},
+		Redirect: config.RedirectConfigs{},
+	})
+
+	// 省略 sticky，改 mode 为 failover → sticky 应被清理
+	input := &ModelGroupInput{
+		Name:  "lb-group",
+		Mode:  "failover",
+		Model: "openai/gpt-4",
+	}
+
+	cfg, err := crud.Update("lb-group", input)
+	if err != nil {
+		t.Fatalf("Update error: %v", err)
+	}
+	if cfg.Sticky != nil {
+		t.Errorf("expected sticky cleared on non-LB mode, got %+v", cfg.Sticky)
 	}
 }
 

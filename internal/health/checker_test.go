@@ -292,3 +292,134 @@ func TestChecker_MarkUnhealthyFor_ThresholdUsesDefaultCooldown(t *testing.T) {
 		t.Error("should still be unhealthy after 100ms when using default 30s cooldown, not stale 50ms override")
 	}
 }
+
+// TestChecker_MarkUnhealthyEscalating_NoEscalateWhileInCooldown 冷却窗口内重复 mark 不升档
+func TestChecker_MarkUnhealthyEscalating_NoEscalateWhileInCooldown(t *testing.T) {
+	c := NewChecker(3, 30*time.Second)
+	base := 200 * time.Millisecond
+	max := time.Hour
+
+	c.MarkUnhealthyEscalating("test", base, max)
+	if got := c.cooldownOverride["test"]; got != base {
+		t.Fatalf("first cooldown = %v, want %v", got, base)
+	}
+	if c.IsHealthy("test") {
+		t.Fatal("should be unhealthy after first mark")
+	}
+
+	// 冷却未到期：连 mark 多次仍保持 base
+	for i := 0; i < 5; i++ {
+		c.MarkUnhealthyEscalating("test", base, max)
+	}
+	if got := c.cooldownOverride["test"]; got != base {
+		t.Fatalf("in-cooldown cooldown = %v, want %v (must not escalate)", got, base)
+	}
+}
+
+// TestChecker_MarkUnhealthyEscalating_DoublesAfterCooldownExpires 冷却到期后再 mark 才翻倍
+func TestChecker_MarkUnhealthyEscalating_DoublesAfterCooldownExpires(t *testing.T) {
+	c := NewChecker(3, 30*time.Second)
+	base := 50 * time.Millisecond
+	max := time.Hour
+
+	c.MarkUnhealthyEscalating("test", base, max)
+	if got := c.cooldownOverride["test"]; got != base {
+		t.Fatalf("first cooldown = %v, want %v", got, base)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	if !c.IsHealthy("test") {
+		t.Fatal("should be healthy after cooldown expires")
+	}
+
+	// 被动恢复后问题未消除，再次标记 → 翻倍
+	c.MarkUnhealthyEscalating("test", base, max)
+	if got := c.cooldownOverride["test"]; got != base*2 {
+		t.Fatalf("second cooldown = %v, want %v", got, base*2)
+	}
+}
+
+// TestChecker_MarkUnhealthyEscalating_CapsAtMaxCooldown 验证退避封顶
+func TestChecker_MarkUnhealthyEscalating_CapsAtMaxCooldown(t *testing.T) {
+	c := NewChecker(3, 30*time.Second)
+	base := 50 * time.Millisecond
+	max := 120 * time.Millisecond
+
+	c.MarkUnhealthyEscalating("test", base, max) // 50ms
+	time.Sleep(60 * time.Millisecond)
+	c.MarkUnhealthyEscalating("test", base, max) // 100ms
+	time.Sleep(110 * time.Millisecond)
+	c.MarkUnhealthyEscalating("test", base, max) // 200ms -> cap 120ms
+	if got := c.cooldownOverride["test"]; got != max {
+		t.Fatalf("capped cooldown = %v, want %v", got, max)
+	}
+}
+
+// TestChecker_MarkUnhealthyEscalating_CapsBaseToMax 首次 base 超过 max 时按 max 封顶
+func TestChecker_MarkUnhealthyEscalating_CapsBaseToMax(t *testing.T) {
+	c := NewChecker(3, 30*time.Second)
+	c.MarkUnhealthyEscalating("test", time.Hour, 10*time.Minute)
+	if got := c.cooldownOverride["test"]; got != 10*time.Minute {
+		t.Fatalf("first cooldown = %v, want %v", got, 10*time.Minute)
+	}
+}
+
+// TestChecker_MarkUnhealthyEscalating_ResetsOnSuccess 验证成功上报后退避等级重置
+func TestChecker_MarkUnhealthyEscalating_ResetsOnSuccess(t *testing.T) {
+	c := NewChecker(3, 30*time.Second)
+	base := 50 * time.Millisecond
+	max := time.Hour
+
+	c.MarkUnhealthyEscalating("test", base, max) // 50ms
+	time.Sleep(60 * time.Millisecond)
+	c.MarkUnhealthyEscalating("test", base, max) // 100ms
+
+	c.ReportSuccess("test")
+	if _, ok := c.cooldownOverride["test"]; ok {
+		t.Fatal("cooldown override should be cleared after success")
+	}
+
+	// 再次标记应回到 base
+	c.MarkUnhealthyEscalating("test", base, max)
+	if got := c.cooldownOverride["test"]; got != base {
+		t.Fatalf("cooldown after reset = %v, want %v", got, base)
+	}
+}
+
+// TestChecker_MarkUnhealthyEscalating_RecoveryAfterCooldown 验证退避到期后自动恢复
+func TestChecker_MarkUnhealthyEscalating_RecoveryAfterCooldown(t *testing.T) {
+	c := NewChecker(3, 30*time.Second)
+	base := 50 * time.Millisecond
+	max := time.Hour
+
+	c.MarkUnhealthyEscalating("test", base, max)
+	if c.IsHealthy("test") {
+		t.Fatal("should be unhealthy after mark")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if !c.IsHealthy("test") {
+		t.Fatal("should recover after cooldown expires")
+	}
+}
+
+// TestChecker_MarkUnhealthyEscalating_UpgradesThresholdUnhealthy 阈值熔断中的 provider
+// 再命中额度路径时，升级为 base 额度退避（而非 no-op）
+func TestChecker_MarkUnhealthyEscalating_UpgradesThresholdUnhealthy(t *testing.T) {
+	c := NewChecker(1, 30*time.Second)
+	c.ReportFailure("test")
+	if c.IsHealthy("test") {
+		t.Fatal("should be unhealthy after threshold")
+	}
+	if _, ok := c.cooldownOverride["test"]; ok {
+		t.Fatal("threshold path should not set cooldown override")
+	}
+
+	base := 50 * time.Millisecond
+	c.MarkUnhealthyEscalating("test", base, time.Hour)
+	if got := c.cooldownOverride["test"]; got != base {
+		t.Fatalf("upgraded cooldown = %v, want %v", got, base)
+	}
+	if c.IsHealthy("test") {
+		t.Fatal("should remain unhealthy after upgrade")
+	}
+}

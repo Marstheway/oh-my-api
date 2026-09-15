@@ -9,4 +9,7 @@ var (
 	ErrUnknownStrategy     = errors.New("unknown scheduling strategy")
 	ErrNoProviderAvailable = errors.New("no provider available")
 	ErrPrefillTimeout      = errors.New("prefill timeout: no response within deadline")
+	// ErrAttemptTimeout 非流式单 attempt 预算耗尽（等响应头/生成超时）。
+	// 刻意不是 context.DeadlineExceeded，避免 ShouldStopScheduling 把整单 failover 停掉。
+	ErrAttemptTimeout = errors.New("attempt timeout: upstream did not respond within deadline")
 )

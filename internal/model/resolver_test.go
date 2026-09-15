@@ -18,22 +18,157 @@ func exposurePtr(b bool) *config.Exposure {
 	return &v
 }
 
+func TestResolver_ListCallableEntries(t *testing.T) {
+	public := config.ExposurePublic
+	hidden := config.ExposureHidden
+	internal := config.ExposureInternal
+
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{Items: map[string]config.ProviderConfig{
+			"openai": {Endpoint: "https://api.openai.com/v1", APIKey: "sk", Protocols: []string{"openai.chat"}},
+		}},
+		ModelGroups: []config.ModelGroupConfig{
+			{Name: "pub-group", Exposure: &public, Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+			{Name: "hid-group", Exposure: &hidden, Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+			{Name: "int-group", Exposure: &internal, Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+		},
+		Redirect: config.RedirectConfigs{
+			{Source: "pub-alias", Target: "pub-group", Exposure: &public},
+			{Source: "hid-alias", Target: "hid-group", Exposure: &hidden},
+			{Source: "int-alias", Target: "int-group", Exposure: &internal},
+		},
+	}
+
+	r, err := NewResolver(cfg)
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+
+	entries := r.ListCallableEntries()
+	got := make(map[string]string)
+	for _, e := range entries {
+		got[e.Name] = e.FinalGroup
+	}
+
+	if len(entries) != 4 {
+		t.Fatalf("ListCallableEntries len = %d, want 4 (public/hidden groups + redirects, no internal)", len(entries))
+	}
+	if got["pub-group"] != "pub-group" {
+		t.Errorf("pub-group entry = %q, want itself", got["pub-group"])
+	}
+	if got["hid-group"] != "hid-group" {
+		t.Errorf("hid-group entry = %q, want itself", got["hid-group"])
+	}
+	if got["pub-alias"] != "pub-group" {
+		t.Errorf("pub-alias entry = %q, want pub-group", got["pub-alias"])
+	}
+	if got["hid-alias"] != "hid-group" {
+		t.Errorf("hid-alias entry = %q, want hid-group", got["hid-alias"])
+	}
+	for _, name := range []string{"int-group", "int-alias"} {
+		if _, ok := got[name]; ok {
+			t.Errorf("internal entry %q must not be enumerated", name)
+		}
+	}
+}
+
+func TestResolver_ListCallableEntries_StableOrder(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{Items: map[string]config.ProviderConfig{
+			"openai": {Endpoint: "https://api.openai.com/v1", APIKey: "sk", Protocols: []string{"openai.chat"}},
+		}},
+		ModelGroups: []config.ModelGroupConfig{
+			{Name: "zebra", Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+			{Name: "alpha", Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+			{Name: "mike", Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+		},
+	}
+
+	r, err := NewResolver(cfg)
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+	a := r.ListCallableEntries()
+	b := r.ListCallableEntries()
+	if len(a) != 3 {
+		t.Fatalf("entries len = %d, want 3", len(a))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("order unstable: %v vs %v", a, b)
+		}
+	}
+	want := []string{"alpha", "mike", "zebra"}
+	for i, e := range a {
+		if e.Name != want[i] {
+			t.Fatalf("entries[%d] = %q, want %q (sorted)", i, e.Name, want[i])
+		}
+	}
+}
+
+// TestListCallableEntries_ConfigEnumerationConsistent 验证 model.Resolver 的入口名称集合
+// 与 config.ListDirectCallableNames 的纯配置枚举完全一致（同一配置下去重 public/hidden 集合）。
+func TestListCallableEntries_ConfigEnumerationConsistent(t *testing.T) {
+	public := config.ExposurePublic
+	hidden := config.ExposureHidden
+	internal := config.ExposureInternal
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{Items: map[string]config.ProviderConfig{
+			"openai": {Endpoint: "https://api.openai.com/v1", APIKey: "sk", Protocols: []string{"openai.chat"}},
+		}},
+		ModelGroups: []config.ModelGroupConfig{
+			{Name: "pub-group", Exposure: &public, Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+			{Name: "hid-group", Exposure: &hidden, Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+			{Name: "int-group", Exposure: &internal, Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+			{Name: "default-group", Models: config.ModelEntries{{Model: "openai/gpt-4"}}},
+		},
+		Redirect: config.RedirectConfigs{
+			{Source: "hid-alias", Target: "hid-group", Exposure: &hidden},
+			{Source: "int-alias", Target: "int-group", Exposure: &internal},
+			{Source: "pub-alias", Target: "pub-group", Exposure: &public},
+		},
+	}
+
+	r, err := NewResolver(cfg)
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+
+	got := r.ListCallableEntries()
+	want := config.ListDirectCallableNames(cfg)
+	if len(got) != len(want) {
+		t.Fatalf("resolver entries = %d, config names = %d; sets must match", len(got), len(want))
+	}
+	for i, e := range got {
+		if e.Name != want[i] {
+			t.Fatalf("entries[%d].Name = %q, want %q (identical to config enumeration)", i, e.Name, want[i])
+		}
+	}
+
+	// 每个入口的最终 group 必须可解析（非空）。
+	for _, e := range got {
+		if e.FinalGroup == "" {
+			t.Fatalf("entry %q has empty final group", e.Name)
+		}
+	}
+}
+
 func TestResolver_Resolve(t *testing.T) {
 	cfg := &config.Config{
 		Providers: config.ProvidersConfig{Items: map[string]config.ProviderConfig{
 			"openai": {
-				Endpoint: "https://api.openai.com/v1",
-				APIKey:   "sk-xxx",
+				Endpoint:  "https://api.openai.com/v1",
+				APIKey:    "sk-xxx",
 				Protocols: []string{"openai"},
 			},
 			"anthropic": {
-				Endpoint: "https://api.anthropic.com",
-				APIKey:   "sk-ant-xxx",
+				Endpoint:  "https://api.anthropic.com",
+				APIKey:    "sk-ant-xxx",
 				Protocols: []string{"anthropic"},
 			},
 			"openrouter": {
-				Endpoint: "https://openrouter.ai/api/v1",
-				APIKey:   "sk-or-xxx",
+				Endpoint:  "https://openrouter.ai/api/v1",
+				APIKey:    "sk-or-xxx",
 				Protocols: []string{"openai"},
 			},
 		}},
@@ -63,14 +198,14 @@ func TestResolver_Resolve(t *testing.T) {
 			name:      "resolve openai model",
 			userModel: "gpt-4",
 			wantErr:   false,
-			wantMode:  "concurrent", // 1:1 映射默认使用 concurrent 模式
+			wantMode:  "failover",
 			wantTasks: 1,
 		},
 		{
 			name:      "resolve anthropic model",
 			userModel: "claude-fast",
 			wantErr:   false,
-			wantMode:  "concurrent", // 1:1 映射默认使用 concurrent 模式
+			wantMode:  "failover",
 			wantTasks: 1,
 		},
 		{
@@ -131,9 +266,9 @@ func TestBuildPlanNode_ModelOrder(t *testing.T) {
 				Name: "mixed-order",
 				Mode: "failover",
 				Models: config.ModelEntries{
-					{Model: "child-group", Weight: 1},      // 子 group 引用
-					{Model: "prov-b/model-b", Weight: 2},   // 叶子
-					{Model: "prov-c/model-c", Weight: 3},   // 叶子
+					{Model: "child-group", Weight: 1},    // 子 group 引用
+					{Model: "prov-b/model-b", Weight: 2}, // 叶子
+					{Model: "prov-c/model-c", Weight: 3}, // 叶子
 				},
 			},
 		},
@@ -163,9 +298,9 @@ func TestBuildPlanNode_ModelOrder(t *testing.T) {
 		isLeaf       bool
 		providerName string
 	}{
-		{isLeaf: false, providerName: ""},          // child-group
-		{isLeaf: true, providerName: "prov-b"},     // prov-b/model-b
-		{isLeaf: true, providerName: "prov-c"},     // prov-c/model-c
+		{isLeaf: false, providerName: ""},      // child-group
+		{isLeaf: true, providerName: "prov-b"}, // prov-b/model-b
+		{isLeaf: true, providerName: "prov-c"}, // prov-c/model-c
 	}
 
 	if len(plan.ModelOrder) != len(expectedOrder) {
@@ -194,7 +329,6 @@ func TestBuildPlanNode_ModelOrder(t *testing.T) {
 		}
 	}
 }
-
 
 func TestResolver_ResolveWithMode(t *testing.T) {
 	cfg := &config.Config{
@@ -265,6 +399,41 @@ func TestResolver_ListUserModels(t *testing.T) {
 	}
 }
 
+// TestResolver_ListUserModelsOrder 锁定 /v1/models 的稳定排序契约：
+// redirect（用户显式配置的重点模型）在前、group 在后，各自块内按声明顺序，
+// 不跨块混排、不依赖 Go map 随机迭代序。
+func TestResolver_ListUserModelsOrder(t *testing.T) {
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{Items: map[string]config.ProviderConfig{
+			"openai": {Protocols: []string{"openai"}},
+		}},
+		ModelGroups: []config.ModelGroupConfig{
+			{Name: "group-b", Models: config.ModelEntries{{Model: "openai/gpt-4", Weight: 1}}},
+			{Name: "group-a", Models: config.ModelEntries{{Model: "openai/gpt-4o", Weight: 1}}},
+		},
+		Redirect: config.RedirectConfigs{
+			{Source: "alias-z", Target: "group-a"},
+			{Source: "alias-y", Target: "group-b"},
+		},
+	}
+
+	r, err := NewResolver(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := r.ListUserModels()
+	want := []string{"alias-z", "alias-y", "group-b", "group-a"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("order mismatch at %d: got %v, want %v", i, got, want)
+		}
+	}
+}
+
 func TestResolver_EmptyModelGroups(t *testing.T) {
 	cfg := &config.Config{
 		Providers:   config.ProvidersConfig{Items: map[string]config.ProviderConfig{}},
@@ -291,7 +460,7 @@ func TestResolver_Redirect(t *testing.T) {
 		}},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "claude-fast",
+				Name:     "claude-fast",
 				Exposure: exposurePtr(falseVal),
 				Models: config.ModelEntries{
 					{Model: "anthropic/claude-sonnet-4-20250514", Weight: 1},
@@ -745,9 +914,9 @@ func TestResolver_RedirectPreservesMode(t *testing.T) {
 		}},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "backend",
+				Name:     "backend",
 				Exposure: exposurePtr(falseVal),
-				Mode:    "load-balance",
+				Mode:     "load-balance",
 				Models: config.ModelEntries{
 					{Model: "openai/gpt-4", Weight: 2},
 					{Model: "openai/gpt-4o", Weight: 1},
@@ -888,7 +1057,6 @@ func TestResolver_NestGroupRefInModels(t *testing.T) {
 		t.Errorf("expected child group 'leaf', got %q", child.GroupName)
 	}
 }
-
 
 // TestResolver_NamingConflict: redirect alias 与 model_group.name 同名应全局冲突拒绝
 func TestResolver_NamingConflict(t *testing.T) {
@@ -1106,7 +1274,6 @@ func TestResolver_NoLeafError(t *testing.T) {
 	}
 }
 
-
 // TestResolver_GroupNameWithSlash: model_group.name 含 / 应在启动期拒绝
 func TestResolver_GroupNameWithSlash(t *testing.T) {
 	cfg := &config.Config{
@@ -1263,9 +1430,9 @@ func TestResolver_VisibleModelLeaves_Alias(t *testing.T) {
 		}},
 		ModelGroups: []config.ModelGroupConfig{
 			{
-				Name:    "claude-fast",
+				Name:     "claude-fast",
 				Exposure: exposurePtr(falseVal),
-				Models:  config.ModelEntries{{Model: "anthropic/claude-sonnet-4-20250514", Weight: 1}},
+				Models:   config.ModelEntries{{Model: "anthropic/claude-sonnet-4-20250514", Weight: 1}},
 			},
 		},
 		Redirect: config.RedirectConfigs{{Source: "claude-4-6-20261201", Target: "claude-fast"}},
@@ -1610,6 +1777,9 @@ func TestResolver_Exposure_ThreeStates(t *testing.T) {
 	}
 	if _, err := r.Resolve("int"); err == nil {
 		t.Error("internal should NOT be resolvable externally")
+	}
+	if _, err := r.ResolveInternal("int"); err != nil {
+		t.Errorf("internal should be resolvable via ResolveInternal: %v", err)
 	}
 
 	// VisibleModelLeaves 直调规则与 Resolve 一致

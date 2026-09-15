@@ -43,7 +43,7 @@ func TestSetupAdminRoutesConditionalRegistration(t *testing.T) {
 		},
 	}
 	mgr := &runtimeconfig.Manager{} // dummy manager (not used for this routing test)
-	var querier stats.Querier // nil is ok for routing test
+	var querier stats.Querier       // nil is ok for routing test
 
 	r2 := gin.New()
 	SetupAdmin(r2, cfgWithPassword, mgr, querier)
@@ -147,4 +147,46 @@ func TestSetupAdminRootRedirect(t *testing.T) {
 
 	// Should return 404 (no route registered)
 	assert.Equal(t, http.StatusNotFound, w2.Code)
+}
+
+func TestSetupAdminCatalogRouteConditionalRegistration(t *testing.T) {
+	// Test: catalog route not registered when password empty
+	cfgEmpty := &config.Config{
+		Server: config.ServerConfig{
+			Admin: config.AdminConfig{Password: ""},
+		},
+	}
+	r := gin.New()
+	r.NoRoute(func(c *gin.Context) { c.Status(404) })
+	SetupAdmin(r, cfgEmpty, nil, nil)
+
+	req := httptest.NewRequest("GET", "/admin/runtime-config/catalog", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	// Test: catalog route registered when password non-empty, requires auth
+	cfgWithPassword := &config.Config{
+		Server: config.ServerConfig{
+			Admin: config.AdminConfig{Password: "secret123"},
+		},
+	}
+	mgr := &runtimeconfig.Manager{}
+	var querier stats.Querier
+
+	r2 := gin.New()
+	SetupAdmin(r2, cfgWithPassword, mgr, querier)
+
+	// Unauthenticated: 401
+	req = httptest.NewRequest("GET", "/admin/runtime-config/catalog", nil)
+	w = httptest.NewRecorder()
+	r2.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// Authenticated via X-Admin-Password header: 200
+	req = httptest.NewRequest("GET", "/admin/runtime-config/catalog", nil)
+	req.Header.Set("X-Admin-Password", "secret123")
+	w = httptest.NewRecorder()
+	r2.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
 }

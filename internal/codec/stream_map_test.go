@@ -2,6 +2,7 @@ package codec
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
@@ -164,7 +165,7 @@ func TestClaudeToChatStreamMapper_ToolUsePartialJSONPreservesIndexAndID(t *testi
 
 // TestChatToClaudeStreamMapper_ReasoningContent tests ReasoningContent conversion to thinking_delta
 func TestChatToClaudeStreamMapper_ReasoningContent(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 
 	// First chunk with role
 	chunk1 := dto.ChatCompletionChunk{
@@ -221,7 +222,7 @@ func TestChatToClaudeStreamMapper_ReasoningContent(t *testing.T) {
 
 // TestChatToClaudeStreamMapper_TextAndReasoning tests interleaved text and reasoning content
 func TestChatToClaudeStreamMapper_TextAndReasoning(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 
 	// Initialize with role
 	chunk0 := dto.ChatCompletionChunk{
@@ -334,7 +335,7 @@ func TestClaudeToChatStreamMapper_DocumentBlock(t *testing.T) {
 
 // TestChatToClaudeStreamMapper_ImageDataURI tests Data URI image in content conversion
 func TestChatToClaudeStreamMapper_ImageDataURI(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 
 	// Initialize with role
 	chunk0 := dto.ChatCompletionChunk{
@@ -396,7 +397,7 @@ func TestChatToClaudeStreamMapper_ImageDataURI(t *testing.T) {
 
 // TestChatToClaudeStreamMapper_DocumentDataURI tests Data URI document in content conversion
 func TestChatToClaudeStreamMapper_DocumentDataURI(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 
 	// Initialize with role
 	chunk0 := dto.ChatCompletionChunk{
@@ -458,7 +459,7 @@ func TestChatToClaudeStreamMapper_DocumentDataURI(t *testing.T) {
 
 // TestChatToClaudeStreamMapper_MalformedDataURI tests malformed Data URI handling
 func TestChatToClaudeStreamMapper_MalformedDataURI(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 
 	// Initialize with role
 	chunk0 := dto.ChatCompletionChunk{
@@ -520,7 +521,7 @@ func TestChatToClaudeStreamMapper_MalformedDataURI(t *testing.T) {
 
 // TestChatToClaudeStreamMapper_RegularTextNotAffected tests that regular text still works
 func TestChatToClaudeStreamMapper_RegularTextNotAffected(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 
 	// Initialize with role
 	chunk0 := dto.ChatCompletionChunk{
@@ -566,7 +567,7 @@ func TestChatToClaudeStreamMapper_RegularTextNotAffected(t *testing.T) {
 
 // TestChatToClaudeStreamMapper_ToolCallWithPartialJSON tests tool call handling with partial JSON
 func TestChatToClaudeStreamMapper_ToolCallWithPartialJSON(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 	intZero := 0
 
 	// Initialize
@@ -636,7 +637,7 @@ func TestChatToClaudeStreamMapper_ToolCallWithPartialJSON(t *testing.T) {
 // TestStreamMapChatToClaude_UsesRequestedModel verifies that chatToClaudeStreamMapper
 // uses the constructor-seeded requestedModel rather than the upstream model from chunks.
 func TestStreamMapChatToClaude_UsesRequestedModel(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 	mapper.requestedModel = "my-alias"
 
 	chunk := dto.ChatCompletionChunk{
@@ -738,6 +739,46 @@ func TestStreamMapResponsesToChat_UsesRequestedModel(t *testing.T) {
 	}
 }
 
+func TestStreamMapChatToResponses_OutputTextDoneIncludesText(t *testing.T) {
+	mapper := newChatToResponsesStreamMapper("resp-1", "my-alias")
+
+	contentEvents, err := mapper.Map(dto.ChatCompletionChunk{
+		Choices: []dto.ChunkChoice{{
+			Index: 0,
+			Delta: &dto.Delta{Content: "Hello"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Map content error: %v", err)
+	}
+	if len(contentEvents) == 0 {
+		t.Fatal("expected content events")
+	}
+
+	finishReason := "stop"
+	finishEvents, err := mapper.Map(dto.ChatCompletionChunk{
+		Choices: []dto.ChunkChoice{{
+			Index:        0,
+			Delta:        &dto.Delta{},
+			FinishReason: &finishReason,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Map finish error: %v", err)
+	}
+
+	for _, event := range finishEvents {
+		if event.Type != "response.output_text.done" {
+			continue
+		}
+		if event.Text == nil || *event.Text != "Hello" {
+			t.Fatalf("output_text.done text = %#v, want Hello", event.Text)
+		}
+		return
+	}
+	t.Fatal("missing response.output_text.done event")
+}
+
 // ============================================================================
 // 新增 Response -> Chat 流式对齐测试（test-first）
 // ============================================================================
@@ -790,9 +831,9 @@ func TestResponsesToChatStreamMapper_ReusesToolIndexAcrossPendingArguments(t *te
 
 	// 先发 arguments delta（乱序），此时 tool 还不存在
 	argsEvent1 := dto.ResponsesStreamEvent{
-		Type:     "response.function_call_arguments.delta",
-		ItemID:   "fc-1",
-		Delta:    json.RawMessage(`"{\"city\""`),
+		Type:   "response.function_call_arguments.delta",
+		ItemID: "fc-1",
+		Delta:  json.RawMessage(`"{\"city\""`),
 	}
 	chunks, err := mapper.Map(argsEvent1)
 	if err != nil {
@@ -805,9 +846,9 @@ func TestResponsesToChatStreamMapper_ReusesToolIndexAcrossPendingArguments(t *te
 
 	// 再发第二个 arguments delta
 	argsEvent2 := dto.ResponsesStreamEvent{
-		Type:     "response.function_call_arguments.delta",
-		ItemID:   "fc-1",
-		Delta:    json.RawMessage(`": \"Beijing\"}"`),
+		Type:   "response.function_call_arguments.delta",
+		ItemID: "fc-1",
+		Delta:  json.RawMessage(`": \"Beijing\"}"`),
 	}
 	chunks, err = mapper.Map(argsEvent2)
 	if err != nil {
@@ -899,6 +940,78 @@ func TestResponsesToChatStreamMapper_FallsBackCallIDToItemID(t *testing.T) {
 	}
 	if !foundFinish {
 		t.Fatalf("expected finish_reason chunk, got: %+v", chunks)
+	}
+}
+
+func TestResponsesToChatStreamMapper_GeneratesCallIDWhenMissing(t *testing.T) {
+	mapper := newResponsesToChatStreamMapper("resp-4", "gpt-4o", 1234)
+	outputIndex := 3
+	event := dto.ResponsesStreamEvent{
+		Type:        "response.output_item.added",
+		OutputIndex: &outputIndex,
+		Item:        json.RawMessage(`{"type":"function_call","name":"get_weather"}`),
+	}
+
+	chunks, err := mapper.Map(event)
+	if err != nil {
+		t.Fatalf("Map error: %v", err)
+	}
+	if len(chunks) == 0 || len(chunks[len(chunks)-1].Choices[0].Delta.ToolCalls) != 1 {
+		t.Fatalf("expected tool call chunk, got %+v", chunks)
+	}
+	call := chunks[len(chunks)-1].Choices[0].Delta.ToolCalls[0]
+	if call.ID != "generated_tool_call_3" {
+		t.Fatalf("tool call id = %q, want generated_tool_call_3", call.ID)
+	}
+}
+
+func TestResponsesToChatStreamMapper_AssociatesAnonymousArgumentsWithSingleTool(t *testing.T) {
+	mapper := newResponsesToChatStreamMapper("resp-4", "gpt-4o", 1234)
+	chunks, err := mapper.Map(dto.ResponsesStreamEvent{
+		Type: "response.output_item.added",
+		Item: json.RawMessage(`{"type":"function_call","name":"get_weather"}`),
+	})
+	if err != nil {
+		t.Fatalf("Map added error: %v", err)
+	}
+	call := chunks[len(chunks)-1].Choices[0].Delta.ToolCalls[0]
+
+	chunks, err = mapper.Map(dto.ResponsesStreamEvent{
+		Type:  "response.function_call_arguments.delta",
+		Delta: json.RawMessage(`"{\"city\":\"Beijing\"}"`),
+	})
+	if err != nil {
+		t.Fatalf("Map delta error: %v", err)
+	}
+	if len(chunks) != 1 || len(chunks[0].Choices[0].Delta.ToolCalls) != 1 {
+		t.Fatalf("expected one arguments chunk, got %+v", chunks)
+	}
+	got := chunks[0].Choices[0].Delta.ToolCalls[0]
+	if got.GetIndex() != call.GetIndex() || got.Function.Arguments != `{"city":"Beijing"}` {
+		t.Fatalf("arguments chunk = %+v, want index %d with arguments", got, call.GetIndex())
+	}
+}
+
+func TestResponsesToChatStreamMapper_DoesNotGuessBetweenAnonymousTools(t *testing.T) {
+	mapper := newResponsesToChatStreamMapper("resp-4", "gpt-4o", 1234)
+	for _, name := range []string{"first", "second"} {
+		if _, err := mapper.Map(dto.ResponsesStreamEvent{
+			Type: "response.output_item.added",
+			Item: json.RawMessage(fmt.Sprintf(`{"type":"function_call","name":%q}`, name)),
+		}); err != nil {
+			t.Fatalf("Map added error: %v", err)
+		}
+	}
+
+	chunks, err := mapper.Map(dto.ResponsesStreamEvent{
+		Type:  "response.function_call_arguments.delta",
+		Delta: json.RawMessage(`"{}"`),
+	})
+	if err != nil {
+		t.Fatalf("Map delta error: %v", err)
+	}
+	if len(chunks) != 0 {
+		t.Fatalf("ambiguous arguments must not be assigned, got %+v", chunks)
 	}
 }
 
@@ -998,5 +1111,571 @@ func TestResponsesToChatStreamMapper_CustomToolCallInputDelta(t *testing.T) {
 	}
 	if !foundTool {
 		t.Fatalf("expected tool call for search, got chunks: %+v", chunks)
+	}
+}
+
+// TestStreamUsage 测试 Anthropic 流式 usage 映射到 Chat
+func TestStreamUsage(t *testing.T) {
+	mapper := newClaudeToChatStreamMapper("", "claude-3", 1234)
+
+	// message_start 带 input_tokens
+	startChunks, err := mapper.Map(dto.ClaudeStreamEvent{
+		Type: "message_start",
+		Message: &dto.ClaudeMessageStart{
+			ID:    "msg-1",
+			Type:  "message",
+			Role:  "assistant",
+			Model: "claude-3",
+			Usage: dto.ClaudeUsage{InputTokens: 100},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Map message_start error: %v", err)
+	}
+	if len(startChunks) != 1 {
+		t.Fatalf("len(startChunks) = %d, want 1", len(startChunks))
+	}
+
+	// message_delta 带 stop_reason 和 usage
+	deltaChunks, err := mapper.Map(dto.ClaudeStreamEvent{
+		Type:  "message_delta",
+		Delta: &dto.ClaudeDelta{StopReason: "end_turn"},
+		Usage: &dto.ClaudeUsage{OutputTokens: 50},
+	})
+	if err != nil {
+		t.Fatalf("Map message_delta error: %v", err)
+	}
+
+	// 应该有 finish_reason 和 usage
+	foundFinish := false
+	foundUsage := false
+	for _, ch := range deltaChunks {
+		if ch.Choices[0].FinishReason != nil && *ch.Choices[0].FinishReason == "stop" {
+			foundFinish = true
+		}
+		if ch.Usage != nil && ch.Usage.PromptTokens == 100 && ch.Usage.CompletionTokens == 50 {
+			foundUsage = true
+		}
+	}
+
+	if !foundFinish {
+		t.Fatalf("expected finish_reason=stop in chunks")
+	}
+	if !foundUsage {
+		t.Fatalf("expected usage with prompt_tokens=100, completion_tokens=50 in chunks")
+	}
+}
+
+// TestClaudeToChat_FinishWithUsageOnChunk 验证 finish 同包带 Usage（mapper 中间表示）
+func TestClaudeToChat_FinishWithUsageOnChunk(t *testing.T) {
+	mapper := newClaudeToChatStreamMapper("", "claude-3", 1234)
+
+	deltaChunks, err := mapper.Map(dto.ClaudeStreamEvent{
+		Type:  "message_delta",
+		Delta: &dto.ClaudeDelta{StopReason: "end_turn"},
+		Usage: &dto.ClaudeUsage{InputTokens: 100, OutputTokens: 50},
+	})
+	if err != nil {
+		t.Fatalf("Map error: %v", err)
+	}
+
+	hasFinishWithUsage := false
+	for _, ch := range deltaChunks {
+		if len(ch.Choices) > 0 && ch.Choices[0].FinishReason != nil && ch.Usage != nil {
+			hasFinishWithUsage = true
+		}
+	}
+	if !hasFinishWithUsage {
+		t.Fatalf("expected finish_reason chunk with usage attached")
+	}
+}
+
+// TestClaudeToChat_ZeroCompletionTokensStillAttachesUsage 合法 0 completion 也应挂 usage
+func TestClaudeToChat_ZeroCompletionTokensStillAttachesUsage(t *testing.T) {
+	mapper := newClaudeToChatStreamMapper("", "claude-3", 1234)
+	_, _ = mapper.Map(dto.ClaudeStreamEvent{
+		Type: "message_start",
+		Message: &dto.ClaudeMessageStart{
+			ID: "msg-1", Model: "claude-3",
+			Usage: dto.ClaudeUsage{InputTokens: 12},
+		},
+	})
+	chunks, err := mapper.Map(dto.ClaudeStreamEvent{
+		Type:  "message_delta",
+		Delta: &dto.ClaudeDelta{StopReason: "end_turn"},
+		Usage: &dto.ClaudeUsage{OutputTokens: 0},
+	})
+	if err != nil {
+		t.Fatalf("Map error: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].Usage == nil {
+		t.Fatalf("expected usage on finish chunk, got %+v", chunks)
+	}
+	if chunks[0].Usage.PromptTokens != 12 || chunks[0].Usage.CompletionTokens != 0 {
+		t.Fatalf("usage = %+v, want prompt=12 completion=0", chunks[0].Usage)
+	}
+}
+
+// TestClaudeToChat_StopReasonWithoutDeltaUsage_DoesNotEmitStartOnlyUsage
+// message_start 不能把 usage 视为已齐；仅 stop_reason 时不应回写 completion_tokens=0。
+func TestClaudeToChat_StopReasonWithoutDeltaUsage_DoesNotEmitStartOnlyUsage(t *testing.T) {
+	mapper := newClaudeToChatStreamMapper("", "claude-3", 1234)
+	_, _ = mapper.Map(dto.ClaudeStreamEvent{
+		Type: "message_start",
+		Message: &dto.ClaudeMessageStart{
+			ID: "msg-1", Model: "claude-3",
+			Usage: dto.ClaudeUsage{InputTokens: 99},
+		},
+	})
+	chunks, err := mapper.Map(dto.ClaudeStreamEvent{
+		Type:  "message_delta",
+		Delta: &dto.ClaudeDelta{StopReason: "end_turn"},
+	})
+	if err != nil {
+		t.Fatalf("Map error: %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("len(chunks)=%d, want 1", len(chunks))
+	}
+	if chunks[0].Usage != nil {
+		t.Fatalf("start-only usage must not attach on stop_reason, got %+v", chunks[0].Usage)
+	}
+}
+
+// TestClaudeToChat_MessageStopAttachesReadyUsage 覆盖 message_delta.usage 后靠 message_stop 收尾
+func TestClaudeToChat_MessageStopAttachesReadyUsage(t *testing.T) {
+	mapper := newClaudeToChatStreamMapper("", "claude-3", 1234)
+	_, _ = mapper.Map(dto.ClaudeStreamEvent{
+		Type: "message_start",
+		Message: &dto.ClaudeMessageStart{
+			ID: "msg-1", Model: "claude-3",
+			Usage: dto.ClaudeUsage{InputTokens: 40, CacheReadInputTokens: 15},
+		},
+	})
+	// 仅 usage、无 stop_reason
+	usageOnly, err := mapper.Map(dto.ClaudeStreamEvent{
+		Type:  "message_delta",
+		Usage: &dto.ClaudeUsage{OutputTokens: 7},
+	})
+	if err != nil {
+		t.Fatalf("usage-only map: %v", err)
+	}
+	if len(usageOnly) != 1 || usageOnly[0].Usage == nil {
+		t.Fatalf("expected usage-only chunk, got %+v", usageOnly)
+	}
+	if usageOnly[0].Usage.PromptTokens != 40 || usageOnly[0].Usage.CompletionTokens != 7 {
+		t.Fatalf("usage-only = %+v, want prompt=40 completion=7", usageOnly[0].Usage)
+	}
+	if usageOnly[0].Usage.PromptTokensDetails == nil || usageOnly[0].Usage.PromptTokensDetails.CachedTokens != 15 {
+		t.Fatalf("cache_read not mapped: %+v", usageOnly[0].Usage.PromptTokensDetails)
+	}
+
+	// message_stop 应挂已齐 usage
+	stopChunks, err := mapper.Map(dto.ClaudeStreamEvent{Type: "message_stop"})
+	if err != nil {
+		t.Fatalf("message_stop: %v", err)
+	}
+	if len(stopChunks) != 1 {
+		t.Fatalf("len(stopChunks)=%d, want 1", len(stopChunks))
+	}
+	if stopChunks[0].Usage == nil {
+		t.Fatalf("message_stop should attach ready usage")
+	}
+	if stopChunks[0].Usage.PromptTokens != 40 || stopChunks[0].Usage.CompletionTokens != 7 {
+		t.Fatalf("stop usage = %+v", stopChunks[0].Usage)
+	}
+	if stopChunks[0].Choices[0].FinishReason == nil || *stopChunks[0].Choices[0].FinishReason != "stop" {
+		t.Fatalf("finish_reason = %v, want stop", stopChunks[0].Choices[0].FinishReason)
+	}
+}
+
+// TestClaudeToChat_MessageStopWithoutDeltaUsage_NoUsage 仅 message_start + message_stop 不挂伪 usage
+func TestClaudeToChat_MessageStopWithoutDeltaUsage_NoUsage(t *testing.T) {
+	mapper := newClaudeToChatStreamMapper("", "claude-3", 1234)
+	_, _ = mapper.Map(dto.ClaudeStreamEvent{
+		Type: "message_start",
+		Message: &dto.ClaudeMessageStart{
+			ID: "msg-1", Model: "claude-3",
+			Usage: dto.ClaudeUsage{InputTokens: 5},
+		},
+	})
+	chunks, err := mapper.Map(dto.ClaudeStreamEvent{Type: "message_stop"})
+	if err != nil {
+		t.Fatalf("message_stop: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].Usage != nil {
+		t.Fatalf("expected finish without usage, got %+v", chunks)
+	}
+}
+
+// TestChatToResponses_EmitCompleted_UsageDetails 验证 cached/reasoning 细节不丢
+func TestChatToResponses_EmitCompleted_UsageDetails(t *testing.T) {
+	mapper := newChatToResponsesStreamMapper("resp-d", "m")
+	stop := "stop"
+	_, _ = mapper.Map(dto.ChatCompletionChunk{
+		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{Content: "x"}}},
+	})
+	events, err := mapper.Map(dto.ChatCompletionChunk{
+		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{}, FinishReason: &stop}},
+		Usage: &dto.Usage{
+			PromptTokens:     100,
+			CompletionTokens: 50,
+			TotalTokens:      150,
+			PromptTokensDetails: &dto.UsageDetails{
+				CachedTokens: 30,
+				ImageTokens:  2,
+			},
+			CompletionTokensDetails: &dto.UsageDetails{
+				ReasoningTokens: 12,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Map: %v", err)
+	}
+	var completed *dto.ResponsesStreamEvent
+	for i := range events {
+		if events[i].Type == "response.completed" {
+			completed = &events[i]
+			break
+		}
+	}
+	if completed == nil {
+		t.Fatalf("expected response.completed, events=%+v", events)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(completed.Response, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	usage, _ := resp["usage"].(map[string]any)
+	if usage == nil {
+		t.Fatalf("missing usage: %v", resp)
+	}
+	inDetails, _ := usage["input_tokens_details"].(map[string]any)
+	if inDetails == nil || inDetails["cached_tokens"] != float64(30) || inDetails["image_tokens"] != float64(2) {
+		t.Fatalf("input_tokens_details = %v", inDetails)
+	}
+	outDetails, _ := usage["completion_tokens_details"].(map[string]any)
+	if outDetails == nil || outDetails["reasoning_tokens"] != float64(12) {
+		t.Fatalf("completion_tokens_details = %v", outDetails)
+	}
+}
+
+// TestChatToClaude_FinishNilDeltaThenUsage 覆盖 finish_reason + delta:null 再 usage-only
+func TestChatToClaude_FinishNilDeltaThenUsage(t *testing.T) {
+	mapper := newChatToClaudeStreamMapper("claude-alias")
+	stop := "stop"
+
+	// 文本
+	if _, err := mapper.Map(dto.ChatCompletionChunk{
+		ID: "chatcmpl-1", Model: "gpt-4",
+		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{Role: "assistant", Content: "Hi"}}},
+	}); err != nil {
+		t.Fatalf("content map: %v", err)
+	}
+
+	// finish：Delta == nil
+	finishEvents, err := mapper.Map(dto.ChatCompletionChunk{
+		ID: "chatcmpl-1", Model: "gpt-4",
+		Choices: []dto.ChunkChoice{{Index: 0, Delta: nil, FinishReason: &stop}},
+	})
+	if err != nil {
+		t.Fatalf("finish map: %v", err)
+	}
+	foundBlockStop := false
+	foundMessageStop := false
+	for _, ev := range finishEvents {
+		if ev.Type == "content_block_stop" {
+			foundBlockStop = true
+		}
+		if ev.Type == "message_stop" {
+			foundMessageStop = true
+		}
+	}
+	if !foundBlockStop {
+		t.Fatalf("expected content_block_stop on finish with nil delta, got %+v", finishEvents)
+	}
+	if foundMessageStop {
+		t.Fatalf("should not message_stop before usage, got %+v", finishEvents)
+	}
+
+	// usage-only
+	usageEvents, err := mapper.Map(dto.ChatCompletionChunk{
+		ID: "chatcmpl-1", Model: "gpt-4",
+		Choices: []dto.ChunkChoice{},
+		Usage:   &dto.Usage{PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12},
+	})
+	if err != nil {
+		t.Fatalf("usage map: %v", err)
+	}
+	foundDeltaUsage := false
+	foundStop := false
+	for _, ev := range usageEvents {
+		if ev.Type == "message_delta" && ev.Usage != nil &&
+			ev.Usage.InputTokens == 10 && ev.Usage.OutputTokens == 2 {
+			foundDeltaUsage = true
+		}
+		if ev.Type == "message_stop" {
+			foundStop = true
+		}
+	}
+	if !foundDeltaUsage || !foundStop {
+		t.Fatalf("expected message_delta.usage + message_stop, got %+v", usageEvents)
+	}
+
+	// Flush 幂等
+	flushEvents, err := mapper.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if len(flushEvents) != 0 {
+		t.Fatalf("Flush after stop should be empty, got %+v", flushEvents)
+	}
+}
+
+// TestChatToClaude_FlushEmptyAndPending 空流不产出；pending 无 usage 时 Flush 收尾
+func TestChatToClaude_FlushEmptyAndPending(t *testing.T) {
+	empty := newChatToClaudeStreamMapper("")
+	ev, err := empty.Flush()
+	if err != nil {
+		t.Fatalf("empty Flush: %v", err)
+	}
+	if len(ev) != 0 {
+		t.Fatalf("empty Flush should be nil, got %+v", ev)
+	}
+
+	mapper := newChatToClaudeStreamMapper("")
+	stop := "stop"
+	_, _ = mapper.Map(dto.ChatCompletionChunk{
+		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{Content: "x"}}},
+	})
+	_, _ = mapper.Map(dto.ChatCompletionChunk{
+		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{}, FinishReason: &stop}},
+	})
+	ev, err = mapper.Flush()
+	if err != nil {
+		t.Fatalf("pending Flush: %v", err)
+	}
+	foundStop := false
+	for _, e := range ev {
+		if e.Type == "message_stop" {
+			foundStop = true
+		}
+	}
+	if !foundStop {
+		t.Fatalf("pending Flush should emit message_stop, got %+v", ev)
+	}
+}
+
+// TestChatToResponses_FinishNilDeltaThenUsage 延迟 completed + total_tokens 回退
+func TestChatToResponses_FinishNilDeltaThenUsage(t *testing.T) {
+	mapper := newChatToResponsesStreamMapper("resp-1", "gpt-4o")
+	stop := "stop"
+
+	_, _ = mapper.Map(dto.ChatCompletionChunk{
+		ID: "chatcmpl-1", Model: "gpt-4o",
+		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{Content: "Hi"}}},
+	})
+
+	// finish with nil delta，无 usage → pending，不 completed
+	finishEvents, err := mapper.Map(dto.ChatCompletionChunk{
+		Choices: []dto.ChunkChoice{{Index: 0, Delta: nil, FinishReason: &stop}},
+	})
+	if err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	for _, e := range finishEvents {
+		if e.Type == "response.completed" {
+			t.Fatalf("should not complete before usage, got %+v", finishEvents)
+		}
+	}
+
+	// usage-only：TotalTokens=0 时应相加
+	usageEvents, err := mapper.Map(dto.ChatCompletionChunk{
+		Choices: []dto.ChunkChoice{},
+		Usage:   &dto.Usage{PromptTokens: 7, CompletionTokens: 3, TotalTokens: 0},
+	})
+	if err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+	found := false
+	for _, e := range usageEvents {
+		if e.Type != "response.completed" {
+			continue
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(e.Response, &resp); err != nil {
+			t.Fatalf("unmarshal completed: %v", err)
+		}
+		usage, _ := resp["usage"].(map[string]any)
+		if usage == nil {
+			t.Fatalf("completed missing usage: %v", resp)
+		}
+		// JSON numbers are float64
+		if usage["input_tokens"] != float64(7) || usage["output_tokens"] != float64(3) || usage["total_tokens"] != float64(10) {
+			t.Fatalf("usage = %v, want input=7 output=3 total=10", usage)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("expected response.completed with usage, got %+v", usageEvents)
+	}
+
+	flush, err := mapper.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if len(flush) != 0 {
+		t.Fatalf("Flush after completed should be empty")
+	}
+}
+
+// TestChatToResponses_FlushEmptyAndNoPending 空流 / 仅 delta 未 finish 不 completed
+func TestChatToResponses_FlushEmptyAndNoPending(t *testing.T) {
+	empty := newChatToResponsesStreamMapper("", "m")
+	ev, err := empty.Flush()
+	if err != nil || len(ev) != 0 {
+		t.Fatalf("empty Flush = %v err=%v", ev, err)
+	}
+
+	mapper := newChatToResponsesStreamMapper("resp-1", "m")
+	_, _ = mapper.Map(dto.ChatCompletionChunk{
+		Choices: []dto.ChunkChoice{{Index: 0, Delta: &dto.Delta{Content: "partial"}}},
+	})
+	ev, err = mapper.Flush()
+	if err != nil || len(ev) != 0 {
+		t.Fatalf("no-pending Flush should be empty, got %v err=%v", ev, err)
+	}
+}
+
+// TestBridgeClaudeToResponses_Usage 桥接：Anthropic usage → Chat → Responses completed.usage
+func TestBridgeClaudeToResponses_Usage(t *testing.T) {
+	m1 := newClaudeToChatStreamMapper("", "alias", 1)
+	m2 := newChatToResponsesStreamMapper("resp-bridge", "alias")
+
+	feed := []dto.ClaudeStreamEvent{
+		{
+			Type: "message_start",
+			Message: &dto.ClaudeMessageStart{
+				ID: "msg-1", Type: "message", Role: "assistant", Model: "claude",
+				Usage: dto.ClaudeUsage{InputTokens: 20},
+			},
+		},
+		{
+			Type:         "content_block_start",
+			Index:        0,
+			ContentBlock: &dto.ContentBlock{Type: "text", Text: ""},
+		},
+		{
+			Type:  "content_block_delta",
+			Index: 0,
+			Delta: &dto.ClaudeDelta{Type: "text_delta", Text: "ok"},
+		},
+		{Type: "content_block_stop", Index: 0},
+		{
+			Type:  "message_delta",
+			Delta: &dto.ClaudeDelta{StopReason: "end_turn"},
+			Usage: &dto.ClaudeUsage{OutputTokens: 5},
+		},
+		{Type: "message_stop"},
+	}
+
+	var all []dto.ResponsesStreamEvent
+	for _, e := range feed {
+		chunks, err := m1.Map(e)
+		if err != nil {
+			t.Fatalf("claude→chat: %v", err)
+		}
+		for _, ch := range chunks {
+			out, err := m2.Map(ch)
+			if err != nil {
+				t.Fatalf("chat→responses: %v", err)
+			}
+			all = append(all, out...)
+		}
+	}
+	// 若 finish 同包已带 usage，completed 应已发出；否则 Flush
+	flush, err := m2.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	all = append(all, flush...)
+
+	found := false
+	for _, e := range all {
+		if e.Type != "response.completed" {
+			continue
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(e.Response, &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		usage, _ := resp["usage"].(map[string]any)
+		if usage == nil {
+			t.Fatalf("completed without usage: %v", resp)
+		}
+		if usage["input_tokens"] != float64(20) || usage["output_tokens"] != float64(5) {
+			t.Fatalf("usage = %v, want input=20 output=5", usage)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("expected completed with usage in bridge, events=%+v", all)
+	}
+}
+
+// TestToolCallIndex 测试 Anthropic tool_call 流式 index/id 完整性
+func TestToolCallIndex(t *testing.T) {
+	mapper := newClaudeToChatStreamMapper("", "claude-3", 1234)
+
+	// content_block_start for tool_use
+	startChunks, err := mapper.Map(dto.ClaudeStreamEvent{
+		Type:  "content_block_start",
+		Index: 0,
+		ContentBlock: &dto.ContentBlock{
+			Type:  "tool_use",
+			ID:    "toolu_123",
+			Name:  "get_weather",
+			Input: map[string]any{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Map content_block_start error: %v", err)
+	}
+	if len(startChunks) != 1 {
+		t.Fatalf("len(startChunks) = %d, want 1", len(startChunks))
+	}
+
+	tc := startChunks[0].Choices[0].Delta.ToolCalls[0]
+	if tc.Index == nil || *tc.Index != 0 {
+		t.Fatalf("tool_call.index = %v, want 0", tc.Index)
+	}
+	if tc.ID != "toolu_123" {
+		t.Fatalf("tool_call.id = %q, want toolu_123", tc.ID)
+	}
+
+	// input_json_delta - 必须保留 index 和 id
+	deltaChunks, err := mapper.Map(dto.ClaudeStreamEvent{
+		Type:  "content_block_delta",
+		Index: 0,
+		Delta: &dto.ClaudeDelta{
+			Type:        "input_json_delta",
+			PartialJSON: ptr(`{"city": "Beijing"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Map content_block_delta error: %v", err)
+	}
+	if len(deltaChunks) != 1 {
+		t.Fatalf("len(deltaChunks) = %d, want 1", len(deltaChunks))
+	}
+
+	tc2 := deltaChunks[0].Choices[0].Delta.ToolCalls[0]
+	if tc2.Index == nil || *tc2.Index != 0 {
+		t.Fatalf("delta tool_call.index = %v, want 0", tc2.Index)
+	}
+	// ID 应该从 mapper 状态中恢复（已有 tool 的 ID）
+	if tc2.ID == "" {
+		t.Fatalf("delta tool_call.id is empty, want toolu_123")
 	}
 }

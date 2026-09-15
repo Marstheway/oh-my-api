@@ -38,6 +38,9 @@ func (c *OpenAIResponseCodec) EncodeRequest(outbound Format, req any, upstreamMo
 	case FormatOpenAIResponse:
 		clone := *responseReq
 		clone.Model = upstreamModel
+		if needsDeepSeekCompat {
+			clone = *applyDeepSeekOpenAIResponseCompat(&clone, deepSeekResponsesThinkingEnabled(responseReq, upstreamModel))
+		}
 		return json.Marshal(&clone)
 	case FormatOpenAIChat:
 		chatReq, err := convertResponseRequestToChatRequest(responseReq, upstreamModel)
@@ -45,9 +48,9 @@ func (c *OpenAIResponseCodec) EncodeRequest(outbound Format, req any, upstreamMo
 			return nil, WrapConversionError("encode_request", "response_to_chat",
 				FormatOpenAIResponse, FormatOpenAIChat, "request_conversion", err)
 		}
-		// DeepSeek 兼容：为 OpenAI chat 格式补 reasoning_content
+		// DeepSeek 兼容：补齐 reasoning_content，并仅在推理模式下降级强制工具选择。
 		if needsDeepSeekCompat {
-			chatReq = cloneChatRequestWithDeepSeekCompat(chatReq)
+			chatReq = applyDeepSeekOpenAIChatRequestCompat(chatReq, deepSeekResponsesThinkingEnabled(responseReq, upstreamModel))
 		}
 		return json.Marshal(chatReq)
 	case FormatAnthropicMessages:
@@ -81,19 +84,23 @@ func (c *OpenAIResponseCodec) EncodeRequest(outbound Format, req any, upstreamMo
 }
 
 func (c *OpenAIResponseCodec) WriteResponse(ctx *gin.Context, outbound Format, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
+	return c.WriteResponseTo(ctx.Writer, outbound, resp, isStream, counter, rmc)
+}
+
+func (c *OpenAIResponseCodec) WriteResponseTo(w http.ResponseWriter, outbound Format, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
 	switch outbound {
 	case FormatOpenAIResponse:
 		// 直通：直接把上游 Responses API 响应写回客户端，同时统计 token/latency。
-		return passThroughResponsesResponse(ctx, resp, isStream, counter, rmc)
+		return passThroughResponsesResponse(w, resp, isStream, counter, rmc)
 	case FormatOpenAIChat:
 		if isStream {
-			if err := writeOpenAIChatStreamAsResponses(ctx, resp, counter, rmc.RequestedModel); err != nil {
+			if err := writeOpenAIChatStreamAsResponses(w, resp, counter, rmc.RequestedModel); err != nil {
 				return WrapConversionError("write_response", "chat_to_response",
 					FormatOpenAIChat, FormatOpenAIResponse, "stream_conversion", err)
 			}
 			return nil
 		}
-		if err := writeOpenAIChatResponseAsResponses(ctx, resp, counter, rmc); err != nil {
+		if err := writeOpenAIChatResponseAsResponses(w, resp, counter, rmc); err != nil {
 			return WrapConversionError("write_response", "chat_to_response",
 				FormatOpenAIChat, FormatOpenAIResponse, "response_conversion", err)
 		}
@@ -101,7 +108,7 @@ func (c *OpenAIResponseCodec) WriteResponse(ctx *gin.Context, outbound Format, r
 	case FormatAnthropicMessages:
 		if isStream {
 			// Event-by-event bridge: ClaudeEvent -> ChatChunk -> ResponsesEvent -> flush
-			return writeAnthropicStreamAsResponsesStream(ctx, resp, counter, rmc.RequestedModel)
+			return writeAnthropicStreamAsResponsesStream(w, resp, counter, rmc.RequestedModel)
 		}
 		// 非流式：读取 claude body → chat 对象 → responses 对象 → 写回
 		body, err := io.ReadAll(resp.Body)
@@ -123,13 +130,12 @@ func (c *OpenAIResponseCodec) WriteResponse(ctx *gin.Context, outbound Format, r
 		if rmc.RequestedModel != "" {
 			responsesResp.Model = rmc.RequestedModel
 		}
-		ctx.JSON(http.StatusOK, responsesResp)
-		return nil
+		return writeJSON(w, http.StatusOK, responsesResp)
 	case FormatOllamaChat:
 		if isStream {
-			return writeOllamaChatStreamAsResponsesStream(ctx, resp, counter, rmc)
+			return writeOllamaChatStreamAsResponsesStream(w, resp, counter, rmc)
 		}
-		return writeOllamaChatResponseAsResponses(ctx, resp, counter, rmc)
+		return writeOllamaChatResponseAsResponses(w, resp, counter, rmc)
 	default:
 		return fmt.Errorf("unsupported outbound format: %s", outbound)
 	}

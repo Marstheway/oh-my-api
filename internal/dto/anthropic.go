@@ -137,6 +137,7 @@ type ClaudeStreamEvent struct {
 	Delta        *ClaudeDelta        `json:"delta,omitempty"`
 	ContentBlock *ContentBlock       `json:"content_block,omitempty"`
 	Message      *ClaudeMessageStart `json:"message,omitempty"`
+	Usage        *ClaudeUsage        `json:"usage,omitempty"`
 }
 
 type ClaudeDelta struct {

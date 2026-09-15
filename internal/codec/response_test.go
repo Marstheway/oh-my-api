@@ -834,7 +834,7 @@ func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_NonStream_Inval
 	ctx, _ := newTestContext()
 
 	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, nil, ResponseModelContext{})
-	assertConversionError(t, err, "response_to_chat", "response_unmarshal", FormatOpenAIResponse, FormatAnthropicMessages)
+	assertConversionError(t, err, "response_to_chat", "response_read", FormatOpenAIResponse, FormatAnthropicMessages)
 }
 
 func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_NonStream_ConversionErrorWrapped(t *testing.T) {
@@ -1029,7 +1029,7 @@ func TestMapClaudeEventToChatChunks_MessageStopEmitsFinish(t *testing.T) {
 }
 
 func TestMapChatChunkToClaudeEvents_TextDelta(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 	chunk := dto.ChatCompletionChunk{
 		ID:      "chatcmpl-1",
 		Object:  "chat.completion.chunk",
@@ -1055,7 +1055,7 @@ func TestMapChatChunkToClaudeEvents_TextDelta(t *testing.T) {
 }
 
 func TestMapChatChunkToClaudeEvents_TextAfterToolUsesAllocatedTextIndex(t *testing.T) {
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 	tcIdx0 := 0
 
 	toolChunk := dto.ChatCompletionChunk{
@@ -1105,7 +1105,7 @@ func TestMapChatChunkToClaudeEvents_TextAfterToolUsesAllocatedTextIndex(t *testi
 
 func TestMapChatChunkToClaudeEvents_ToolArgumentContinuationUsesChunkIndex(t *testing.T) {
 	tcIdx7 := 7
-	mapper := newChatToClaudeStreamMapper()
+	mapper := newChatToClaudeStreamMapper("")
 
 	startChunk := dto.ChatCompletionChunk{
 		ID:      "chatcmpl-1",
@@ -2044,6 +2044,122 @@ func TestPassThroughResponsesResponse_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestPassThroughResponsesResponse_NonStreamSSEBody(t *testing.T) {
+	codec := &OpenAIResponseCodec{}
+	sseBody := "" +
+		"event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-sse\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"upstream-hy3\"}}\n\n" +
+		"event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-sse\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"upstream-hy3\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n"
+	resp := newResponse(http.StatusOK, sseBody, map[string]string{"Content-Type": "text/event-stream"})
+	ctx, w := newTestContext()
+	counter := token.NewStreamCounter(0)
+
+	err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter, ResponseModelContext{RequestedModel: "hy3-ioa"})
+	if err != nil {
+		t.Fatalf("expected SSE non-stream body to be aggregated, got error: %v", err)
+	}
+
+	var out dto.ResponsesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("failed to parse response: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "hy3-ioa" {
+		t.Fatalf("model = %q, want %q", out.Model, "hy3-ioa")
+	}
+	if got := extractOutputTextFromResponses(&out); got != "ok" {
+		t.Fatalf("output text = %q, want %q", got, "ok")
+	}
+}
+
+func TestWriteOpenAIResponseAsChatResponse_NonStreamSSEBody(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	sseBody := "" +
+		"event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-sse\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"upstream-hy3\"}}\n\n" +
+		"event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-sse\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"upstream-hy3\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n"
+	resp := newResponse(http.StatusOK, sseBody, map[string]string{"Content-Type": "text/event-stream"})
+	ctx, w := newTestContext()
+	counter := token.NewStreamCounter(0)
+
+	err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter, ResponseModelContext{RequestedModel: "hy3-ioa"})
+	if err != nil {
+		t.Fatalf("expected SSE non-stream body to be aggregated before response->chat conversion, got error: %v", err)
+	}
+
+	var out dto.ChatCompletionResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("failed to parse response: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "hy3-ioa" {
+		t.Fatalf("model = %q, want %q", out.Model, "hy3-ioa")
+	}
+	if len(out.Choices) != 1 || out.Choices[0].Message == nil || out.Choices[0].Message.Content != "ok" {
+		t.Fatalf("unexpected chat response: %+v", out)
+	}
+}
+
+func TestAnthropicMessagesCodec_WriteResponse_FromOpenAIResponse_NonStreamSSEBody(t *testing.T) {
+	anthropicCodec := &AnthropicMessagesCodec{}
+	sseBody := "" +
+		"event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-sse\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"upstream-hy3\"}}\n\n" +
+		"event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-sse\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"upstream-hy3\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n"
+	resp := newResponse(http.StatusOK, sseBody, map[string]string{"Content-Type": "text/event-stream"})
+	ctx, w := newTestContext()
+	counter := token.NewStreamCounter(0)
+
+	err := anthropicCodec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter, ResponseModelContext{RequestedModel: "hy3-ioa"})
+	if err != nil {
+		t.Fatalf("expected SSE non-stream body to be aggregated before response->anthropic conversion, got error: %v", err)
+	}
+
+	var out dto.ClaudeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("failed to parse response: %v, body=%s", err, w.Body.String())
+	}
+	if out.Model != "hy3-ioa" {
+		t.Fatalf("model = %q, want %q", out.Model, "hy3-ioa")
+	}
+	if out.Type != "message" {
+		t.Fatalf("type = %q, want %q", out.Type, "message")
+	}
+	if len(out.Content) == 0 {
+		t.Fatalf("content should not be empty")
+	}
+}
+
+func TestPassThroughResponsesResponse_NonStreamSSEBody_TokenCount(t *testing.T) {
+	codec := &OpenAIResponseCodec{}
+	sseBody := "" +
+		"event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-sse\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"upstream-hy3\"}}\n\n" +
+		"event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello world token counting\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-sse\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"upstream-hy3\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n"
+	resp := newResponse(http.StatusOK, sseBody, map[string]string{"Content-Type": "text/event-stream"})
+	ctx, _ := newTestContext()
+	counter := token.NewStreamCounter(0)
+
+	err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, false, counter, ResponseModelContext{RequestedModel: "hy3-ioa"})
+	if err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	if got := counter.GetOutputTokens(); got == 0 {
+		t.Fatalf("output tokens should not be 0 after SSE non-stream aggregation")
+	}
+}
+
 // ============================================================================
 // P1-2: Header preservation behavior for passthrough functions
 // ============================================================================
@@ -2408,6 +2524,101 @@ func TestPassThroughOpenAIStream_UsesRequestedModel(t *testing.T) {
 	}
 }
 
+// TestPassThroughOpenAIStream_ConvertsOpenCodeInferenceCost verifies that OpenCode's
+// private inference-cost trailer is not forwarded, and is rewritten as a standard
+// usage chunk that strict clients can deserialize.
+func TestPassThroughOpenAIStream_ConvertsOpenCodeInferenceCost(t *testing.T) {
+	streamBody := "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"upstream-gpt\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"choices\":[],\"cost\":\"0.00009884\",\"model\":\"upstream-gpt\",\"normalizedUsage\":{\"inputTokens\":584,\"outputTokens\":61,\"reasoningTokens\":17,\"cacheReadTokens\":3,\"cacheWrite5mTokens\":0,\"cacheWrite1hTokens\":0},\"x-opencode-type\":\"inference-cost\"}\n\n" +
+		"data: [DONE]\n\n"
+
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, streamBody, map[string]string{"Content-Type": "text/event-stream"})
+	ctx, w := newTestContext()
+	rmc := ResponseModelContext{RequestedModel: "coding-low"}
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, nil, rmc); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "x-opencode-type") || strings.Contains(body, "normalizedUsage") || strings.Contains(body, `"cost"`) {
+		t.Fatalf("private opencode fields must not be forwarded, body=%s", body)
+	}
+	if !strings.Contains(body, `"prompt_tokens":584`) {
+		t.Fatalf("expected standard prompt_tokens from normalizedUsage, body=%s", body)
+	}
+	if !strings.Contains(body, `"completion_tokens":61`) {
+		t.Fatalf("expected standard completion_tokens from normalizedUsage, body=%s", body)
+	}
+	if !strings.Contains(body, `"total_tokens":645`) {
+		t.Fatalf("expected total_tokens = input+output, body=%s", body)
+	}
+	if !strings.Contains(body, `"cached_tokens":3`) {
+		t.Fatalf("expected prompt_tokens_details.cached_tokens, body=%s", body)
+	}
+	if !strings.Contains(body, `"reasoning_tokens":17`) {
+		t.Fatalf("expected completion_tokens_details.reasoning_tokens, body=%s", body)
+	}
+	if !strings.Contains(body, `"id":"chatcmpl-1"`) {
+		t.Fatalf("usage chunk must reuse last chunk id, body=%s", body)
+	}
+	if !strings.Contains(body, `"model":"coding-low"`) {
+		t.Fatalf("usage chunk must use requested model, body=%s", body)
+	}
+
+	// Ensure the converted usage line is itself a valid ChatCompletionChunk with required id.
+	var sawUsage bool
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" || data == "" {
+			continue
+		}
+		var chunk dto.ChatCompletionChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			t.Fatalf("client-facing chunk must unmarshal: %v data=%s", err, data)
+		}
+		if chunk.ID == "" {
+			t.Fatalf("client-facing chunk missing required id: %s", data)
+		}
+		if chunk.Usage != nil {
+			sawUsage = true
+		}
+	}
+	if !sawUsage {
+		t.Fatalf("expected a usage chunk in stream, body=%s", body)
+	}
+}
+
+// TestPassThroughOpenAIStream_DropsOpenCodeInferenceCostWithoutBaseChunk drops the
+// private event when there is no prior chunk to supply required id/object fields.
+func TestPassThroughOpenAIStream_DropsOpenCodeInferenceCostWithoutBaseChunk(t *testing.T) {
+	streamBody := "data: {\"choices\":[],\"cost\":\"0.01\",\"model\":\"upstream\",\"normalizedUsage\":{\"inputTokens\":1,\"outputTokens\":1,\"reasoningTokens\":0,\"cacheReadTokens\":0},\"x-opencode-type\":\"inference-cost\"}\n\n" +
+		"data: [DONE]\n\n"
+
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, streamBody, map[string]string{"Content-Type": "text/event-stream"})
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIChat, resp, true, nil, ResponseModelContext{RequestedModel: "coding-low"}); err != nil {
+		t.Fatalf("WriteResponse error: %v", err)
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "x-opencode-type") || strings.Contains(body, "normalizedUsage") {
+		t.Fatalf("private event must be dropped, body=%s", body)
+	}
+	if strings.Contains(body, "prompt_tokens") {
+		t.Fatalf("should not invent usage without base chunk id, body=%s", body)
+	}
+	if !strings.Contains(body, "[DONE]") {
+		t.Fatalf("stream must still end with [DONE], body=%s", body)
+	}
+}
+
 // TestPassThroughAnthropicStream_UsesRequestedModel verifies that a direct Anthropic stream
 // passthrough rewrites model in the message_start event.
 func TestPassThroughAnthropicStream_UsesRequestedModel(t *testing.T) {
@@ -2650,5 +2861,130 @@ func TestConvertOpenAIResponseToChat_PreservesRefusalWhenNoOutputText(t *testing
 	}
 	if out.Choices[0].Message.Content != "cannot comply" {
 		t.Fatalf("content = %q, want cannot comply", out.Choices[0].Message.Content)
+	}
+}
+
+// Anthropic 流带 message_start.usage + message_delta.usage，验证 Chat 写回 IncludeUsage 门闩
+const claudeStreamWithUsageBody = "" +
+	"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3\",\"content\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\n\n" +
+	"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+	"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n" +
+	"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+	"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
+	"data: {\"type\":\"message_stop\"}\n\n"
+
+func TestOpenAIChatCodec_WriteResponse_FromAnthropic_IncludeUsageTrue(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, claudeStreamWithUsageBody, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, nil, ResponseModelContext{
+		RequestedModel: "alias-model",
+		IncludeUsage:   true,
+	}); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"prompt_tokens":100`) {
+		t.Fatalf("IncludeUsage=true should emit usage, body=%s", body)
+	}
+	if !strings.Contains(body, `"completion_tokens":3`) {
+		t.Fatalf("missing completion_tokens, body=%s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("missing [DONE], body=%s", body)
+	}
+	// base finish chunk 不应残留 usage 字段混在 choices 上之后仍合理；usage-only 的 choices 为空
+	if !strings.Contains(body, `"choices":[]`) {
+		t.Fatalf("expected usage-only chunk with empty choices, body=%s", body)
+	}
+}
+
+func TestOpenAIChatCodec_WriteResponse_FromAnthropic_IncludeUsageFalse(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, claudeStreamWithUsageBody, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatAnthropicMessages, resp, true, nil, ResponseModelContext{
+		RequestedModel: "alias-model",
+		IncludeUsage:   false,
+	}); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, `"prompt_tokens"`) || strings.Contains(body, `"completion_tokens"`) {
+		t.Fatalf("IncludeUsage=false must not emit usage fields, body=%s", body)
+	}
+	if strings.Contains(body, `"choices":[]`) {
+		t.Fatalf("IncludeUsage=false must not emit empty choices usage-only chunk, body=%s", body)
+	}
+	if !strings.Contains(body, "Hi") {
+		t.Fatalf("content should still stream, body=%s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("missing [DONE], body=%s", body)
+	}
+}
+
+// Responses 流带 response.completed.usage，验证 Chat 写回 IncludeUsage 门闩
+const responsesStreamWithUsageBody = "" +
+	"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-u\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"gpt-4o\"}}\n\n" +
+	"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg-u\",\"status\":\"in_progress\",\"role\":\"assistant\",\"content\":[]}}\n\n" +
+	"data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n" +
+	"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hi\"}\n\n" +
+	"data: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"Hi\"}\n\n" +
+	"data: {\"type\":\"response.content_part.done\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"Hi\"}}\n\n" +
+	"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg-u\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hi\"}]}}\n\n" +
+	"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-u\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-4o\",\"usage\":{\"input_tokens\":80,\"output_tokens\":4,\"total_tokens\":84,\"input_tokens_details\":{\"cached_tokens\":10},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}}\n\n"
+
+func TestOpenAIChatCodec_WriteResponse_FromResponses_IncludeUsageTrue(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, responsesStreamWithUsageBody, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, nil, ResponseModelContext{
+		RequestedModel: "alias-model",
+		IncludeUsage:   true,
+	}); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"prompt_tokens":80`) {
+		t.Fatalf("IncludeUsage=true should emit usage, body=%s", body)
+	}
+	if !strings.Contains(body, `"completion_tokens":4`) {
+		t.Fatalf("missing completion_tokens, body=%s", body)
+	}
+	if !strings.Contains(body, `"choices":[]`) {
+		t.Fatalf("expected usage-only chunk with empty choices, body=%s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("missing [DONE], body=%s", body)
+	}
+}
+
+func TestOpenAIChatCodec_WriteResponse_FromResponses_IncludeUsageFalse(t *testing.T) {
+	codec := &OpenAIChatCodec{}
+	resp := newResponse(http.StatusOK, responsesStreamWithUsageBody, nil)
+	ctx, w := newTestContext()
+
+	if err := codec.WriteResponse(ctx, FormatOpenAIResponse, resp, true, nil, ResponseModelContext{
+		RequestedModel: "alias-model",
+		IncludeUsage:   false,
+	}); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, `"prompt_tokens"`) || strings.Contains(body, `"completion_tokens"`) {
+		t.Fatalf("IncludeUsage=false must not emit usage fields, body=%s", body)
+	}
+	if strings.Contains(body, `"choices":[]`) {
+		t.Fatalf("IncludeUsage=false must not emit empty choices usage-only chunk, body=%s", body)
+	}
+	if !strings.Contains(body, "Hi") {
+		t.Fatalf("content should still stream, body=%s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("missing [DONE], body=%s", body)
 	}
 }

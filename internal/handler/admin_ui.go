@@ -141,6 +141,70 @@ func (h *AdminUIHandler) Redirects(c *gin.Context) {
 	}
 }
 
+// Rules 渲染 Rules 页面
+// GET /admin/rules
+func (h *AdminUIHandler) Rules(c *gin.Context) {
+	// 重新解析仅包含 rules 的模板集
+	tmpl, err := h.tmpl.Clone()
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to clone template: %v", err)
+		return
+	}
+
+	// 解析 rules 模板
+	rulesContent, err := adminui.FS.ReadFile("templates/rules.html")
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to read rules template: %v", err)
+		return
+	}
+
+	tmpl, err = tmpl.Parse(string(rulesContent))
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to parse rules template: %v", err)
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	data := gin.H{
+		"Authenticated": true,
+		"Page":          "rules",
+	}
+	if err := tmpl.Execute(c.Writer, data); err != nil {
+		c.String(http.StatusInternalServerError, "Failed to render rules page: %v", err)
+	}
+}
+
+// AuthKeys 渲染 Auth Keys 页面
+// GET /admin/auth-keys
+func (h *AdminUIHandler) AuthKeys(c *gin.Context) {
+	tmpl, err := h.tmpl.Clone()
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to clone template: %v", err)
+		return
+	}
+
+	authKeysContent, err := adminui.FS.ReadFile("templates/auth-keys.html")
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to read auth-keys template: %v", err)
+		return
+	}
+
+	tmpl, err = tmpl.Parse(string(authKeysContent))
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to parse auth-keys template: %v", err)
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	data := gin.H{
+		"Authenticated": true,
+		"Page":          "auth-keys",
+	}
+	if err := tmpl.Execute(c.Writer, data); err != nil {
+		c.String(http.StatusInternalServerError, "Failed to render auth-keys page: %v", err)
+	}
+}
+
 // Providers 渲染 Providers 页面
 // GET /admin/providers
 func (h *AdminUIHandler) Providers(c *gin.Context) {
@@ -171,5 +235,36 @@ func (h *AdminUIHandler) Providers(c *gin.Context) {
 	}
 	if err := tmpl.Execute(c.Writer, data); err != nil {
 		c.String(http.StatusInternalServerError, "Failed to render providers page: %v", err)
+	}
+}
+
+// Cascade 渲染 Cascade 页面
+// GET /admin/cascade
+func (h *AdminUIHandler) Cascade(c *gin.Context) {
+	tmpl, err := h.tmpl.Clone()
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to clone template: %v", err)
+		return
+	}
+
+	cascadeContent, err := adminui.FS.ReadFile("templates/cascade.html")
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to read cascade template: %v", err)
+		return
+	}
+
+	tmpl, err = tmpl.Parse(string(cascadeContent))
+	if err != nil {
+		c.String(http.StatusInternalServerError, "Failed to parse cascade template: %v", err)
+		return
+	}
+
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	data := gin.H{
+		"Authenticated": true,
+		"Page":          "cascade",
+	}
+	if err := tmpl.Execute(c.Writer, data); err != nil {
+		c.String(http.StatusInternalServerError, "Failed to render cascade page: %v", err)
 	}
 }

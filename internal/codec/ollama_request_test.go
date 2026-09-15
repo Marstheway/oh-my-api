@@ -716,11 +716,12 @@ func TestRejectsMultimodalForOllamaChat_AnthropicMessages(t *testing.T) {
 	}
 }
 
-// TestRejectsMultimodalForOllamaChat_OpenAIResponse 测试 Responses API 非文本 content part 在 encode 阶段失败
+// TestRejectsMultimodalForOllamaChat_OpenAIResponse 测试 Responses API 多模态 input_image
+// 经 Response→Chat 映射后，在 Chat→Ollama 阶段被拒绝。
 func TestRejectsMultimodalForOllamaChat_OpenAIResponse(t *testing.T) {
 	c := &OpenAIResponseCodec{}
-	// 构造包含 image_url 类型 content part 的 input
-	inputJSON := json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"image_url","url":"https://example.com/img.png"}]}]`)
+	// 使用 Responses 标准 input_image part（image_url 为字符串）
+	inputJSON := json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"https://example.com/img.png"}]}]`)
 	req := &dto.ResponsesRequest{
 		Model: "gpt-4o",
 		Input: inputJSON,
@@ -728,7 +729,7 @@ func TestRejectsMultimodalForOllamaChat_OpenAIResponse(t *testing.T) {
 
 	_, err := c.EncodeRequest(FormatOllamaChat, req, "llama3.2:latest", false)
 	if err == nil {
-		t.Fatal("expected error for unsupported content part, got nil")
+		t.Fatal("expected error for multimodal content to ollama, got nil")
 	}
 	var convErr *ConversionError
 	if !errors.As(err, &convErr) {

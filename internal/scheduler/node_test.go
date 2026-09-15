@@ -16,10 +16,10 @@ import (
 
 // newTestSchedulerForNode 创建带给定 providers map 的 Scheduler。
 func newTestSchedulerForNode(providers map[string]config.ProviderConfig) *Scheduler {
-	client := provider.NewClient(providers, 120*time.Second, 0)
+	client := provider.NewClient(providers, 120*time.Second, 0, 0)
 	rl := ratelimit.NewManager(providers)
 	h := health.NewChecker(3, 30*time.Second)
-	return New(rl, client, h, 500*time.Millisecond, 0)
+	return New(rl, client, h, 500*time.Millisecond, 0, 0)
 }
 
 // makeLeafNode 构建一个叶子 RunNode，每次调用 RequestFactory 时返回独立请求。
@@ -97,12 +97,9 @@ func TestExecuteNode_NestedGroup_FailoverChildSuccess(t *testing.T) {
 	}
 }
 
-
-
 // -----------------------------------------------------------------
 // Test 4：子 group hard failure 不触发 group 的 fallback
 // -----------------------------------------------------------------
-
 
 // -----------------------------------------------------------------
 // Test 6：并发竞速 - 子 group 先软失败，另一个 leaf 后成功
@@ -226,7 +223,6 @@ func TestExecuteNode_NestedGroup_FailoverWithLoadbalanceChild(t *testing.T) {
 		t.Fatalf("FailureKind = %q, want success", result.FailureKind)
 	}
 }
-
 
 // -----------------------------------------------------------------
 // 辅助：newTestSchedulerForNode 已在上方定义

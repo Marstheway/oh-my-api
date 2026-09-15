@@ -58,6 +58,7 @@ type ChatCompletionRequest struct {
 	// Provider 特有字段 (透传)
 	Reasoning              json.RawMessage `json:"reasoning,omitempty"`
 	Usage                  json.RawMessage `json:"usage,omitempty"`
+	Thinking               json.RawMessage `json:"thinking,omitempty"` // DeepSeek: {"type":"enabled|disabled"}
 	EnableThinking         json.RawMessage `json:"enable_thinking,omitempty"`
 	Think                  json.RawMessage `json:"think,omitempty"`
 	THINKING               json.RawMessage `json:"THINKING,omitempty"`
@@ -71,14 +72,15 @@ type ChatCompletionRequest struct {
 }
 
 type Message struct {
-	Role             string     `json:"role" binding:"required"`
-	Content          any        `json:"content"`
-	Name             string     `json:"name,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
-	ReasoningContent *string    `json:"reasoning_content,omitempty"`
-	Reasoning        *string    `json:"reasoning,omitempty"`
-	Prefix           *bool      `json:"prefix,omitempty"`
+	Role             string        `json:"role" binding:"required"`
+	Content          any           `json:"content"`
+	Name             string        `json:"name,omitempty"`
+	FunctionCall     *ToolCallFunc `json:"function_call,omitempty"`
+	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
+	ToolCallID       string        `json:"tool_call_id,omitempty"`
+	ReasoningContent *string       `json:"reasoning_content,omitempty"`
+	Reasoning        *string       `json:"reasoning,omitempty"`
+	Prefix           *bool         `json:"prefix,omitempty"`
 }
 
 type MediaContent struct {
@@ -155,7 +157,7 @@ type ResMessage struct {
 
 type ToolCall struct {
 	Index    *int         `json:"index,omitempty"`
-	ID       string       `json:"id"`
+	ID       string       `json:"id,omitempty"`
 	Type     string       `json:"type,omitempty"`
 	Function ToolCallFunc `json:"function"`
 }
@@ -169,8 +171,8 @@ func (tc ToolCall) GetIndex() int {
 }
 
 type ToolCallFunc struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 type Delta struct {

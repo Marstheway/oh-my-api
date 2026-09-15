@@ -26,7 +26,7 @@ func TestProbeStreamPrefix_PrefillTimeout_ZeroEvents(t *testing.T) {
 	}()
 
 	// 使用极短的 prefillTimeout (50ms)，应该在事件发送前超时
-	kind, reason, _, err := probeStreamPrefix(resp, "openai", 50*time.Millisecond, 0)
+	kind, reason, _, err := probeStreamPrefix(resp, "openai", 50*time.Millisecond, 0, time.Now())
 
 	if err != ErrPrefillTimeout {
 		t.Errorf("error = %v, want %v", err, ErrPrefillTimeout)
@@ -47,7 +47,7 @@ func TestProbeStreamPrefix_PrefillTimeout_HasEvents(t *testing.T) {
 	resp := newSchedulerHTTPResponse(http.StatusOK, "text/event-stream", body)
 
 	// 使用充足的 prefillTimeout (5s)，确保能收到事件
-	kind, reason, _, err := probeStreamPrefix(resp, "openai", 5*time.Second, 0)
+	kind, reason, _, err := probeStreamPrefix(resp, "openai", 5*time.Second, 0, time.Now())
 	if err != nil {
 		t.Fatalf("probeStreamPrefix failed: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestProbeStreamPrefix_PrefillTimeoutLongerThanProbeWindow_KeepsWaiting(t *t
 		_ = writer.Close()
 	}()
 
-	kind, reason, _, err := probeStreamPrefix(resp, "openai", 2*time.Second, 0)
+	kind, reason, _, err := probeStreamPrefix(resp, "openai", 2*time.Second, 0, time.Now())
 	if err != nil {
 		t.Fatalf("probeStreamPrefix failed: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestProbeStreamPrefix_ProbeWindowStillDetectsSoftFailure(t *testing.T) {
 	body := "data: " + payload + "\n\n"
 	resp := newSchedulerHTTPResponse(http.StatusOK, "text/event-stream", body)
 
-	kind, reason, _, err := probeStreamPrefix(resp, "openai", 5*time.Second, 0)
+	kind, reason, _, err := probeStreamPrefix(resp, "openai", 5*time.Second, 0, time.Now())
 	if err != nil {
 		resp.Body.Close()
 		t.Fatalf("probeStreamPrefix failed: %v", err)
@@ -133,6 +133,72 @@ func TestProbeStreamPrefix_ProbeWindowStillDetectsSoftFailure(t *testing.T) {
 	}
 }
 
+func TestProbeStreamPrefix_UsesExternalAttemptStart(t *testing.T) {
+	// 验证 probeStreamPrefix 使用外部 attemptStart 计算 TTFT，而非内部重新计时。
+	// 模拟场景：transport 阶段产生了 200ms 延迟，SSE 事件到达很快。
+	// 预期 TTFT 应反映自 attemptStart 以来经过的时间（至少 200ms），
+	// 而不是 probeStreamPrefix 内部执行的时间（远小于 200ms）。
+
+	reader, writer := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       reader,
+	}
+
+	// attemptStart 设为 200ms 之前，模拟 transport 延迟
+	attemptStart := time.Now().Add(-200 * time.Millisecond)
+
+	// 在另一个 goroutine 中几乎立即发送事件
+	go func() {
+		_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n"))
+		_ = writer.Close()
+	}()
+
+	_, _, ttft, err := probeStreamPrefix(resp, "openai", 5*time.Second, 0, attemptStart)
+	if err != nil {
+		t.Fatalf("probeStreamPrefix failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// TTFT 应至少包含 200ms 的 transport 延迟
+	if ttft < 190*time.Millisecond {
+		t.Errorf("TTFT = %v, want at least 190ms (external attemptStart should be used, not internal probe time)", ttft)
+	}
+}
+
+func TestProbeStreamPrefix_UsesExternalAttemptStart_NotInternalTime(t *testing.T) {
+	// 验证 TTFT 不会误用 probeStreamPrefix 内部的时间点。
+	// 如果 attemptStart 是"未来"的时间（比实际执行晚），则返回的 TTFT 不应变为负数。
+
+	reader, writer := io.Pipe()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       reader,
+	}
+
+	// waitTime 确保 probe 内部等待至少这段时间
+	waitTime := 50 * time.Millisecond
+	go func() {
+		time.Sleep(waitTime)
+		_, _ = writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n"))
+		_ = writer.Close()
+	}()
+
+	// 用 time.Now() 作为正常 attemptStart
+	attemptStart := time.Now()
+	_, _, ttft, err := probeStreamPrefix(resp, "openai", 5*time.Second, 0, attemptStart)
+	if err != nil {
+		t.Fatalf("probeStreamPrefix failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// TTFT 应 >= waitTime（因为 attemptStart 在发送事件之前）
+	if ttft < waitTime {
+		t.Errorf("TTFT = %v, want at least %v", ttft, waitTime)
+	}
+}
 func TestIdleTimeoutReader_NormalRead(t *testing.T) {
 	reader, writer := io.Pipe()
 	r := &idleTimeoutReader{r: reader, timeout: 200 * time.Millisecond}

@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -80,10 +79,19 @@ func Responses(c *gin.Context) {
 	metrics.IncConcurrent()
 	start := time.Now()
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	keyName := c.GetString("key_name")
+	ctx, cancel := inboundRequestContext(c.Request.Context(), c.Request, keyName)
 	defer cancel()
 
-	rootNode, matErr := materializePlan(ctx, result.Plan, codec.FormatOpenAIResponse, inboundCodec, req, result.ModelGroup)
+	rootNode, matErr := materializePlan(ctx, result.Plan, materializeInput{
+		InboundFormat: codec.FormatOpenAIResponse,
+		InboundCodec:  inboundCodec,
+		RawReq:        req,
+		ModelGroup:    result.ModelGroup,
+		ClientModel:   originalModel,
+		KeyName:       keyName,
+		Rules:         cfg.Rules,
+	})
 	if matErr != nil {
 		metrics.DecConcurrent()
 		handleCodecError(c, errs.ProtocolOpenAI, "encode_request", matErr)
@@ -93,14 +101,14 @@ func Responses(c *gin.Context) {
 	resp, schedErr := sched.ExecuteNode(ctx, rootNode)
 	metrics.DecConcurrent()
 	if schedErr != nil {
-		recordRequestMetrics(c, "openai.responses", "openai.responses", result.ModelGroup, "", "", "error", time.Since(start), 0)
+		recordRequestMetrics(c, "openai.responses", result.ModelGroup, "", "", "", "error", time.Since(start), 0)
 		handleUpstreamError(c, errs.ProtocolOpenAI, schedErr)
 		return
 	}
 	defer resp.Response.Body.Close()
 
 	if resp.Response.StatusCode >= 400 {
-		recordRequestMetrics(c, "openai.responses", "openai.responses", result.ModelGroup, resp.Winner, resp.UpstreamModel, "error", time.Since(start), 0)
+		recordRequestMetrics(c, "openai.responses", result.ModelGroup, resp.Winner, resp.UpstreamModel, resp.OutboundProtocol, "error", time.Since(start), 0)
 		handleUpstreamResponseError(c, errs.ProtocolOpenAI, resp.Winner, resp.Response)
 		return
 	}
@@ -108,7 +116,7 @@ func Responses(c *gin.Context) {
 	c.Set("provider", resp.Winner)
 
 	latency := time.Since(start)
-	outboundFormat, reason, cost := findWinnerOutbound(result.Plan, resp.Winner, resp.UpstreamModel, codec.FormatOpenAIResponse)
+	outboundFormat, reason, cost := winnerOutboundFormat(resp, codec.FormatOpenAIResponse)
 
 	slog.Info("response",
 		"status", resp.Response.StatusCode,
@@ -138,10 +146,14 @@ func Responses(c *gin.Context) {
 	}
 
 	if writeErr := inboundCodec.WriteResponse(c, outboundFormat, resp.Response, req.Stream, counter, rmc); writeErr != nil {
-		handleCodecError(c, errs.ProtocolOpenAI, "write_response", writeErr)
+		if status, recordMetrics := handleWriteResponseError(c, errs.ProtocolOpenAI, writeErr, req.Stream, resp.Winner, resp.UpstreamModel, string(outboundFormat)); recordMetrics {
+			recordRequestMetrics(c, "openai.responses", result.ModelGroup, resp.Winner, resp.UpstreamModel, resp.OutboundProtocol, status, time.Since(start), resp.StreamTTFT)
+		}
 		return
 	}
 
-	recordRequestMetrics(c, "openai.responses", "openai.responses", result.ModelGroup, resp.Winner, resp.UpstreamModel, "success", latency, resp.StreamTTFT)
-	recordStats(c, resp.Winner, resp.UpstreamModel, counter.GetInputTokens(), counter.GetOutputTokens(), latency)
+	latency = time.Since(start)
+	recordRequestMetrics(c, "openai.responses", result.ModelGroup, resp.Winner, resp.UpstreamModel, resp.OutboundProtocol, "success", latency, resp.StreamTTFT)
+	recordStats(c, req.Model, resp.Winner, resp.UpstreamModel, counter.GetInputTokens(), counter.GetOutputTokens(), latency)
+	recordStreamDecodeMetrics(c, req.Stream, result.ModelGroup, resp.Winner, resp.UpstreamModel, counter.GetOutputTokens(), resp.StreamStartedAt)
 }

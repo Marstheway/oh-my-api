@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -193,5 +195,32 @@ model_groups:
 			t.Fatalf("exitFn(1) called (tokenizer init should have succeeded)\nsubprocess output:\n%s", string(output))
 		}
 		t.Fatalf("subprocess error: %v\nsubprocess output:\n%s", runErr, string(output))
+	}
+}
+
+func TestNewProviderClientUsesCurrentProviders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Providers: config.ProvidersConfig{Items: map[string]config.ProviderConfig{
+			"super-grok": {Endpoint: upstream.URL, Protocols: []string{"openai.responses"}},
+		}},
+	}
+	client := newProviderClient(cfg, time.Second, 0, 0)
+
+	req, err := http.NewRequest(http.MethodGet, upstream.URL+"/v1/models", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := client.Do("super-grok", req)
+	if err != nil {
+		t.Fatalf("client.Do(super-grok): %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }

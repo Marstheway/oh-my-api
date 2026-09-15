@@ -7,18 +7,16 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Marstheway/oh-my-api/internal/dto"
 	"github.com/Marstheway/oh-my-api/internal/token"
-	"github.com/gin-gonic/gin"
 )
 
-func passThroughOpenAIResponse(c *gin.Context, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
+func passThroughOpenAIResponse(w http.ResponseWriter, resp *http.Response, isStream bool, counter TokenCounter, rmc ResponseModelContext) error {
 	if isStream {
-		copyResponseHeaders(c.Writer.Header(), resp.Header)
-		c.Writer.WriteHeader(resp.StatusCode)
-		return passThroughOpenAIStream(c, resp, counter, rmc.RequestedModel)
+		copyResponseHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		return passThroughOpenAIStream(w, resp, counter, rmc.RequestedModel)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -44,46 +42,79 @@ func passThroughOpenAIResponse(c *gin.Context, resp *http.Response, isStream boo
 		return err
 	}
 
-	copyResponseHeaders(c.Writer.Header(), resp.Header)
+	copyResponseHeaders(w.Header(), resp.Header)
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	c.Data(resp.StatusCode, contentType, outBody)
-	return nil
+	return writeBody(w, resp.StatusCode, contentType, outBody)
 }
 
-func passThroughOpenAIStream(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
-	flusher, ok := c.Writer.(http.Flusher)
+func passThroughOpenAIStream(w http.ResponseWriter, resp *http.Response, counter TokenCounter, requestedModel string) (retErr error) {
+	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
 	}
 
+	var lastChunk dto.ChatCompletionChunk
+	sawTerminal := false
+	defer func() {
+		// 流已读到 EOF 但从未收到 [DONE] 或 finish_reason：上游中途断流。
+		if retErr == nil && !sawTerminal {
+			retErr = ErrStreamTruncated
+		}
+	}()
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
+		if err != nil && err != io.EOF {
 			return err
 		}
 
-		if strings.HasPrefix(line, "data: ") {
+		if line != "" && strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 			data = strings.TrimSuffix(data, "\n")
 			if data == "[DONE]" {
+				sawTerminal = true
 				if counter != nil {
 					if sc, ok2 := counter.(*token.StreamCounter); ok2 {
 						sc.ComputeOutputTokens()
 					}
 				}
-				_, _ = c.Writer.WriteString(line)
+				_, _ = io.WriteString(w, line)
 				flusher.Flush()
 				break
 			}
+
+			// OpenCode 私有计费事件：不透传，尽量归一为标准 usage chunk。
+			if isOpenCodeInferenceCostData(data) {
+				if usage, ok := openCodeInferenceCostToUsage(data); ok && lastChunk.ID != "" {
+					base := lastChunk
+					if requestedModel != "" {
+						base.Model = requestedModel
+					}
+					if base.Object == "" {
+						base.Object = "chat.completion.chunk"
+					}
+					out, marshalErr := json.Marshal(buildOpenAIStreamUsageChunk(base, usage))
+					if marshalErr == nil {
+						_, _ = fmt.Fprintf(w, "data: %s\n", out)
+						flusher.Flush()
+					}
+				}
+				continue
+			}
+
 			var chunk dto.ChatCompletionChunk
 			if jsonErr := json.Unmarshal([]byte(data), &chunk); jsonErr == nil {
+				if chunk.ID != "" {
+					lastChunk = chunk
+				}
+				for _, choice := range chunk.Choices {
+					if choice.FinishReason != nil && *choice.FinishReason != "" {
+						sawTerminal = true
+					}
+				}
 				if counter != nil {
 					if sc, ok2 := counter.(*token.StreamCounter); ok2 {
 						sc.AddOutputText(token.ExtractTextFromOpenAIChunk(&chunk))
@@ -91,16 +122,16 @@ func passThroughOpenAIStream(c *gin.Context, resp *http.Response, counter TokenC
 				}
 				if requestedModel != "" {
 					if rewrittenData, rewriteErr := rewriteTopLevelModel([]byte(data), requestedModel); rewriteErr == nil {
-						_, _ = fmt.Fprintf(c.Writer, "data: %s\n", rewrittenData)
+						_, _ = fmt.Fprintf(w, "data: %s\n", rewrittenData)
 						flusher.Flush()
 						continue
 					}
 				}
 			}
-			_, _ = c.Writer.WriteString(line)
+			_, _ = io.WriteString(w, line)
 			flusher.Flush()
-		} else {
-			_, _ = c.Writer.WriteString(line)
+		} else if line != "" {
+			_, _ = io.WriteString(w, line)
 			flusher.Flush()
 		}
 
@@ -112,7 +143,50 @@ func passThroughOpenAIStream(c *gin.Context, resp *http.Response, counter TokenC
 	return nil
 }
 
-func writeOpenAIResponseAsAnthropic(c *gin.Context, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
+// isOpenCodeInferenceCostData 识别 OpenCode 流末尾的私有计费事件。
+// 形如: {"choices":[],"cost":"...","normalizedUsage":{...},"x-opencode-type":"inference-cost"}
+func isOpenCodeInferenceCostData(data string) bool {
+	if !strings.Contains(data, "x-opencode-type") {
+		return false
+	}
+	var probe struct {
+		Type string `json:"x-opencode-type"`
+	}
+	if err := json.Unmarshal([]byte(data), &probe); err != nil {
+		return false
+	}
+	return probe.Type == "inference-cost"
+}
+
+// openCodeInferenceCostToUsage 将 OpenCode normalizedUsage 映射为标准 Chat usage。
+func openCodeInferenceCostToUsage(data string) (dto.Usage, bool) {
+	var event struct {
+		NormalizedUsage *struct {
+			InputTokens     int `json:"inputTokens"`
+			OutputTokens    int `json:"outputTokens"`
+			ReasoningTokens int `json:"reasoningTokens"`
+			CacheReadTokens int `json:"cacheReadTokens"`
+		} `json:"normalizedUsage"`
+	}
+	if err := json.Unmarshal([]byte(data), &event); err != nil || event.NormalizedUsage == nil {
+		return dto.Usage{}, false
+	}
+	nu := event.NormalizedUsage
+	usage := dto.Usage{
+		PromptTokens:     nu.InputTokens,
+		CompletionTokens: nu.OutputTokens,
+		TotalTokens:      nu.InputTokens + nu.OutputTokens,
+	}
+	if nu.CacheReadTokens > 0 {
+		usage.PromptTokensDetails = &dto.UsageDetails{CachedTokens: nu.CacheReadTokens}
+	}
+	if nu.ReasoningTokens > 0 {
+		usage.CompletionTokensDetails = &dto.UsageDetails{ReasoningTokens: nu.ReasoningTokens}
+	}
+	return usage, true
+}
+
+func writeOpenAIResponseAsAnthropic(w http.ResponseWriter, resp *http.Response, counter TokenCounter, rmc ResponseModelContext) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -135,207 +209,93 @@ func writeOpenAIResponseAsAnthropic(c *gin.Context, resp *http.Response, counter
 	if rmc.RequestedModel != "" {
 		claudeResp.Model = rmc.RequestedModel
 	}
-	c.JSON(http.StatusOK, claudeResp)
+	if err := writeJSON(w, http.StatusOK, claudeResp); err != nil {
+		return err
+	}
 	return nil
 }
 
-func writeOpenAIStreamAsAnthropic(c *gin.Context, resp *http.Response, counter TokenCounter, requestedModel string) error {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("Transfer-Encoding", "chunked")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
+func writeOpenAIStreamAsAnthropic(w http.ResponseWriter, resp *http.Response, counter TokenCounter, requestedModel string) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("X-Accel-Buffering", "no")
 
-	flusher, ok := c.Writer.(http.Flusher)
+	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming not supported")
 	}
 
+	mapper := newChatToClaudeStreamMapper(requestedModel)
 	reader := bufio.NewReader(resp.Body)
-	messageStarted := false
-	textIndex := -1
-	nextIndex := 0
-	toolIndex := make(map[string]int)
-	stopSent := false
-	messageID := ""
-	model := requestedModel
 
 	for {
 		line, err := reader.ReadString('\n')
-		if err != nil {
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if line == "" && err == io.EOF {
+			break
+		}
+
+		trimmed := strings.TrimSuffix(line, "\n")
+		if !strings.HasPrefix(trimmed, "data: ") {
 			if err == io.EOF {
 				break
 			}
-			return err
-		}
-		line = strings.TrimSuffix(line, "\n")
-		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
+
+		data := strings.TrimPrefix(trimmed, "data: ")
 		if data == "" {
+			if err == io.EOF {
+				break
+			}
 			continue
 		}
+
 		if data == "[DONE]" {
 			break
 		}
 
 		var chunk dto.ChatCompletionChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			// Unmarshal 不会返回 io.EOF；坏帧跳过继续读
 			continue
 		}
 
 		if counter != nil {
 			if sc, ok := counter.(*token.StreamCounter); ok {
-				text := token.ExtractTextFromOpenAIChunk(&chunk)
-				sc.AddOutputText(text)
+				sc.AddOutputText(token.ExtractTextFromOpenAIChunk(&chunk))
 			}
 		}
 
-		if !messageStarted {
-			messageStarted = true
-			if chunk.ID != "" {
-				messageID = chunk.ID
-			} else {
-				messageID = fmt.Sprintf("msg-%d", time.Now().UnixNano())
-			}
-			if requestedModel == "" && chunk.Model != "" {
-				model = chunk.Model
-			}
-			start := dto.ClaudeStreamEvent{
-				Type: "message_start",
-				Message: &dto.ClaudeMessageStart{
-					ID:      messageID,
-					Type:    "message",
-					Role:    "assistant",
-					Model:   model,
-					Content: []dto.ContentBlock{},
-					Usage:   dto.ClaudeUsage{},
-				},
-			}
-			if err := writeAnthropicEvent(c.Writer, start); err != nil {
-				return err
+		events, mapErr := mapper.Map(chunk)
+		if mapErr != nil {
+			return mapErr
+		}
+
+		for _, event := range events {
+			if writeErr := writeAnthropicEvent(w, event); writeErr != nil {
+				return writeErr
 			}
 			flusher.Flush()
 		}
 
-		if len(chunk.Choices) == 0 || chunk.Choices[0].Delta == nil {
-			continue
-		}
-		delta := chunk.Choices[0].Delta
-
-		if delta.Content != "" {
-			if textIndex == -1 {
-				textIndex = nextIndex
-				nextIndex++
-				start := dto.ClaudeStreamEvent{
-					Type:  "content_block_start",
-					Index: textIndex,
-					ContentBlock: &dto.ContentBlock{
-						Type: "text",
-						Text: "",
-					},
-				}
-				if err := writeAnthropicEvent(c.Writer, start); err != nil {
-					return err
-				}
-				flusher.Flush()
-			}
-			deltaEvent := dto.ClaudeStreamEvent{
-				Type:  "content_block_delta",
-				Index: textIndex,
-				Delta: &dto.ClaudeDelta{Type: "text_delta", Text: delta.Content},
-			}
-			if err := writeAnthropicEvent(c.Writer, deltaEvent); err != nil {
-				return err
-			}
-			flusher.Flush()
-		}
-
-		if len(delta.ToolCalls) > 0 {
-			for _, tc := range delta.ToolCalls {
-				idx, ok := toolIndex[tc.ID]
-				if !ok {
-					idx = nextIndex
-					nextIndex++
-					toolIndex[tc.ID] = idx
-					start := dto.ClaudeStreamEvent{
-						Type:  "content_block_start",
-						Index: idx,
-						ContentBlock: &dto.ContentBlock{
-							Type:  "tool_use",
-							ID:    tc.ID,
-							Name:  tc.Function.Name,
-							Input: map[string]any{},
-						},
-					}
-					if err := writeAnthropicEvent(c.Writer, start); err != nil {
-						return err
-					}
-					flusher.Flush()
-				}
-				if tc.Function.Arguments != "" {
-					deltaEvent := dto.ClaudeStreamEvent{
-						Type:  "content_block_delta",
-						Index: idx,
-						Delta: &dto.ClaudeDelta{Type: "input_json_delta", PartialJSON: &tc.Function.Arguments},
-					}
-					if err := writeAnthropicEvent(c.Writer, deltaEvent); err != nil {
-						return err
-					}
-					flusher.Flush()
-				}
-			}
-		}
-
-		if chunk.Choices[0].FinishReason != nil {
-			if textIndex != -1 {
-				stop := dto.ClaudeStreamEvent{Type: "content_block_stop", Index: textIndex}
-				if err := writeAnthropicEvent(c.Writer, stop); err != nil {
-					return err
-				}
-				flusher.Flush()
-			}
-			for _, idx := range toolIndex {
-				stop := dto.ClaudeStreamEvent{Type: "content_block_stop", Index: idx}
-				if err := writeAnthropicEvent(c.Writer, stop); err != nil {
-					return err
-				}
-				flusher.Flush()
-			}
-
-			stopReason := finishReasonToStopReason(*chunk.Choices[0].FinishReason)
-			deltaEvent := dto.ClaudeStreamEvent{Type: "message_delta", Delta: &dto.ClaudeDelta{StopReason: stopReason}}
-			if err := writeAnthropicEvent(c.Writer, deltaEvent); err != nil {
-				return err
-			}
-			flusher.Flush()
-
-			stopEvent := dto.ClaudeStreamEvent{Type: "message_stop"}
-			if err := writeAnthropicEvent(c.Writer, stopEvent); err != nil {
-				return err
-			}
-			flusher.Flush()
-			stopSent = true
+		if err == io.EOF {
+			break
 		}
 	}
 
-	if !stopSent {
-		if textIndex != -1 {
-			stop := dto.ClaudeStreamEvent{Type: "content_block_stop", Index: textIndex}
-			if err := writeAnthropicEvent(c.Writer, stop); err != nil {
-				return err
-			}
-		}
-		for _, idx := range toolIndex {
-			stop := dto.ClaudeStreamEvent{Type: "content_block_stop", Index: idx}
-			if err := writeAnthropicEvent(c.Writer, stop); err != nil {
-				return err
-			}
-		}
-		stopEvent := dto.ClaudeStreamEvent{Type: "message_stop"}
-		if err := writeAnthropicEvent(c.Writer, stopEvent); err != nil {
-			return err
+	// 流结束，调用 Flush 发送剩余的 message_stop
+	events, flushErr := mapper.Flush()
+	if flushErr != nil {
+		return flushErr
+	}
+	for _, event := range events {
+		if writeErr := writeAnthropicEvent(w, event); writeErr != nil {
+			return writeErr
 		}
 		flusher.Flush()
 	}
