@@ -36,7 +36,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build binary
+      - name: Build binaries
         run: |
           mkdir -p dist
           ext=""
@@ -46,6 +46,11 @@ jobs:
             -ldflags="-s -w" \
             -o dist/oh-my-api-${{ matrix.goos }}-${{ matrix.goarch }}${ext} \
             ./cmd/oh-my-api
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build \
+            -trimpath \
+            -ldflags="-s -w" \
+            -o dist/oh-my-api-bridge-${{ matrix.goos }}-${{ matrix.goarch }}${ext} \
+            ./cmd/oh-my-api-bridge
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2

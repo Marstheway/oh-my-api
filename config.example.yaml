@@ -186,6 +186,10 @@ model_groups:
       - "openai/gpt-4o"
       - "openrouter/openai/gpt-4o"
 
+  # redirect 别名 `fast` 的目标模型组（单模型直连）
+  - name: "gpt-4o-fast"
+    model: "openai/gpt-4o"
+
   # 隐藏内部实现，仅通过 redirect 暴露别名（不可外部直调，仅被 redirect 引用）
   - name: "claude-fast"
     mode: "concurrent"

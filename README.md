@@ -207,7 +207,7 @@ go test ./...
 go test -v ./internal/codec/
 ```
 
-构建产物输出到 `bin/`。GitHub Actions 会在 push/PR 时运行 `go test ./...`；推送 `v*` tag 时构建并发布多平台 `oh-my-api` 二进制。根目录 [Dockerfile](./Dockerfile) 可用于构建容器镜像。
+构建产物输出到 `bin/`。GitHub Actions 会在 push/PR 时运行 `go test ./...`；推送 `v*` tag 时构建并发布多平台的 `oh-my-api` 与 `oh-my-api-bridge` 二进制。根目录 [Dockerfile](./Dockerfile) 可用于构建容器镜像。
 
 ## License
 
